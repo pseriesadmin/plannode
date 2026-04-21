@@ -1,6 +1,6 @@
 # Plannode — AI 기획 도구 for PSeries
 
-**통합 진행 가이드**(로컬 UI·로직 검증 → Git·Vercel·Supabase 배포): [`PLANNODE_INTEGRATED_GUIDE.md`](./PLANNODE_INTEGRATED_GUIDE.md)
+**개발·배포 통합 가이드**(기능 보완 → Git·Supabase·Vercel): [`PLANNODE_INTEGRATED_GUIDE.md`](./PLANNODE_INTEGRATED_GUIDE.md)
 
 ## 개요
 **Plannode**는 노드 트리 기반 기획 구조 작성 도구입니다. 프로젝트 기능 맵을 시각적으로 설계하고, PRD/기능명세서/IA 마크다운을 자동 생성합니다.
@@ -14,16 +14,13 @@
 ## 파일 구조
 
 ```
-plannode-deploy/
+plannode/                          ← 이 저장소(프로젝트 루트)
 ├── index.html                    ← 메인 HTML (UI + 스타일)
 ├── plannode.js                   ← 메인 로직 (DOM 조작 + 상태 관리)
 ├── README.md                     ← 이 파일
 ├── AGENTS.md                     ← Cursor 에이전트·유지보수 분업 안내
 ├── .cursor/rules/*.mdc           ← Cursor Rules (항상·파일별 규칙)
-├── PLANNODE_INTEGRATED_GUIDE.md  ← 로컬 테스트 → 배포까지 통합 진행 순서
-├── PLANNODE_DEPLOY_GUIDE.md      ← 실서비스 배포 상세(SQL·Vercel·DNS 등)
-├── LOCAL_TEST_GUIDE.md           ← 로컬 테스트 체크리스트
-└── DEPLOY.md                     ← 배포 절차(레거시 참고)
+└── PLANNODE_INTEGRATED_GUIDE.md  ← 기능 보완 → Git · Supabase(DB) · Vercel · DNS
 ```
 
 ---
@@ -32,7 +29,7 @@ plannode-deploy/
 
 ### 방법 1: 간단한 HTTP 서버 (권장)
 ```bash
-cd plannode-deploy
+cd plannode
 python3 -m http.server 8000
 # 또는
 python -m http.server 8000
@@ -110,7 +107,7 @@ git push -u origin main
 1. `vercel.com/pseries` 접속
 2. "Add New" → GitHub repo 선택: `pseriesadmin/plannode`
 3. Framework: **Other** (Custom)
-4. Deploy 클릭 → `plannode-deploy.vercel.app` 자동 할당
+4. Deploy 클릭 → Vercel이 프로젝트명 기반 `*.vercel.app` 미리보기 URL 자동 할당
 
 ### STEP 3 — 커스텀 도메인 추가
 1. Vercel 프로젝트 Settings → Domains

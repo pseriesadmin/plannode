@@ -12,7 +12,7 @@ alwaysApply: true
 ## 유지보수 시
 
 - 요청 범위 밖 파일은 수정하지 않는다. 스타일·패턴은 기존 파일과 통일한다.
-- Supabase·Vercel·DNS·RLS 변경은 `PLANNODE_DEPLOY_GUIDE.md` 및 환경 변수 영향을 함께 검토한다.
+- Supabase·Vercel·DNS·RLS 변경은 `PLANNODE_INTEGRATED_GUIDE.md` 및 환경 변수 영향을 함께 검토한다.
 
 ## 서브에이전트·Task 활용
 

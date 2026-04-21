@@ -12,9 +12,7 @@
 
 ## 사람(운영자) 체크포인트
 
-- 로컬 검증 후 배포: `PLANNODE_INTEGRATED_GUIDE.md`
-- DB·호스팅 세부: `PLANNODE_DEPLOY_GUIDE.md`
-- 로컬 QA 체크리스트: `LOCAL_TEST_GUIDE.md`
+- 기능 보완 이후 Git·Supabase·Vercel: `PLANNODE_INTEGRATED_GUIDE.md`
 
 ## 서브에이전트 결과 사용 시
 
