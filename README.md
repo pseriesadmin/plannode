@@ -1,5 +1,7 @@
 # Plannode — AI 기획 도구 for PSeries
 
+*Pseries internal planning tool — Node tree PRD interface*
+
 **개발·배포 통합 가이드**(기능 보완 → Git·Supabase·Vercel): [`PLANNODE_INTEGRATED_GUIDE.md`](./PLANNODE_INTEGRATED_GUIDE.md)
 
 ## 개요
