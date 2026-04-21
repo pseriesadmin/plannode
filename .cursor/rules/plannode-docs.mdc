@@ -1,0 +1,11 @@
+---
+description: Markdown 가이드·README 유지보수
+globs: "**/*.md"
+alwaysApply: false
+---
+
+# 문서
+
+- 단일 진입: 로컬→배포 순서는 `PLANNODE_INTEGRATED_GUIDE.md`. 상세 SQL·Vercel·DNS는 `PLANNODE_DEPLOY_GUIDE.md`에 두고 통합본에 장문 복붙하지 않는다.
+- `README.md`의 파일 구조 목록을 바꿀 만한 문서를 추가·이동하면 목록을 갱신한다.
+- `CURSOR_AI_SETUP_GUIDE.md`는 Cursor 입문용; 배포 본편과 중복되는 절은 한쪽으로만 유지하고 나머지는 링크로 연결한다.

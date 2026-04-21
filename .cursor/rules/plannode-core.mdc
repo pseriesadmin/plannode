@@ -1,0 +1,22 @@
+---
+description: Plannode 프로젝트 컨텍스트·유지보수·에이전트 분업 원칙
+alwaysApply: true
+---
+
+# Plannode 코어
+
+- 스택: Vanilla HTML/CSS/JS (`index.html`, `plannode.js`). 빌드 도구 없이 동작하는 것이 기본 전제.
+- 진행 순서·단계별 참고: 저장소 루트의 `PLANNODE_INTEGRATED_GUIDE.md`를 우선한다.
+- 문서와 코드가 어긋나면 가이드/README 또는 코드 중 한쪽을 명시적으로 맞춘다(묵시적 불일치 유지 금지).
+
+## 유지보수 시
+
+- 요청 범위 밖 파일은 수정하지 않는다. 스타일·패턴은 기존 파일과 통일한다.
+- Supabase·Vercel·DNS·RLS 변경은 `PLANNODE_DEPLOY_GUIDE.md` 및 환경 변수 영향을 함께 검토한다.
+
+## 서브에이전트·Task 활용
+
+- **넓은 탐색**(폴더 구조, 여러 파일에 걸친 동작): Task `explore`로 위임하고, 결과만 요약해 반영한다.
+- **CLI·배포·git·장시간 명령**: Task `shell` 또는 터미널 도구를 쓰고, 실패 시 대안을 시도한다.
+- 한 턴에서 동시에 여러 독립 탐색이 필요하면 병렬 Task를 고려한다.
+- 서브에이전트 ID·내부 로그는 사용자에게 노출하지 않는다.
