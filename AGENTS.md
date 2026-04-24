@@ -1,20 +1,188 @@
-# Plannode — 에이전트 · 유지보수
+# AGENTS.md — Plannode
+# Harness Flow v1.0 (Plannode 전용 적용)
+# 역할: 프로젝트 정체성 + 도메인 규칙 선언
 
-이 저장소는 Cursor Rules(`.cursor/rules/*.mdc`)와 함께 사용한다.
+---
 
-## 역할 분리
+## 🏗️ 프로젝트 정체성
 
-| 목적 | 권장 도구 |
-|------|-----------|
-| 코드베이스 넓게 훑기, 어디서 무엇이 처리되는지 | Task **explore** |
-| 배포·git·npm·장시간 셸 작업 | Task **shell** 또는 내장 터미널 |
-| 규칙·문서만 갱신 | 채팅에서 직접 편집 |
+```
+서비스명   : Plannode (plannode.pseries.net)
+성격       : 노드 트리 기반 기획·PRD 작성 툴 (1인 내부 플래닝 도구)
+개발방식   : 1인 AI 에이전틱 코딩 | Cursor AI | Harness Flow v1.0
+스택       : Vanilla HTML/CSS/JS (index.html + plannode.js) → SvelteKit 이행 중
+             Supabase (PostgreSQL + Auth + RLS) | Vercel | 가비아 DNS
+현재 단계  : 파일럿(Vanilla) 기능 검증 완료 → SvelteKit 포팅·Supabase 연동 진행 중
+```
 
-## 사람(운영자) 체크포인트
+---
 
-- 기능 보완 이후 Git·Supabase·Vercel: `PLANNODE_INTEGRATED_GUIDE.md`
+## 📚 문서 위계 (에이전트·기획·개발 공통)
 
-## 서브에이전트 결과 사용 시
+| 구분 | 문서 | 용도 |
+|------|------|------|
+| **제품 진실(단일 기준)** | `.cursor/rules/plannode-prd.mdc` | M1~M6, F#-#, Phase, IA≠AI, LLM(§10), v2 DB·4-레이어·성공기준(§7) — **“무엇·왜·어느 단계”** |
+| **파일럿 기준(동작·포팅)** | `docs/PILOT_FUNCTIONAL_SPEC.md` | `index.html`+`plannode.js` 분해, SvelteKit **정합·갭(§9~§10)** |
+| **배포·인프라** | `.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md` | Git, Supabase, Vercel, DNS |
+| **절차(하네스)** | `AGENTS.md` + `.cursor/harness/*` + `.cursor/agents/*` | @promptor → TASK.md → @harness-executor → @qa, GATE — **“어떻게 작업·검수”** |
+| **워크플로 시각화(가이드)** | `.cursor/plans/harness-workflow_final.md` | 1teamworks `harness-workflow_final`와 **동일 뼈대** — 모드·GATE·복붙·Mermaid **한 눈** |
 
-- 최종 답변에는 결론과 변경 파일만 간결히 전달한다.
-- 동일 작업을 여러 에이전트에 중복 시키지 않는다(범위를 나눈다).
+**PRD vs 하네스:** `plannode-prd.mdc`는 제품·범위의 기준; 하네스는 **그 PRD에 맞는 작업을** 분해·승인·로그로 묶는다. `plan-output.md`·`TASK.md`에는 **PRD 연계**로 모듈·기능 ID·(해당 시) PRD 절(예: §3 F2-4, §10)을 적는다.
+
+---
+
+## ⚖️ 황금 원칙 (모든 에이전트 공통 적용)
+
+```
+GP-1.  git 명령어는 Stephen만 직접 실행 (add / commit / push 전부)
+GP-2.  모든 GATE 전환은 Stephen의 명시적 승인 후에만 진행
+GP-3.  AI는 제안·실행, 결정은 Stephen
+GP-4.  DB 스키마 변경은 반드시 신규 마이그레이션 파일 추가 (기존 SQL 수정 금지)
+GP-5.  30분 초과 GSD 태스크는 분해 후 재승인
+GP-6.  불확실하면 즉시 멈추고 Stephen에게 질문
+GP-7.  명시 범위 밖 기능 선제 구현 금지
+GP-8.  컨텍스트 리셋 요청 시 TASK.md·plan-output.md 즉시 재로드
+GP-9.  Supabase anon 키·서비스 키는 절대 클라이언트 코드에 직접 노출 금지
+GP-10. 파일럿(Vanilla) 동작 기준을 SvelteKit 포팅 정합성 체크의 기준으로 삼는다
+       → 기능·UX 불일치 발견 시 docs/PILOT_FUNCTIONAL_SPEC.md §9~§10 체크리스트 참조
+GP-11. 제품 범위·로드맵·“IA(정보 구조) vs LLM(F2-5)” 구분은 .cursor/rules/plannode-prd.mdc 를 우선한다.
+       아젠다·plan-output·TASK.md에는 PRD 추적용으로 M#·F#-# (및 필요 시 PRD 절)을 1줄씩 남긴다.
+       PRD·파일럿·통합 가이드가 충돌하면 불일치를 먼저 밝히고 조정한다.
+```
+
+---
+
+## 🔴 Plannode GSD 전용 도메인
+
+Plannode 파일럿은 결제·동시성·권한 로직이 없으므로 **모든 태스크가 GSD 기본**이다.
+아래 영역에 한해 주의 강화 체크를 적용한다.
+
+```
+캔버스·렌더링  : transform / panX / panY / scale / drawEdges / layoutEngine
+노드 구조      : addChild / cDel / getDepth / parent_id / num 계산 / lm 재계산
+Supabase 연동  : plan_projects / plan_nodes RLS 정책 · owner_id 일치 여부
+SvelteKit 이행 : store 계약 / 컴포넌트 바인딩 / 파일럿 갭 분석(§9)
+```
+
+### 주의 강화 체크 (GATE C 포함)
+
+```
+캔버스 변경 시:
+□ SVG(#EG)와 노드 DOM이 동일 transform 컨테이너 안에 있는가?
+□ 줌·패닝 좌표계가 파일럿 applyTx() 방식과 일치하는가?
+□ drawEdges / updMM 호출 타이밍이 파일럿과 동일한가?
+
+노드 구조 변경 시:
+□ addChild 후 편집 모달 자동 오픈 여부를 결정했는가?
+□ parent_id 체인 순환 방지 로직이 있는가?
+□ lm(레이아웃 맵)이 render() 마다 재계산되는가?
+
+Supabase 연동 변경 시:
+□ owner_id가 auth.uid() 기반인가? (하드코딩 UUID 금지)
+□ RLS 정책이 plan_projects·plan_nodes에 모두 활성화되어 있는가?
+□ 환경 변수 VITE_SUPABASE_URL·ANON_KEY가 .env.local에만 존재하는가?
+```
+
+---
+
+## 🚫 Plannode 절대 금지 패턴
+
+```javascript
+// ❌ owner_id 하드코딩 (RLS 우회·인증 불일치)
+supabase.from('plan_projects').insert({ owner_id: 'some-fixed-uuid', ... })
+
+// ❌ SVG를 노드 DOM 컨테이너 밖 형제 레이어로 배치 (줌 불일치)
+// → SVG(#EG)는 반드시 #CV(transform 대상) 내부에 위치해야 한다
+
+// ❌ render() 없이 직접 DOM 노드 좌표만 갱신 (간선·미니맵 미동기)
+nodeEl.style.left = x + 'px'  // drawEdges() + updMM() 없이
+
+// ❌ parent_id에 프로젝트 ID 사용 (노드 id 체계와 혼용)
+addNodeChild($currentProject.id)  // 루트 노드 id를 써야 함
+
+// ❌ nodes 배열에 빈 배열 저장 후 루트 자동 생성 로직 미실행
+localStorage.setItem(key, '[]')  // openProj 후 루트 노드 미생성
+```
+
+---
+
+## 📋 도메인 규칙 파일 목록
+
+```
+.cursor/rules/
+├── plannode-core.mdc           ← alwaysApply: 프로젝트 컨텍스트·에이전트 원칙
+├── plannode-architecture.mdc   ← alwaysApply: 기능 구조·데이터 흐름·파일럿 브리지·Supabase 연동 표준
+├── plannode-ui-identity.mdc    ← UI 색·타이포·반응형·레이어·카피 톤 표준
+├── plannode-prd.mdc            ← 제품 요구(M/F/Phase, IA/와이어, LLM §10, v2 DB) — @promptor·TASK·QA가 추적
+├── plannode-web.mdc            ← Vanilla HTML/JS + Svelte/CSS 편집 시 스택 규칙
+└── plannode-docs.mdc           ← 문서 유지보수 규칙
+```
+
+---
+
+## 🤖 에이전트 호출 순서
+
+```
+STEP 1  아젠다 정의 (Ask 모드)                          👤 Stephen
+         ↓
+STEP 2  @promptor → plan-output.md 저장 (Agent 모드)    🤖 Haiku 4.5
+         ↓
+GATE A  계획 승인                                        👤 Stephen
+         ↓
+STEP 3  Plan Mode → TASK.md 작성 (Plan 모드 / Composer2) 🤖
+         ↓
+GATE B  TASK.md NOW 확정                                 👤 Stephen
+         ↓
+STEP 4  @harness-executor → NOW 루프 (Agent / Haiku 4.5)  🤖
+         ↓
+GATE C  NOW마다 구현 검증                                👤 Stephen
+         ↓
+GATE D  전체 구현 확인                                   👤 Stephen
+         ↓
+STEP 5  @qa 검수 (Agent / Haiku 4.5)                     🤖
+         ↓
+GATE E  최종 확인 → 커밋 허가 → git commit               👤 Stephen
+```
+
+> **경량모드**: 단일 파일·UI 수정·버그 수정 → Step2(@promptor)·GATE A 생략 가능.
+> TASK.md 상단에 `경량 경로: step2·GATE A 생략` 한 줄 추가 후 GATE B 진입.
+
+---
+
+## 📁 디렉토리 구조
+
+```
+plannode/
+├── AGENTS.md                       ← 이 파일 (프로젝트 전용 정체성·원칙)
+├── index.html                      ← 파일럿 (기준 UX)
+├── plannode.js                     ← 파일럿 로직 (기준 행동 명세)
+├── docs/
+│   ├── PILOT_FUNCTIONAL_SPEC.md    ← 파일럿 기능 분해 (포팅 기준 문서)
+│   └── 하네스 워크플로우 update/   ← 하네스 원본 참조 문서
+├── src/                            ← SvelteKit 구현 진행 중
+├── .cursor/
+│   ├── harness/
+│   │   ├── README.md               ← 폴더 역할·DB 절·운영 원칙
+│   │   ├── TASK.md                 ← 현재 스프린트 태스크 (AI 자동 갱신)
+│   │   ├── plan-output.md          ← @promptor 출력 (GATE A 확정본)
+│   │   ├── GSD_LOG.md              ← 실행 이력
+│   │   └── context-hook.md         ← 컨텍스트 드리프트 방지 훅
+│   ├── agents/
+│   │   ├── harness-executor.md     ← Step4 실행 에이전트
+│   │   ├── promptor.md             ← Step2 플래너 에이전트
+│   │   └── qa.md                   ← Step5 QA 에이전트
+│   ├── rules/
+│   │   ├── plannode-core.mdc
+│   │   ├── plannode-architecture.mdc ← 구현 아키텍처·데이터 흐름 표준
+│   │   ├── plannode-ui-identity.mdc  ← UI 아이덴티티 표준
+│   │   ├── plannode-prd.mdc          ← PRD(제품 진실)
+│   │   ├── plannode-web.mdc
+│   │   └── plannode-docs.mdc
+│   └── plans/
+│       └── PLANNODE_INTEGRATED_GUIDE.md ← Git·Supabase·Vercel·DNS 가이드
+└── .env.local                      ← 환경 변수 (Git 제외)
+```
+
+---
+
+*AGENTS.md | Plannode | Harness Flow v1.0 | 2026.04*
