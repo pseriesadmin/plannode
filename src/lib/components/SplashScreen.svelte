@@ -1,10 +1,5 @@
-<script lang="ts">
-  /** fullscreen: 첫 로드 SSR·스플래시. overlay: 메인 앱 위 클라우드 저장 중 */
-  export let variant: 'fullscreen' | 'overlay' = 'fullscreen';
-</script>
-
-<!-- 로고·쉬머만 — 박스·배경 없이 정중앙, 투명 -->
-<div class="splash" class:splash--overlay={variant === 'overlay'}>
+<!-- 인트로: 하이드레이션·인증 로딩 — 로고·쉬머만 정중앙 -->
+<div class="splash">
   <div class="splash-inner">
     <div class="splash-brand">
       <svg
@@ -65,7 +60,7 @@
     </div>
     <div class="splash-load" aria-busy="true" aria-live="polite">
       <span class="splash-shimmer"></span>
-      <span class="visually-hidden">{variant === 'overlay' ? '클라우드에 저장하는 중' : '불러오는 중'}</span>
+      <span class="visually-hidden">불러오는 중</span>
     </div>
   </div>
 </div>
@@ -81,18 +76,6 @@
     color: #111;
   }
 
-  /* 클라우드 저장: 정중앙·투명 — 클릭은 뒤로 통과 */
-  .splash--overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 10000;
-    min-height: 0;
-    height: 100%;
-    width: 100%;
-    background: transparent;
-    pointer-events: none;
-  }
-
   .splash-inner {
     display: flex;
     flex-direction: column;
@@ -101,7 +84,6 @@
     padding: 0;
     width: fit-content;
     max-width: calc(100vw - 2rem);
-    pointer-events: none;
   }
 
   .splash-brand {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import {
     projects,
@@ -8,7 +8,8 @@
     showProjectModal,
     createProject,
     upsertImportedPlannodeTreeV1,
-    updateProjectMeta
+    updateProjectMeta,
+    deleteProject
   } from '$lib/stores/projects';
   import { parsePlannodeTreeV1Json } from '$lib/plannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
@@ -21,12 +22,15 @@
     ensureOwnerAclRowForMyProject,
     repairOwnedProjectsAclWorkspaceSources,
     openAclModal,
+    closeAclModal,
     showAclModal,
     aclModalProject,
     fetchMyAclInviteSummaries,
     importSharedProjectFromWorkspace,
     autoLoadInvitedProjects,
     fetchProjectAcl,
+    isCurrentUserProjectOwner,
+    deleteAllAclRowsForProjectIfOwner,
     type AclInviteSummary
   } from '$lib/supabase/projectAcl';
   import {
@@ -296,6 +300,44 @@
     showProjectModal.set(false);
   }
 
+  /** 프로젝트 모달: 모바일에서 스크롤바 대신 하단 힌트 */
+  let projectModalEl: HTMLDivElement | undefined;
+  let projectModalScrollHint = false;
+
+  function isProjectModalMobileViewport(): boolean {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+
+  function syncProjectModalScrollHint() {
+    const el = projectModalEl;
+    if (!el || !get(showProjectModal)) {
+      projectModalScrollHint = false;
+      return;
+    }
+    if (!isProjectModalMobileViewport()) {
+      projectModalScrollHint = false;
+      return;
+    }
+    const gap = 16;
+    const hasOverflow = el.scrollHeight > el.clientHeight + 2;
+    const notAtBottom = el.scrollTop + el.clientHeight < el.scrollHeight - gap;
+    projectModalScrollHint = hasOverflow && notAtBottom;
+  }
+
+  function scrollProjectModalDown() {
+    const el = projectModalEl;
+    if (!el) return;
+    el.scrollBy({ top: Math.min(120, el.scrollHeight - el.clientHeight - el.scrollTop), behavior: 'smooth' });
+    window.setTimeout(() => syncProjectModalScrollHint(), 350);
+  }
+
+  $: if ($showProjectModal) {
+    void $projects.length;
+    void aclInviteRows.length;
+    tick().then(() => requestAnimationFrame(() => syncProjectModalScrollHint()));
+  }
+
   async function loadAclInvitesForModal() {
     if (!cloudSyncAvailable) {
       aclInviteRows = [];
@@ -313,6 +355,77 @@
 
   $: aclProjectIdSet = new Set(aclInviteRows.map((r) => r.project_id));
   $: invitedRemoteOnly = aclInviteRows.filter((r) => !$projects.some((p) => p.id === r.project_id));
+
+  /** 모달에서 카드별 삭제 버튼 표시용(ACL·플랫폼 마스터 등 owner_user_id만으로는 모르는 경우) */
+  let projectDeletableById: Record<string, boolean> = {};
+  let deleteFlagsLoadGen = 0;
+  let deletingProjectId = '';
+
+  async function loadProjectDeleteFlags() {
+    const uid = getAuthUserId();
+    if (!$showProjectModal || !uid) {
+      projectDeletableById = {};
+      return;
+    }
+    // 재오픈·계정 전환 직전 스냅샷으로 비소유 카드에 삭제가 잠깐(또는 계속) 뜨는 것 방지
+    projectDeletableById = {};
+    const gen = ++deleteFlagsLoadGen;
+    const plist = get(projects);
+    const entries = await Promise.all(
+      plist.map(async (p) => [p.id, await isCurrentUserProjectOwner(p)] as const)
+    );
+    if (gen !== deleteFlagsLoadGen || !$showProjectModal) return;
+    projectDeletableById = Object.fromEntries(entries);
+  }
+
+  /** 모달이 열려 있을 때만 갱신; auth·목록 변화에도 재조회 */
+  $: if ($showProjectModal) {
+    $authUser?.id;
+    $projects;
+    void loadProjectDeleteFlags();
+  }
+
+  $: if (!$showProjectModal) {
+    projectDeletableById = {};
+    deleteFlagsLoadGen++;
+  }
+
+  function canShowProjectDelete(proj: Project): boolean {
+    const uid = getAuthUserId();
+    if (!uid) return false;
+    if (proj.owner_user_id === uid) return true;
+    return projectDeletableById[proj.id] === true;
+  }
+
+  async function handleDeleteProjectCard(proj: Project) {
+    if (!canShowProjectDelete(proj)) return;
+    if (
+      !confirm(
+        `「${proj.name}」프로젝트를 이 기기에서 삭제할까?\n\n로컬 데이터와(클라우드 연 시) 접근 허용 목록이 함께 지워져. 이 작업은 되돌릴 수 없어.`
+      )
+    ) {
+      return;
+    }
+    deletingProjectId = proj.id;
+    try {
+      const aclR = await deleteAllAclRowsForProjectIfOwner(proj);
+      if (!aclR.ok) {
+        alert(aclR.message ?? '접근 정보를 지우지 못했어. 잠시 후 다시 시도해줘.');
+        return;
+      }
+      if (get(aclModalProject)?.id === proj.id) {
+        closeAclModal();
+      }
+      deleteProject(proj.id);
+      if (cloudSyncAvailable) {
+        scheduleCloudFlush('delete-project', 100);
+      }
+      showPilotToast('프로젝트를 삭제했어.');
+      await loadAclInvitesForModal();
+    } finally {
+      deletingProjectId = '';
+    }
+  }
 
   async function handleImportInvited(inv: AclInviteSummary) {
     if (!inv.workspace_source_user_id) {
@@ -534,6 +647,7 @@
     }
   }}
   on:mousedown={onToolbarMenusOutside}
+  on:resize={syncProjectModalScrollHint}
 />
 
 <div id="root">
@@ -962,21 +1076,54 @@
     {/if}
 
     {#if $showProjectModal}
-      <div class="mbg">
-        <div class="mo mo-wide">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="mbg" role="presentation" on:click|self={closeModal}>
+        <div class="mo mo-wide pm-scroll pm-proj-shell">
+          <div class="pm-proj-head">
             <h3 style="margin:0">프로젝트 관리</h3>
             <button type="button" class="mcl" on:click={closeModal}>✕</button>
           </div>
-          <p class="mod-sub">새 프로젝트를 만들거나, 이 기기 목록에서 열고, 초대받은 프로젝트는 클라우드에서 불러올 수 있어.</p>
-          <div style="display:flex;flex-direction:column;gap:10px">
-            <div><span class="fl">프로젝트 이름 *</span><input class="fi" bind:value={projectName} placeholder="예: 크레이지샷 리뉴얼 2026" /></div>
-            <div><span class="fl">작성자 *</span><input class="fi" bind:value={projectAuthor} placeholder="예: Stephen Cconzy" /></div>
+          <div
+            class="pm-proj-body"
+            bind:this={projectModalEl}
+            on:scroll={syncProjectModalScrollHint}
+          >
+          <div class="proj-form-col">
+            <input
+              class="fi"
+              bind:value={projectName}
+              placeholder="프로젝트 이름 *"
+              aria-label="프로젝트 이름"
+            />
+            <input
+              class="fi"
+              bind:value={projectAuthor}
+              placeholder="작성자 *"
+              aria-label="작성자"
+            />
             <div class="fg">
-              <div><span class="fl">시작일 *</span><input class="fi" type="date" bind:value={projectStart} /></div>
-              <div><span class="fl">종료일 *</span><input class="fi" type="date" bind:value={projectEnd} /></div>
+              <input
+                class="fi"
+                type="date"
+                bind:value={projectStart}
+                placeholder="시작일"
+                aria-label="시작일"
+              />
+              <input
+                class="fi"
+                type="date"
+                bind:value={projectEnd}
+                placeholder="종료일"
+                aria-label="종료일"
+              />
             </div>
-            <div><span class="fl">설명</span><textarea class="fi" bind:value={projectDesc} rows="2" style="resize:vertical" placeholder="간단한 설명" /></div>
+            <textarea
+              class="fi"
+              bind:value={projectDesc}
+              rows="2"
+              style="resize:vertical"
+              placeholder="설명"
+              aria-label="설명"
+            ></textarea>
             <button type="button" class="bcr" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
             <div class="proj-json-import">
               <input
@@ -1006,26 +1153,83 @@
             {/if}
             <div id="PLC" data-svelte-managed="1">
               {#each $projects as proj}
-                <div class="prow" class:prow-shared={aclProjectIdSet.has(proj.id)}>
-                  <button
-                    type="button"
-                    class="pc"
-                    class:acp={$currentProject?.id === proj.id}
-                    class:pc-shared={aclProjectIdSet.has(proj.id)}
-                    on:click={() => void handleProjectSelect(proj)}
+                <div class="prow">
+                  <div
+                    class="pcard"
+                    class:pcard-acp={$currentProject?.id === proj.id}
+                    class:pcard-shared={aclProjectIdSet.has(proj.id)}
                   >
-                    <div class="pi" style:background={$currentProject?.id === proj.id ? '#6b4ef6' : '#ede9fe'}>📁</div>
-                    <div class="pif">
-                      <div class="pn2">{proj.name}</div>
-                      <div class="pm2">{proj.author}{aclProjectIdSet.has(proj.id) ? ' · 접근 허용됨' : ''}</div>
-                    </div>
-                    {#if $currentProject?.id === proj.id}
-                      <span class="ct">현재</span>
+                    {#if canShowProjectDelete(proj)}
+                      <button
+                        type="button"
+                        class="pdl"
+                        title={`「${proj.name}」 삭제`}
+                        aria-label={`「${proj.name}」 삭제`}
+                        disabled={deletingProjectId === proj.id}
+                        on:click|stopPropagation={() => void handleDeleteProjectCard(proj)}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="27"
+                          height="28"
+                          viewBox="0 0 27 28"
+                          fill="none"
+                          class="pdl-svg"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <ellipse cx="13.4485" cy="14" rx="13.4485" ry="14" fill="#FF6969" />
+                          <path
+                            d="M17.2909 14L9.60606 14"
+                            stroke="white"
+                            stroke-width="3"
+                            stroke-linecap="round"
+                          />
+                        </svg>
+                      </button>
                     {/if}
-                  </button>
-                  {#if cloudSyncAvailable}
-                    <button type="button" class="pacl" title="접근 허용 이메일" on:click={() => openAclForProject(proj)}>접근</button>
-                  {/if}
+                    <button
+                      type="button"
+                      class="pc"
+                      on:click={() => void handleProjectSelect(proj)}
+                    >
+                      <div class="pi" style:background={$currentProject?.id === proj.id ? '#6b4ef6' : '#ede9fe'}>📁</div>
+                      <div class="pif">
+                        <div class="pn2">{proj.name}</div>
+                        <div class="pm2">{proj.author}{aclProjectIdSet.has(proj.id) ? ' · 접근 허용됨' : ''}</div>
+                      </div>
+                      {#if $currentProject?.id === proj.id}
+                        <span class="ct">현재</span>
+                      {/if}
+                    </button>
+                    {#if cloudSyncAvailable}
+                      <button
+                        type="button"
+                        class="pacl"
+                        title={`「${proj.name}」 접근 허용 · 이메일 설정`}
+                        aria-label={`「${proj.name}」 접근 허용 이메일 설정`}
+                        on:click|stopPropagation={() => openAclForProject(proj)}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="36"
+                          height="36"
+                          viewBox="0 0 36 36"
+                          fill="none"
+                          class="pacl-svg"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <path
+                            fill-rule="evenodd"
+                            clip-rule="evenodd"
+                            d="M18 0C27.9411 0 36 8.05887 36 18C36 27.9411 27.9411 36 18 36C8.05887 36 0 27.9411 0 18C0 8.05887 8.05887 0 18 0ZM12.9463 13C10.2018 13 8 15.2514 8 18C8 20.7486 10.2018 23 12.9463 23H16C16.5523 23 17 22.5523 17 22C17 21.4477 16.5523 21 16 21H12.9463C11.3319 21 10 19.6697 10 18C10 16.3303 11.3319 15 12.9463 15H16C16.5523 15 17 14.5523 17 14C17 13.4477 16.5523 13 16 13H12.9463ZM20 13C19.4477 13 19 13.4477 19 14C19 14.5523 19.4477 15 20 15H23.0537C24.6681 15.0001 26 16.3304 26 18C26 19.6696 24.6681 20.9999 23.0537 21H20C19.4477 21 19 21.4477 19 22C19 22.5523 19.4477 23 20 23H23.0537C25.7981 22.9999 28 20.7486 28 18C28 15.2514 25.7981 13.0001 23.0537 13H20ZM16 17C15.4477 17 15 17.4477 15 18C15 18.5523 15.4477 19 16 19H20C20.5523 19 21 18.5523 21 18C21 17.4477 20.5523 17 20 17H16Z"
+                            fill="#00A1FF"
+                          />
+                        </svg>
+                      </button>
+                    {/if}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -1072,6 +1276,36 @@
               다른 계정에서 이 이메일로 초대받았는데 여기 안 보이면: 로그인 이메일이 접근 목록과 같은지 확인하고, Supabase에
               <code class="inv-code">plannode_project_acl.sql</code>이 적용됐는지 확인해줘.
             </p>
+          {/if}
+          </div>
+          {#if projectModalScrollHint}
+            <div class="pm-scroll-hint-wrap">
+              <button
+                type="button"
+                class="pm-scroll-hint-btn"
+                aria-label="아래로 더 보기"
+                on:click={scrollProjectModalDown}
+              >
+                <svg
+                  class="pm-scroll-hint-ico"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="28"
+                  height="28"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path
+                    d="M7 10l5 5 5-5"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
           {/if}
         </div>
       </div>
@@ -1755,18 +1989,21 @@
     border-radius: 9px;
     cursor: pointer;
     font-family: inherit;
-    border: 1.5px solid #6b4ef6;
+    border: none;
     color: #6b4ef6;
     background: #f5f3ff;
-    transition:
-      border-color 0.15s ease,
-      background 0.15s ease;
+    outline: none;
+    transition: background 0.15s ease, color 0.15s ease;
   }
 
   #BJI.proj-json-import-btn:hover {
     background: #ede9fe;
-    border-color: #5b3fd9;
     color: #5b3fd9;
+  }
+
+  #BJI.proj-json-import-btn:focus,
+  #BJI.proj-json-import-btn:focus-visible {
+    outline: none;
   }
 
   #BPN {
@@ -2695,18 +2932,19 @@
     background: rgba(20, 10, 50, 0.42);
     z-index: 6000;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding-top: 36px;
+    padding: 16px;
+    box-sizing: border-box;
   }
 
   :global(.mo) {
     background: #fff;
     border-radius: 16px;
-    padding: 22px;
+    padding: 14px;
     width: 452px;
     max-width: calc(100vw - 32px);
-    max-height: calc(100vh - 72px);
+    max-height: calc(0.8 * (100vh - 92px));
     overflow-y: auto;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.2);
     flex-shrink: 0;
@@ -2714,6 +2952,35 @@
 
   :global(.mo.mo-wide) {
     width: min(520px, calc(100vw - 32px));
+  }
+
+  /* 프로젝트 관리 모달: 패딩 + 헤더 고정(쉘은 flex·본문만 스크롤) */
+  :global(.mo.mo-wide.pm-scroll.pm-proj-shell) {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-top: 21px;
+    padding-bottom: 21px;
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  @media (max-width: 900px) {
+    :global(.mo.pm-scroll.pm-proj-shell) {
+      position: relative;
+    }
+
+    .pm-proj-body {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .pm-proj-body::-webkit-scrollbar {
+      display: none;
+      width: 0;
+      height: 0;
+    }
   }
 
   :global(.mo h3) {
@@ -2731,6 +2998,12 @@
     cursor: pointer;
     font-size: 13px;
     color: #666;
+    outline: none;
+  }
+
+  :global(.mcl:focus),
+  :global(.mcl:focus-visible) {
+    outline: none;
   }
 
   :global(.fl) {
@@ -2744,19 +3017,28 @@
   :global(.fi) {
     width: 100%;
     background: #faf9f7;
-    border: 1.5px solid #e0dbd4;
+    border: none;
     border-radius: 8px;
     color: #1a1a1a;
     font-size: 13px;
     padding: 8px 11px;
     outline: none;
     font-family: inherit;
-    transition: border-color 0.15s;
+    transition: background 0.15s;
+    box-shadow: none;
   }
 
-  :global(.fi:focus) {
-    border-color: #6b4ef6;
-    box-shadow: 0 0 0 3px rgba(107, 78, 246, 0.1);
+  :global(.fi:focus),
+  :global(.fi:focus-visible) {
+    outline: none;
+    border: none;
+    box-shadow: none;
+    background: #f3f1ed;
+  }
+
+  :global(.fi::placeholder) {
+    color: #9ca3af;
+    opacity: 1;
   }
 
   :global(.cx) {
@@ -2812,6 +3094,12 @@
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
+    outline: none;
+  }
+
+  .bcr:focus,
+  .bcr:focus-visible {
+    outline: none;
   }
 
   .bcr.sm {
@@ -2825,11 +3113,26 @@
     cursor: not-allowed;
   }
 
-  .mod-sub {
-    font-size: 12px;
-    color: #666;
-    line-height: 1.5;
-    margin: 0 0 14px;
+  .pm-proj-head {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: calc(15px * 1.3); /* +30% vs 15px ≈ 19.5px */
+    background: #fff;
+  }
+
+  .pm-proj-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .proj-form-col {
+    display: flex;
+    flex-direction: column;
+    gap: 15px; /* was 10px → 1.5× */
   }
 
   .acl-err {
@@ -2842,7 +3145,7 @@
   .pl {
     margin-top: 16px;
     padding-top: 14px;
-    border-top: 1px solid #f0ece8;
+    border-top: none;
   }
 
   .plt {
@@ -2861,59 +3164,143 @@
     margin-bottom: 6px;
   }
 
+  .pcard {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    border-radius: 10px;
+    padding: 8px 10px 8px 8px;
+    transition: background 0.15s;
+    background: #faf9f7;
+    border: none;
+    box-shadow: none;
+  }
+
+  .pcard:hover {
+    background: #f8f6ff;
+  }
+
+  .pcard.pcard-acp {
+    background: #f0ecff;
+  }
+
+  .pcard.pcard-shared:not(.pcard-acp) {
+    background: #ecfdf5;
+  }
+
+  .pcard.pcard-shared:not(.pcard-acp):hover {
+    background: #d1fae5;
+  }
+
+  .pdl {
+    flex-shrink: 0;
+    align-self: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    cursor: pointer;
+    line-height: 0;
+  }
+
+  .pdl-svg {
+    display: block;
+    flex-shrink: 0;
+  }
+
+  .pdl:hover:not(:disabled) .pdl-svg {
+    filter: brightness(0.92);
+  }
+
+  .pdl:focus,
+  .pdl:focus-visible {
+    outline: none;
+  }
+
+  .pdl:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .pdl:disabled .pdl-svg {
+    filter: none;
+  }
+
   .pacl {
     flex-shrink: 0;
-    padding: 0 10px;
-    border-radius: 10px;
-    border: 1.5px solid #6b4ef6;
-    background: #f0ecff;
-    color: #5b21b6;
-    font-size: 11px;
-    font-weight: 700;
+    align-self: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
     cursor: pointer;
+    line-height: 0;
+  }
+
+  .pacl-svg {
+    display: block;
+    flex-shrink: 0;
+  }
+
+  .pacl:hover .pacl-svg {
+    filter: brightness(0.92);
+  }
+
+  .pacl:focus,
+  .pacl:focus-visible {
+    outline: none;
   }
 
   .pc {
     flex: 1;
     min-width: 0;
-    width: 100%;
     text-align: left;
-    border-radius: 10px;
-    padding: 10px 12px;
+    border: none;
+    border-radius: 0;
+    padding: 2px 0 2px 2px;
+    margin: 0;
     cursor: pointer;
-    transition: all 0.15s;
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    background: #faf9f7;
-    border: 1.5px solid #e8e4de;
+    background: transparent;
+    box-shadow: none;
   }
 
   .pc:hover {
-    border-color: #c4b5fd;
-    background: #f8f6ff;
+    background: transparent;
   }
 
-  .pc.acp {
-    border-color: #6b4ef6;
-    background: #f0ecff;
-  }
-
-  .pc-shared:not(.acp) {
-    background: #ecfdf5;
-    border-color: #a7f3d0;
-  }
-
-  .pc-shared:not(.acp):hover {
-    background: #d1fae5;
-    border-color: #6ee7b7;
+  .pc:focus,
+  .pc:focus-visible {
+    outline: none;
   }
 
   .inv-panel {
     background: #f8fafc;
     border-radius: 12px;
     padding: 12px 14px 14px;
-    border: 1px solid #e2e8f0;
+    border: none;
+    box-shadow: none;
   }
 
   .inv-hint {
@@ -2926,7 +3313,7 @@
   .inv-hint-muted {
     margin: 10px 0 0;
     padding-top: 8px;
-    border-top: 1px dashed #e2e8f0;
+    border-top: none;
   }
 
   .inv-code {
@@ -2951,10 +3338,11 @@
     align-items: stretch;
     gap: 8px;
     background: #eff6ff;
-    border: 1px solid #bfdbfe;
+    border: none;
     border-radius: 10px;
     padding: 10px 12px;
     margin-bottom: 8px;
+    box-shadow: none;
   }
 
   .inv-row-top {
@@ -3031,7 +3419,7 @@
     text-overflow: ellipsis;
   }
 
-  .pc.acp .pn2 {
+  .pcard.pcard-acp .pn2 {
     color: #6b4ef6;
   }
 
@@ -3049,5 +3437,52 @@
     font-weight: 600;
     align-self: center;
     flex-shrink: 0;
+  }
+
+  .pm-scroll-hint-wrap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 56px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: 8px;
+    box-sizing: border-box;
+    pointer-events: none;
+    background: transparent;
+    z-index: 4;
+  }
+
+  .pm-scroll-hint-btn {
+    pointer-events: auto;
+    border: none;
+    background: transparent;
+    border-radius: 999px;
+    width: 42px;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: none;
+    color: #64748b;
+    outline: none;
+  }
+
+  .pm-scroll-hint-btn:focus,
+  .pm-scroll-hint-btn:focus-visible {
+    outline: none;
+  }
+
+  .pm-scroll-hint-ico {
+    display: block;
+  }
+
+  @media (min-width: 901px) {
+    .pm-scroll-hint-wrap {
+      display: none !important;
+    }
   }
 </style>

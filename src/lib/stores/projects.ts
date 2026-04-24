@@ -290,8 +290,16 @@ export function deleteProject(projectId: string) {
     return updated;
   });
 
-  currentProject.set(null);
-  nodes.set([]);
+  const cur = get(currentProject);
+  if (cur?.id === projectId) {
+    currentProject.set(null);
+    nodes.set([]);
+    try {
+      localStorage.removeItem(CURRENT_PROJECT_KEY);
+    } catch (e) {
+      console.error('Failed to clear current project:', e);
+    }
+  }
   markCloudWorkspaceDirty();
 }
 

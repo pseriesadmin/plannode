@@ -5,7 +5,6 @@
   import { initAuthSession, authLoading, authUser } from '$lib/stores/authSession';
   import { isSupabaseCloudConfigured } from '$lib/supabase/env';
   import { tryClaimPlatformMasterIfVacant } from '$lib/supabase/platformMaster';
-  import { cloudSyncBadge } from '$lib/stores/workspaceDirty';
   import LoginGate from '$lib/components/LoginGate.svelte';
   import SplashScreen from '$lib/components/SplashScreen.svelte';
   import type { LayoutData } from './$types';
@@ -57,9 +56,6 @@
   <LoginGate />
 {:else}
   <slot />
-  {#if $cloudSyncBadge === 'syncing'}
-    <SplashScreen variant="overlay" />
-  {/if}
 {/if}
 
 <style>
