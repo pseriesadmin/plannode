@@ -29,13 +29,20 @@ alwaysApply: true
 | `.cursor/agents/harness-executor.md` | Step4 GSD 실행 에이전트 |
 | `.cursor/agents/promptor.md` | Step2 아젠다 분석·플래너 |
 | `.cursor/agents/qa.md` | Step5 QA 검수 에이전트 |
-| `.cursor/plans/harness-workflow_final.md` | 하네스 워크플로 가이드(Mermaid·GATE·복붙) |
+| `.cursor/plans/harness-workflow_final.md` | 하네스 워크플로 + **경량화 제어**(오버엔지니어링·모듈 증가 견제) |
 
 ## 파일럿 갭 원칙
 
 - SvelteKit 포팅 작업 시 `docs/PILOT_FUNCTIONAL_SPEC.md §9~§10` 갭 분석을 기준으로 삼는다.
 - 파일럿(`index.html` + `plannode.js`) 동작이 SvelteKit 구현의 **정합성 기준**이다.
 - transform 컨테이너·parent_id 체계·루트 노드 생성 등 갭 항목 변경 시 반드시 GATE C에서 체크한다.
+
+## 최소 구현·기술부채·경량화 (하네스 공통)
+
+- **오버 엔지니어링 견제:** 아젠다·PRD·TASK에 없는 추상·불필요한 **신규 모듈/파일**·“나중에 쓸” 데드 코드를 넣지 않는다(기존 경로 확장 우선).
+- **경량화 제어:** `AGENTS.md` **「경량화·오버엔지니어링 견제 제어 구조」** 표(스코프→쪼개기→GATE→구현→@qa)와 `.cursor/plans/harness-workflow_final.md` **「경량화 제어」** 절.
+- **기술부채 누적 지양:** `AGENTS.md` GP-12, `@qa` 검수 2단계(기술 부채), `@harness-executor` G-STEP 4를 함께 본다.
+- **Guides(스펙·GATE) vs Sensors(빌드·QA):** 불필요한 설계(오버엔지니어링)는 **센서만**으로는 부족할 수 있으므로 **PRD·plan-output 포함/제외**를 1차로 둔다(`.cursor/plans/harness-workflow_final.md` **외부 문헌** 절).
 
 ## 유지보수 시
 

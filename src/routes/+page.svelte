@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import {
     projects,
@@ -8,7 +8,8 @@
     showProjectModal,
     createProject,
     upsertImportedPlannodeTreeV1,
-    updateProjectMeta
+    updateProjectMeta,
+    deleteProject
   } from '$lib/stores/projects';
   import { parsePlannodeTreeV1Json } from '$lib/plannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
@@ -21,12 +22,15 @@
     ensureOwnerAclRowForMyProject,
     repairOwnedProjectsAclWorkspaceSources,
     openAclModal,
+    closeAclModal,
     showAclModal,
     aclModalProject,
     fetchMyAclInviteSummaries,
     importSharedProjectFromWorkspace,
     autoLoadInvitedProjects,
     fetchProjectAcl,
+    isCurrentUserProjectOwner,
+    deleteAllAclRowsForProjectIfOwner,
     type AclInviteSummary
   } from '$lib/supabase/projectAcl';
   import {
@@ -36,7 +40,7 @@
     projectPresenceSelectedEmail,
     toggleProjectPresencePeerEmail
   } from '$lib/supabase/projectPresence';
-  import { getAuthUserId, signOutEverywhere, authUser } from '$lib/stores/authSession';
+  import { getAuthUserId, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
   import { mountPilotBridge, pilotSetActiveView } from '$lib/pilot/pilotBridge';
   import type { PageData } from './$types';
@@ -58,6 +62,9 @@
 
   /** max-width:900px 툴바 레이아웃 — 모바일에서 프로젝트명으로 공유 모달 진입 */
   let toolbarCompact = false;
+
+  /** 뷰(#VIEWS) 터치 시 공통 툴바를 위로 접었다가, 상단 아이콘으로 다시 펼침(모바일·PC 공통) */
+  let toolbarSheetHidden = false;
 
   let aclInviteRows: AclInviteSummary[] = [];
   let aclInvitesErr = '';
@@ -200,6 +207,42 @@
     if (showViewportMenu && viewportMenuWrapEl && !viewportMenuWrapEl.contains(t)) closeViewportMenu();
   }
 
+  function collapseToolbarSheet() {
+    if (toolbarSheetHidden) return;
+    closeOutputMenu();
+    closeViewMenu();
+    closeViewportMenu();
+    toolbarSheetHidden = true;
+  }
+
+  function expandToolbarSheet() {
+    toolbarSheetHidden = false;
+  }
+
+  /** #TB·#VIEWS 형제 구조라 캔버스/문서 터치는 여기서만 잡힘(툴바 영역 제외) */
+  function onViewsSurfacePointerDownCapture(ev: PointerEvent) {
+    if (toolbarSheetHidden) return;
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    collapseToolbarSheet();
+  }
+
+  function syncViewsTbPad(showPad: boolean) {
+    const r = document.getElementById('R');
+    const tb = document.getElementById('TB');
+    if (!r || !tb) return;
+    if (showPad) {
+      const h = Math.ceil(tb.getBoundingClientRect().height) + 8;
+      r.style.setProperty('--views-tb-pad', `${h}px`);
+    } else {
+      r.style.setProperty('--views-tb-pad', '0px');
+    }
+  }
+
+  $: if (typeof document !== 'undefined') {
+    const showPad = !toolbarSheetHidden;
+    void tick().then(() => syncViewsTbPad(showPad));
+  }
+
   async function handleJsonImportChange(ev: Event) {
     const input = ev.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -296,6 +339,44 @@
     showProjectModal.set(false);
   }
 
+  /** 프로젝트 모달: 모바일에서 스크롤바 대신 하단 힌트 */
+  let projectModalEl: HTMLDivElement | undefined;
+  let projectModalScrollHint = false;
+
+  function isProjectModalMobileViewport(): boolean {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+
+  function syncProjectModalScrollHint() {
+    const el = projectModalEl;
+    if (!el || !get(showProjectModal)) {
+      projectModalScrollHint = false;
+      return;
+    }
+    if (!isProjectModalMobileViewport()) {
+      projectModalScrollHint = false;
+      return;
+    }
+    const gap = 16;
+    const hasOverflow = el.scrollHeight > el.clientHeight + 2;
+    const notAtBottom = el.scrollTop + el.clientHeight < el.scrollHeight - gap;
+    projectModalScrollHint = hasOverflow && notAtBottom;
+  }
+
+  function scrollProjectModalDown() {
+    const el = projectModalEl;
+    if (!el) return;
+    el.scrollBy({ top: Math.min(120, el.scrollHeight - el.clientHeight - el.scrollTop), behavior: 'smooth' });
+    window.setTimeout(() => syncProjectModalScrollHint(), 350);
+  }
+
+  $: if ($showProjectModal) {
+    void $projects.length;
+    void aclInviteRows.length;
+    tick().then(() => requestAnimationFrame(() => syncProjectModalScrollHint()));
+  }
+
   async function loadAclInvitesForModal() {
     if (!cloudSyncAvailable) {
       aclInviteRows = [];
@@ -313,6 +394,77 @@
 
   $: aclProjectIdSet = new Set(aclInviteRows.map((r) => r.project_id));
   $: invitedRemoteOnly = aclInviteRows.filter((r) => !$projects.some((p) => p.id === r.project_id));
+
+  /** 모달에서 카드별 삭제 버튼 표시용(ACL·플랫폼 마스터 등 owner_user_id만으로는 모르는 경우) */
+  let projectDeletableById: Record<string, boolean> = {};
+  let deleteFlagsLoadGen = 0;
+  let deletingProjectId = '';
+
+  async function loadProjectDeleteFlags() {
+    const uid = getAuthUserId();
+    if (!$showProjectModal || !uid) {
+      projectDeletableById = {};
+      return;
+    }
+    // 재오픈·계정 전환 직전 스냅샷으로 비소유 카드에 삭제가 잠깐(또는 계속) 뜨는 것 방지
+    projectDeletableById = {};
+    const gen = ++deleteFlagsLoadGen;
+    const plist = get(projects);
+    const entries = await Promise.all(
+      plist.map(async (p) => [p.id, await isCurrentUserProjectOwner(p)] as const)
+    );
+    if (gen !== deleteFlagsLoadGen || !$showProjectModal) return;
+    projectDeletableById = Object.fromEntries(entries);
+  }
+
+  /** 모달이 열려 있을 때만 갱신; auth·목록 변화에도 재조회 */
+  $: if ($showProjectModal) {
+    $authUser?.id;
+    $projects;
+    void loadProjectDeleteFlags();
+  }
+
+  $: if (!$showProjectModal) {
+    projectDeletableById = {};
+    deleteFlagsLoadGen++;
+  }
+
+  function canShowProjectDelete(proj: Project): boolean {
+    const uid = getAuthUserId();
+    if (!uid) return false;
+    if (proj.owner_user_id === uid) return true;
+    return projectDeletableById[proj.id] === true;
+  }
+
+  async function handleDeleteProjectCard(proj: Project) {
+    if (!canShowProjectDelete(proj)) return;
+    if (
+      !confirm(
+        `「${proj.name}」프로젝트를 이 기기에서 삭제할까?\n\n로컬 데이터와(클라우드 연 시) 접근 허용 목록이 함께 지워져. 이 작업은 되돌릴 수 없어.`
+      )
+    ) {
+      return;
+    }
+    deletingProjectId = proj.id;
+    try {
+      const aclR = await deleteAllAclRowsForProjectIfOwner(proj);
+      if (!aclR.ok) {
+        alert(aclR.message ?? '접근 정보를 지우지 못했어. 잠시 후 다시 시도해줘.');
+        return;
+      }
+      if (get(aclModalProject)?.id === proj.id) {
+        closeAclModal();
+      }
+      deleteProject(proj.id);
+      if (cloudSyncAvailable) {
+        scheduleCloudFlush('delete-project', 100);
+      }
+      showPilotToast('프로젝트를 삭제했어.');
+      await loadAclInvitesForModal();
+    } finally {
+      deletingProjectId = '';
+    }
+  }
 
   async function handleImportInvited(inv: AclInviteSummary) {
     if (!inv.workspace_source_user_id) {
@@ -482,6 +634,17 @@
     };
     mqToolbar.addEventListener('change', onMqToolbar);
 
+    const tbElMount = document.getElementById('TB');
+    const onTbResize = () => {
+      const tb = document.getElementById('TB');
+      if (!tb) return;
+      const pad = !tb.classList.contains('tb--sheet-hidden');
+      syncViewsTbPad(pad);
+    };
+    const tbResizeObs = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onTbResize) : undefined;
+    if (tbElMount && tbResizeObs) tbResizeObs.observe(tbElMount);
+    window.addEventListener('resize', onTbResize);
+
     if (cloudSyncAvailable) startCloudBackgroundSync();
 
     const onExportSync = (ev: Event) => {
@@ -501,6 +664,8 @@
 
     return () => {
       mqToolbar.removeEventListener('change', onMqToolbar);
+      tbResizeObs?.disconnect();
+      window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
       document.removeEventListener('visibilitychange', onVis);
@@ -534,13 +699,18 @@
     }
   }}
   on:mousedown={onToolbarMenusOutside}
+  on:resize={syncProjectModalScrollHint}
 />
 
 <div id="root">
   <!-- SvelteKit 주입 props — 템플릿에서 참조해야 unused export 경고 없음 -->
   <span hidden>{JSON.stringify(data)}{JSON.stringify(params)}</span>
   <div id="R">
-    <div id="TB" class:tb-with-user={!!$authUser}>
+    <div
+      id="TB"
+      class:tb-with-user={!!$authUser}
+      class:tb--sheet-hidden={toolbarSheetHidden}
+    >
       <div class="tb-main">
         <div class="tb-row-logo">
           <span class="logo">Plannode</span>
@@ -738,7 +908,45 @@
       {/if}
     </div>
 
-    <div id="VIEWS">
+    {#if toolbarSheetHidden}
+      <button
+        type="button"
+        class="tb-menu-reveal"
+        aria-label="메뉴 보기"
+        title="메뉴 보기"
+        on:click={expandToolbarSheet}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="36"
+          height="36"
+          viewBox="0 0 36 36"
+          fill="none"
+          class="tb-menu-reveal-svg"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path
+            d="M12.7975 2.43327C14.3555 0.875274 16.4686 0 18.6719 0H27.6923C32.2805 0 36 3.71948 36 8.30769V27.6923C36 32.2805 32.2805 36 27.6923 36H8.30769C3.71948 36 0 32.2805 0 27.6923V18.6719C0 16.4686 0.875272 14.3555 2.43327 12.7975L12.7975 2.43327Z"
+            fill="#6B61F6"
+          />
+          <path
+            d="M19 7.32574C19 7.32574 19 5.55931 19 2.52966C19 -0.499998 16.5 -0.499998 12.5 2.5C8.50002 5.49999 4.85548 9.87946 2 13C-0.499986 16.5 -0.500014 19 4.85549 19C7.5573 19 8.6551 19 9.05069 19C9.03363 19 9.01651 19 8.99933 19C8.99933 19 9.52075 19 9.05069 19C12.9724 18.9993 13.6233 18.9205 15.1321 18.1339C16.465 17.4389 17.5487 16.33 18.2279 14.966C19 13.4154 19 11.3855 19 7.32574Z"
+            fill="#AAA4FF"
+          />
+          <path
+            d="M8.99933 19C8.99933 19 9.52075 19 9.05069 19C9.03363 19 9.01651 19 8.99933 19Z"
+            fill="#AAA4FF"
+          />
+        </svg>
+      </button>
+    {/if}
+
+    <div
+      id="VIEWS"
+      class:views-content-below-tb={!toolbarSheetHidden}
+      on:pointerdown|capture={onViewsSurfacePointerDownCapture}
+    >
       <div class="view" class:active={$activeView === 'tree'} id="V-TREE">
         <div id="CW">
           <div id="CV">
@@ -875,11 +1083,33 @@
         <div class="ai-inner">
           <div class="ai-title">AI 분석</div>
           <div class="ai-sub">현재 기능 트리를 분석해서 개발 가이드를 생성해</div>
+          <div class="ai-impl-hint" aria-live="polite">
+            {#if $authLoading}
+              <p class="ai-impl-hint__line">로그인 여부 확인 중…</p>
+            {:else if !cloudSyncAvailable}
+              <p class="ai-impl-hint__line">
+                <strong>지금 모드</strong> · 클라우드 연결이 꺼져 있어, 아래는 <em>이 컴퓨터에서만</em> 만든 «복사용 글(프롬프트)»이에요. 다른 AI(챗GPT 등)에 붙여넣어 쓰면 돼요.
+              </p>
+            {:else if $authUser}
+              <p class="ai-impl-hint__line">
+                <strong>지금 모드</strong> · 로그인됨. 서버에 AI 키가 있으면 <em>자동으로 AI(클로드) 답</em>이 아래에 뜨고, 없으면 «복사용 프롬프트»만 떠요.
+              </p>
+            {:else}
+              <p class="ai-impl-hint__line">
+                <strong>지금 모드</strong> · 로그인 전. 누르면 <em>복사용 글(프롬프트)</em>만 나와요. 위에서 로그인하면 서버를 거쳐 AI 답을 받을 수 있어요.
+              </p>
+            {/if}
+          </div>
           <div class="ai-btn-grid">
             <button type="button" class="ai-btn" id="ai-prd">
               <div class="ai-btn-icon">📄</div>
               <div class="ai-btn-title">PRD 완성본 생성</div>
               <div class="ai-btn-desc">기능 트리 → 완전한 PRD 문서</div>
+            </button>
+            <button type="button" class="ai-btn" id="ai-wireframe">
+              <div class="ai-btn-icon">🖼</div>
+              <div class="ai-btn-title">와이어프레임 / 화면 설계</div>
+              <div class="ai-btn-desc">UX·화면·컴포넌트 흐름, 구현·시안 작성용 프롬프트</div>
             </button>
             <button type="button" class="ai-btn" id="ai-miss">
               <div class="ai-btn-icon">🔍</div>
@@ -896,6 +1126,10 @@
               <div class="ai-btn-title">하네스 플랜 생성</div>
               <div class="ai-btn-desc">Cursor AI 하네스 워크플로우 출력</div>
             </button>
+          </div>
+          <div class="ai-result-toolbar" id="ai-result-toolbar" aria-hidden="true">
+            <span class="ai-result-label">생성된 프롬프트</span>
+            <button type="button" class="ai-copy-btn" id="ai-copy">클립보드에 복사</button>
           </div>
           <div class="ai-result" id="ai-result"></div>
         </div>
@@ -962,21 +1196,54 @@
     {/if}
 
     {#if $showProjectModal}
-      <div class="mbg">
-        <div class="mo mo-wide">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="mbg" role="presentation" on:click|self={closeModal}>
+        <div class="mo mo-wide pm-scroll pm-proj-shell">
+          <div class="pm-proj-head">
             <h3 style="margin:0">프로젝트 관리</h3>
             <button type="button" class="mcl" on:click={closeModal}>✕</button>
           </div>
-          <p class="mod-sub">새 프로젝트를 만들거나, 이 기기 목록에서 열고, 초대받은 프로젝트는 클라우드에서 불러올 수 있어.</p>
-          <div style="display:flex;flex-direction:column;gap:10px">
-            <div><span class="fl">프로젝트 이름 *</span><input class="fi" bind:value={projectName} placeholder="예: 크레이지샷 리뉴얼 2026" /></div>
-            <div><span class="fl">작성자 *</span><input class="fi" bind:value={projectAuthor} placeholder="예: Stephen Cconzy" /></div>
+          <div
+            class="pm-proj-body"
+            bind:this={projectModalEl}
+            on:scroll={syncProjectModalScrollHint}
+          >
+          <div class="proj-form-col">
+            <input
+              class="fi"
+              bind:value={projectName}
+              placeholder="프로젝트 이름 *"
+              aria-label="프로젝트 이름"
+            />
+            <input
+              class="fi"
+              bind:value={projectAuthor}
+              placeholder="작성자 *"
+              aria-label="작성자"
+            />
             <div class="fg">
-              <div><span class="fl">시작일 *</span><input class="fi" type="date" bind:value={projectStart} /></div>
-              <div><span class="fl">종료일 *</span><input class="fi" type="date" bind:value={projectEnd} /></div>
+              <input
+                class="fi"
+                type="date"
+                bind:value={projectStart}
+                placeholder="시작일"
+                aria-label="시작일"
+              />
+              <input
+                class="fi"
+                type="date"
+                bind:value={projectEnd}
+                placeholder="종료일"
+                aria-label="종료일"
+              />
             </div>
-            <div><span class="fl">설명</span><textarea class="fi" bind:value={projectDesc} rows="2" style="resize:vertical" placeholder="간단한 설명" /></div>
+            <textarea
+              class="fi"
+              bind:value={projectDesc}
+              rows="2"
+              style="resize:vertical"
+              placeholder="설명"
+              aria-label="설명"
+            ></textarea>
             <button type="button" class="bcr" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
             <div class="proj-json-import">
               <input
@@ -1006,26 +1273,83 @@
             {/if}
             <div id="PLC" data-svelte-managed="1">
               {#each $projects as proj}
-                <div class="prow" class:prow-shared={aclProjectIdSet.has(proj.id)}>
-                  <button
-                    type="button"
-                    class="pc"
-                    class:acp={$currentProject?.id === proj.id}
-                    class:pc-shared={aclProjectIdSet.has(proj.id)}
-                    on:click={() => void handleProjectSelect(proj)}
+                <div class="prow">
+                  <div
+                    class="pcard"
+                    class:pcard-acp={$currentProject?.id === proj.id}
+                    class:pcard-shared={aclProjectIdSet.has(proj.id)}
                   >
-                    <div class="pi" style:background={$currentProject?.id === proj.id ? '#6b4ef6' : '#ede9fe'}>📁</div>
-                    <div class="pif">
-                      <div class="pn2">{proj.name}</div>
-                      <div class="pm2">{proj.author}{aclProjectIdSet.has(proj.id) ? ' · 접근 허용됨' : ''}</div>
-                    </div>
-                    {#if $currentProject?.id === proj.id}
-                      <span class="ct">현재</span>
+                    {#if canShowProjectDelete(proj)}
+                      <button
+                        type="button"
+                        class="pdl"
+                        title={`「${proj.name}」 삭제`}
+                        aria-label={`「${proj.name}」 삭제`}
+                        disabled={deletingProjectId === proj.id}
+                        on:click|stopPropagation={() => void handleDeleteProjectCard(proj)}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="27"
+                          height="28"
+                          viewBox="0 0 27 28"
+                          fill="none"
+                          class="pdl-svg"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <ellipse cx="13.4485" cy="14" rx="13.4485" ry="14" fill="#FF6969" />
+                          <path
+                            d="M17.2909 14L9.60606 14"
+                            stroke="white"
+                            stroke-width="3"
+                            stroke-linecap="round"
+                          />
+                        </svg>
+                      </button>
                     {/if}
-                  </button>
-                  {#if cloudSyncAvailable}
-                    <button type="button" class="pacl" title="접근 허용 이메일" on:click={() => openAclForProject(proj)}>접근</button>
-                  {/if}
+                    <button
+                      type="button"
+                      class="pc"
+                      on:click={() => void handleProjectSelect(proj)}
+                    >
+                      <div class="pi" style:background={$currentProject?.id === proj.id ? '#6b4ef6' : '#ede9fe'}>📁</div>
+                      <div class="pif">
+                        <div class="pn2">{proj.name}</div>
+                        <div class="pm2">{proj.author}{aclProjectIdSet.has(proj.id) ? ' · 접근 허용됨' : ''}</div>
+                      </div>
+                      {#if $currentProject?.id === proj.id}
+                        <span class="ct">현재</span>
+                      {/if}
+                    </button>
+                    {#if cloudSyncAvailable}
+                      <button
+                        type="button"
+                        class="pacl"
+                        title={`「${proj.name}」 접근 허용 · 이메일 설정`}
+                        aria-label={`「${proj.name}」 접근 허용 이메일 설정`}
+                        on:click|stopPropagation={() => openAclForProject(proj)}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="36"
+                          height="36"
+                          viewBox="0 0 36 36"
+                          fill="none"
+                          class="pacl-svg"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <path
+                            fill-rule="evenodd"
+                            clip-rule="evenodd"
+                            d="M18 0C27.9411 0 36 8.05887 36 18C36 27.9411 27.9411 36 18 36C8.05887 36 0 27.9411 0 18C0 8.05887 8.05887 0 18 0ZM12.9463 13C10.2018 13 8 15.2514 8 18C8 20.7486 10.2018 23 12.9463 23H16C16.5523 23 17 22.5523 17 22C17 21.4477 16.5523 21 16 21H12.9463C11.3319 21 10 19.6697 10 18C10 16.3303 11.3319 15 12.9463 15H16C16.5523 15 17 14.5523 17 14C17 13.4477 16.5523 13 16 13H12.9463ZM20 13C19.4477 13 19 13.4477 19 14C19 14.5523 19.4477 15 20 15H23.0537C24.6681 15.0001 26 16.3304 26 18C26 19.6696 24.6681 20.9999 23.0537 21H20C19.4477 21 19 21.4477 19 22C19 22.5523 19.4477 23 20 23H23.0537C25.7981 22.9999 28 20.7486 28 18C28 15.2514 25.7981 13.0001 23.0537 13H20ZM16 17C15.4477 17 15 17.4477 15 18C15 18.5523 15.4477 19 16 19H20C20.5523 19 21 18.5523 21 18C21 17.4477 20.5523 17 20 17H16Z"
+                            fill="#00A1FF"
+                          />
+                        </svg>
+                      </button>
+                    {/if}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -1072,6 +1396,36 @@
               다른 계정에서 이 이메일로 초대받았는데 여기 안 보이면: 로그인 이메일이 접근 목록과 같은지 확인하고, Supabase에
               <code class="inv-code">plannode_project_acl.sql</code>이 적용됐는지 확인해줘.
             </p>
+          {/if}
+          </div>
+          {#if projectModalScrollHint}
+            <div class="pm-scroll-hint-wrap">
+              <button
+                type="button"
+                class="pm-scroll-hint-btn"
+                aria-label="아래로 더 보기"
+                on:click={scrollProjectModalDown}
+              >
+                <svg
+                  class="pm-scroll-hint-ico"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="28"
+                  height="28"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path
+                    d="M7 10l5 5 5-5"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
           {/if}
         </div>
       </div>
@@ -1130,8 +1484,14 @@
     row-gap: 10px;
     z-index: 50;
     overflow: visible;
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
     /* 빈 영역은 캔버스로 클릭 통과; 자식(버튼·메뉴 등)은 유지 */
     pointer-events: none;
+  }
+
+  #TB.tb--sheet-hidden {
+    transform: translateY(calc(-100% - 4px));
   }
 
   #TB * {
@@ -1153,6 +1513,43 @@
     #TB {
       --tb-user-avatar-size: 56px;
     }
+  }
+
+  .tb-menu-reveal {
+    position: fixed;
+    z-index: 55;
+    top: calc(10px + env(safe-area-inset-top, 0px));
+    left: auto;
+    right: calc(14px + env(safe-area-inset-right, 0px));
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 4px 18px rgba(45, 35, 120, 0.18);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .tb-menu-reveal:focus-visible {
+    outline: 2px solid #6b61f6;
+    outline-offset: 3px;
+  }
+
+  .tb-menu-reveal:active {
+    transform: scale(0.96);
+  }
+
+  .tb-menu-reveal-svg {
+    display: block;
+    width: 36px;
+    height: 36px;
   }
 
   .tb-main {
@@ -1755,18 +2152,21 @@
     border-radius: 9px;
     cursor: pointer;
     font-family: inherit;
-    border: 1.5px solid #6b4ef6;
+    border: none;
     color: #6b4ef6;
     background: #f5f3ff;
-    transition:
-      border-color 0.15s ease,
-      background 0.15s ease;
+    outline: none;
+    transition: background 0.15s ease, color 0.15s ease;
   }
 
   #BJI.proj-json-import-btn:hover {
     background: #ede9fe;
-    border-color: #5b3fd9;
     color: #5b3fd9;
+  }
+
+  #BJI.proj-json-import-btn:focus,
+  #BJI.proj-json-import-btn:focus-visible {
+    outline: none;
   }
 
   #BPN {
@@ -1977,6 +2377,11 @@
     overflow: hidden;
   }
 
+  #VIEWS.views-content-below-tb {
+    padding-top: var(--views-tb-pad, 0px);
+    transition: padding-top 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
   .view {
     position: absolute;
     inset: 0;
@@ -2024,13 +2429,39 @@
     z-index: 6;
   }
 
-  :global(.cp) {
+  /* 댑스 라벨: 열마다 1칸(가로) — 세로로 글자가 쌓이지 않게 flex+nowrap */
+  :global(.cp-row) {
     position: absolute;
-    top: 10px;
+    top: 8px;
+    left: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    padding-left: 28px;
+    box-sizing: border-box;
+    z-index: 2;
+    pointer-events: none;
+  }
+  :global(.cp) {
+    position: static;
+    flex: 0 0 244px;
+    width: 244px;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-start;
     padding: 2px 10px;
     border-radius: 20px;
     font-size: 10px;
     font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    word-break: keep-all;
+    writing-mode: horizontal-tb;
+    box-sizing: border-box;
     pointer-events: none;
     z-index: 2;
   }
@@ -2064,6 +2495,8 @@
     z-index: 5;
   }
   :global(.nd) {
+    position: relative;
+    z-index: 0;
     background: #fff;
     border: 1px solid #e0dbd4;
     border-radius: 10px;
@@ -2075,6 +2508,7 @@
       box-shadow 0.15s;
   }
   :global(.nd:hover) {
+    z-index: 30;
     border-color: #b8aff0;
     box-shadow: 0 2px 10px rgba(107, 78, 246, 0.12);
   }
@@ -2116,19 +2550,77 @@
     font-family: monospace;
     margin-left: 3px;
   }
+  :global(.nds-wrap) {
+    position: relative;
+  }
   :global(.nds) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
     font-size: 10px;
     color: #999;
     margin: 1px 9px 0;
     line-height: 1.4;
+    word-break: break-word;
   }
+  :global(.nds-tooltip) {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    margin-top: -1px;
+    z-index: 200;
+    max-width: min(100vw, 300px);
+    background: #fff;
+    border: 1px solid #e0dbd4;
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+    padding: 0 0 8px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+      opacity 0.12s ease,
+      visibility 0.12s ease;
+  }
+  :global(.nds-wrap:hover .nds-tooltip) {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  :global(.nds-tooltip-t) {
+    font-size: 9px;
+    font-weight: 700;
+    color: #6b4ef6;
+    padding: 6px 9px 4px;
+    letter-spacing: 0.02em;
+  }
+  :global(.nds-tooltip-b) {
+    font-size: 10px;
+    color: #555;
+    line-height: 1.5;
+    padding: 0 9px 4px;
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  /* 배지: 2행까지만(넘는 행은 clip). 포인터는 부모 .nd에 그대로 — 드래그·제목·선택 로직 보존 */
   :global(.nm) {
+    padding: 4px 9px 3px;
+    min-height: 0;
+    box-sizing: border-box;
+  }
+  :global(.nm-clamp) {
     display: flex;
-    align-items: center;
-    padding: 4px 9px;
-    gap: 3px;
     flex-wrap: wrap;
-    min-height: 16px;
+    align-content: flex-start;
+    align-items: flex-start;
+    gap: 3px 4px;
+    max-height: 38px;
+    overflow: hidden;
+    line-height: 1.2;
   }
   :global(.bg) {
     font-size: 9px;
@@ -2161,17 +2653,39 @@
     color: #b45309;
     border: 1px solid #fcd34d;
   }
+  :global(.bdev) {
+    background: #fff1f0;
+    color: #991b1b;
+    border: 1px solid #fecaca;
+  }
+  :global(.bux) {
+    background: #e0e7ff;
+    color: #3730a3;
+    border: 1px solid #a5b4fc;
+  }
+  :global(.bprj) {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+  }
+  :global(.bggen) {
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+  }
   :global(.nnum) {
-    margin-left: auto;
     font-size: 9px;
-    color: #ccc;
+    color: #999;
     font-family: monospace;
+    flex-shrink: 0;
   }
   :global(.na) {
     display: flex;
-    justify-content: flex-end;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
     padding: 2px 7px 8px;
-    gap: 4px;
+    gap: 6px;
   }
   :global(.pb2) {
     position: absolute;
@@ -2538,7 +3052,28 @@
   .ai-sub {
     font-size: 12px;
     color: #aaa;
-    margin-bottom: 18px;
+    margin-bottom: 8px;
+  }
+  .ai-impl-hint {
+    background: #eceae4;
+    border: 1px solid #e0dcd4;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: #3f3a33;
+  }
+  .ai-impl-hint__line {
+    margin: 0;
+  }
+  .ai-impl-hint__line :global(strong) {
+    color: #1a1a1a;
+  }
+  .ai-impl-hint__line :global(em) {
+    font-style: normal;
+    font-weight: 600;
+    color: #5536c4;
   }
   .ai-btn-grid {
     display: grid;
@@ -2573,6 +3108,36 @@
     font-size: 11px;
     color: #aaa;
     line-height: 1.4;
+  }
+  .ai-result-toolbar {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 10px;
+    padding: 6px 2px 4px;
+  }
+  .ai-result-toolbar.visible {
+    display: flex;
+  }
+  .ai-result-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+  }
+  .ai-copy-btn {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    background: #6b4ef6;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .ai-copy-btn:hover {
+    opacity: 0.92;
   }
   .ai-result {
     background: #fff;
@@ -2695,18 +3260,19 @@
     background: rgba(20, 10, 50, 0.42);
     z-index: 6000;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding-top: 36px;
+    padding: 16px;
+    box-sizing: border-box;
   }
 
   :global(.mo) {
     background: #fff;
     border-radius: 16px;
-    padding: 22px;
+    padding: 14px;
     width: 452px;
     max-width: calc(100vw - 32px);
-    max-height: calc(100vh - 72px);
+    max-height: calc(0.8 * (100vh - 92px));
     overflow-y: auto;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.2);
     flex-shrink: 0;
@@ -2714,6 +3280,35 @@
 
   :global(.mo.mo-wide) {
     width: min(520px, calc(100vw - 32px));
+  }
+
+  /* 프로젝트 관리 모달: 패딩 + 헤더 고정(쉘은 flex·본문만 스크롤) */
+  :global(.mo.mo-wide.pm-scroll.pm-proj-shell) {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-top: 21px;
+    padding-bottom: 21px;
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  @media (max-width: 900px) {
+    :global(.mo.pm-scroll.pm-proj-shell) {
+      position: relative;
+    }
+
+    .pm-proj-body {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .pm-proj-body::-webkit-scrollbar {
+      display: none;
+      width: 0;
+      height: 0;
+    }
   }
 
   :global(.mo h3) {
@@ -2731,6 +3326,12 @@
     cursor: pointer;
     font-size: 13px;
     color: #666;
+    outline: none;
+  }
+
+  :global(.mcl:focus),
+  :global(.mcl:focus-visible) {
+    outline: none;
   }
 
   :global(.fl) {
@@ -2744,19 +3345,28 @@
   :global(.fi) {
     width: 100%;
     background: #faf9f7;
-    border: 1.5px solid #e0dbd4;
+    border: none;
     border-radius: 8px;
     color: #1a1a1a;
     font-size: 13px;
     padding: 8px 11px;
     outline: none;
     font-family: inherit;
-    transition: border-color 0.15s;
+    transition: background 0.15s;
+    box-shadow: none;
   }
 
-  :global(.fi:focus) {
-    border-color: #6b4ef6;
-    box-shadow: 0 0 0 3px rgba(107, 78, 246, 0.1);
+  :global(.fi:focus),
+  :global(.fi:focus-visible) {
+    outline: none;
+    border: none;
+    box-shadow: none;
+    background: #f3f1ed;
+  }
+
+  :global(.fi::placeholder) {
+    color: #9ca3af;
+    opacity: 1;
   }
 
   :global(.cx) {
@@ -2812,6 +3422,12 @@
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
+    outline: none;
+  }
+
+  .bcr:focus,
+  .bcr:focus-visible {
+    outline: none;
   }
 
   .bcr.sm {
@@ -2825,11 +3441,26 @@
     cursor: not-allowed;
   }
 
-  .mod-sub {
-    font-size: 12px;
-    color: #666;
-    line-height: 1.5;
-    margin: 0 0 14px;
+  .pm-proj-head {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: calc(15px * 1.3); /* +30% vs 15px ≈ 19.5px */
+    background: #fff;
+  }
+
+  .pm-proj-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .proj-form-col {
+    display: flex;
+    flex-direction: column;
+    gap: 15px; /* was 10px → 1.5× */
   }
 
   .acl-err {
@@ -2842,7 +3473,7 @@
   .pl {
     margin-top: 16px;
     padding-top: 14px;
-    border-top: 1px solid #f0ece8;
+    border-top: none;
   }
 
   .plt {
@@ -2861,59 +3492,143 @@
     margin-bottom: 6px;
   }
 
+  .pcard {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    border-radius: 10px;
+    padding: 8px 10px 8px 8px;
+    transition: background 0.15s;
+    background: #faf9f7;
+    border: none;
+    box-shadow: none;
+  }
+
+  .pcard:hover {
+    background: #f8f6ff;
+  }
+
+  .pcard.pcard-acp {
+    background: #f0ecff;
+  }
+
+  .pcard.pcard-shared:not(.pcard-acp) {
+    background: #ecfdf5;
+  }
+
+  .pcard.pcard-shared:not(.pcard-acp):hover {
+    background: #d1fae5;
+  }
+
+  .pdl {
+    flex-shrink: 0;
+    align-self: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    cursor: pointer;
+    line-height: 0;
+  }
+
+  .pdl-svg {
+    display: block;
+    flex-shrink: 0;
+  }
+
+  .pdl:hover:not(:disabled) .pdl-svg {
+    filter: brightness(0.92);
+  }
+
+  .pdl:focus,
+  .pdl:focus-visible {
+    outline: none;
+  }
+
+  .pdl:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .pdl:disabled .pdl-svg {
+    filter: none;
+  }
+
   .pacl {
     flex-shrink: 0;
-    padding: 0 10px;
-    border-radius: 10px;
-    border: 1.5px solid #6b4ef6;
-    background: #f0ecff;
-    color: #5b21b6;
-    font-size: 11px;
-    font-weight: 700;
+    align-self: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
     cursor: pointer;
+    line-height: 0;
+  }
+
+  .pacl-svg {
+    display: block;
+    flex-shrink: 0;
+  }
+
+  .pacl:hover .pacl-svg {
+    filter: brightness(0.92);
+  }
+
+  .pacl:focus,
+  .pacl:focus-visible {
+    outline: none;
   }
 
   .pc {
     flex: 1;
     min-width: 0;
-    width: 100%;
     text-align: left;
-    border-radius: 10px;
-    padding: 10px 12px;
+    border: none;
+    border-radius: 0;
+    padding: 2px 0 2px 2px;
+    margin: 0;
     cursor: pointer;
-    transition: all 0.15s;
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    background: #faf9f7;
-    border: 1.5px solid #e8e4de;
+    background: transparent;
+    box-shadow: none;
   }
 
   .pc:hover {
-    border-color: #c4b5fd;
-    background: #f8f6ff;
+    background: transparent;
   }
 
-  .pc.acp {
-    border-color: #6b4ef6;
-    background: #f0ecff;
-  }
-
-  .pc-shared:not(.acp) {
-    background: #ecfdf5;
-    border-color: #a7f3d0;
-  }
-
-  .pc-shared:not(.acp):hover {
-    background: #d1fae5;
-    border-color: #6ee7b7;
+  .pc:focus,
+  .pc:focus-visible {
+    outline: none;
   }
 
   .inv-panel {
     background: #f8fafc;
     border-radius: 12px;
     padding: 12px 14px 14px;
-    border: 1px solid #e2e8f0;
+    border: none;
+    box-shadow: none;
   }
 
   .inv-hint {
@@ -2926,7 +3641,7 @@
   .inv-hint-muted {
     margin: 10px 0 0;
     padding-top: 8px;
-    border-top: 1px dashed #e2e8f0;
+    border-top: none;
   }
 
   .inv-code {
@@ -2951,10 +3666,11 @@
     align-items: stretch;
     gap: 8px;
     background: #eff6ff;
-    border: 1px solid #bfdbfe;
+    border: none;
     border-radius: 10px;
     padding: 10px 12px;
     margin-bottom: 8px;
+    box-shadow: none;
   }
 
   .inv-row-top {
@@ -3031,7 +3747,7 @@
     text-overflow: ellipsis;
   }
 
-  .pc.acp .pn2 {
+  .pcard.pcard-acp .pn2 {
     color: #6b4ef6;
   }
 
@@ -3049,5 +3765,52 @@
     font-weight: 600;
     align-self: center;
     flex-shrink: 0;
+  }
+
+  .pm-scroll-hint-wrap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 56px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: 8px;
+    box-sizing: border-box;
+    pointer-events: none;
+    background: transparent;
+    z-index: 4;
+  }
+
+  .pm-scroll-hint-btn {
+    pointer-events: auto;
+    border: none;
+    background: transparent;
+    border-radius: 999px;
+    width: 42px;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: none;
+    color: #64748b;
+    outline: none;
+  }
+
+  .pm-scroll-hint-btn:focus,
+  .pm-scroll-hint-btn:focus-visible {
+    outline: none;
+  }
+
+  .pm-scroll-hint-ico {
+    display: block;
+  }
+
+  @media (min-width: 901px) {
+    .pm-scroll-hint-wrap {
+      display: none !important;
+    }
   }
 </style>

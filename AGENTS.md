@@ -25,7 +25,7 @@
 | **파일럿 기준(동작·포팅)** | `docs/PILOT_FUNCTIONAL_SPEC.md` | `index.html`+`plannode.js` 분해, SvelteKit **정합·갭(§9~§10)** |
 | **배포·인프라** | `.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md` | Git, Supabase, Vercel, DNS |
 | **절차(하네스)** | `AGENTS.md` + `.cursor/harness/*` + `.cursor/agents/*` | @promptor → TASK.md → @harness-executor → @qa, GATE — **“어떻게 작업·검수”** |
-| **워크플로 시각화(가이드)** | `.cursor/plans/harness-workflow_final.md` | 1teamworks `harness-workflow_final`와 **동일 뼈대** — 모드·GATE·복붙·Mermaid **한 눈** |
+| **워크플로·경량 견제(가이드)** | `.cursor/plans/harness-workflow_final.md` | 모드·GATE·복붙·Mermaid + **「경량화 제어」**(오버엔지니어링·모듈 증가 방지) |
 
 **PRD vs 하네스:** `plannode-prd.mdc`는 제품·범위의 기준; 하네스는 **그 PRD에 맞는 작업을** 분해·승인·로그로 묶는다. `plan-output.md`·`TASK.md`에는 **PRD 연계**로 모듈·기능 ID·(해당 시) PRD 절(예: §3 F2-4, §10)을 적는다.
 
@@ -48,7 +48,27 @@ GP-10. 파일럿(Vanilla) 동작 기준을 SvelteKit 포팅 정합성 체크의 
 GP-11. 제품 범위·로드맵·“IA(정보 구조) vs LLM(F2-5)” 구분은 .cursor/rules/plannode-prd.mdc 를 우선한다.
        아젠다·plan-output·TASK.md에는 PRD 추적용으로 M#·F#-# (및 필요 시 PRD 절)을 1줄씩 남긴다.
        PRD·파일럿·통합 가이드가 충돌하면 불일치를 먼저 밝히고 조정한다.
+GP-12. 오버 엔지니어링·기술부채 누적을 지양한다. 아젠다·PRD·TASK에 없는 “미래용” 추상·래퍼·중복 계층·
+       사용 불명 스크립트·**불필요한 신규 모듈/유틸**을 붙이지 않는다(기존 경로·파일 확장을 우선).
+       TODO·debug 로그·any·무분별 의존성은 @qa 2단계(기술 부채) 기준에 맞출 것.
+       “보상” 문장만 늘리지 말고 **반복 위반**은 **구조·이름·린트**로 고쳐 **AGENTS/규율**을 **얇게** 유지한다(하네스 **누적=과세** — 엔지니어링 문서 일반론).
 ```
+
+### 경량화·오버엔지니어링 **견제** 제어 구조 (하네스)
+
+하네스는 **로직·모듈 증가**를 **GATE·스코프·검수**로 한 번에 끊는다. Plannode는 1인 도구이므로 **최대한 경량**을 **기본 정책**으로 둔다.
+
+| 제어 층 | 수단 | 역할 |
+|---------|------|------|
+| **0 — 스코프** | `plan-output` **포함/제외**, `TASK` **PRD:** | PRD M#·F#·Phase 밖·“나중에”는 **쓰지 않음**으로 박는다. |
+| **1 — 쪼개기** | `GP-5`·NOW **30분·한 파일** | 큰 뼈대·다중 모듈 **한 턴** 금지 → 쪼개서 GATE B. |
+| **2 — 승인** | **GATE A/B** | 설계/태스크 목록 **사람 승인** 전까지 구현 확대 금지. |
+| **3 — 구현** | `@harness-executor` G-STEP 4, **GP-12** | **확장 전** 동일 요구를 기존 파일·exports로 **만족시킬 수 있는지** 1문장 점검. |
+| **4 — 검수** | `@qa` 1~2단계(범위·부채) | **범위 초과(오버엔지니어링 의심)**·불필요 파일/의존성·잔여 로그/TODO. |
+
+> **새 `*.ts`/`lib/…` 하위 모듈** — PRD·TASK·plan-output **어느 줄에도 없으면** 먼저 `BACKLOG`·Stephen 확인 없이 **추가하지 않는다**.
+
+> **대외·문헌 정합 (요지):** *Guides(사전 유도) + Sensors(사후 검출)* — [Martin Fowler, Harness engineering](https://martinfowler.com/articles/harness-engineering.html) — Plannode는 `plan-output`/PRD/GATE가 **가이드**, `@qa`·빌드·린트가 **센서**다. *오버엔지니어링*은 **테스트·센서만**으로 끝까지 잡기 어렵다는 점 → **0층 스코프·GATE**가 **우선**. *층·툴 최소* — [Kruczek, Fewer layers](https://matthewkruczek.ai/blog/agent-harnesses-fewer-layers). *YAGNI* — [Fowler YAGNI](https://martinfowler.com/bliki/Yagni.html). *하네스 = 목차형 AGENTS + 상세 분산* — [OpenAI Harness (요지)](https://www.engineering.fyi/article/harness-engineering-leveraging-codex-in-an-agent-first-world). **전체 비교·표**는 `.cursor/plans/harness-workflow_final.md` **「외부 하네스·오버엔지니어링 문헌」** 절.
 
 ---
 

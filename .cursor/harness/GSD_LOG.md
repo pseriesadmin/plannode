@@ -108,6 +108,20 @@
   - UI: 숨김 file input + 상단 #BJI「가져오기」; 기존 동일 project.id 시 confirm 덮어쓰기
   - 빌드: npm run build ✓
 
+[2026-04-24 KST] 🔁 CTX  | Harness 워크플로 사이클 마무리 | .cursor/harness/TASK.md, GSD_LOG.md | — | 기록
+  - NEXT-1~5·BACKLOG(이메일 로그인) DONE/정합 확인; NOW 비어 있음 → 다음 사이클은 새 아젠다·GATE B 후 NOW
+  - GATE D/E는 제품 릴리스·QA 커밋 시점에 별도 판정(AGENTS.md)
+
+[2026-04-25 KST] ⚡ GSD+ | NOW-24 프로젝트 모달「이 기기」카드별 삭제·ACL | projects.ts, projectAcl.ts, +page.svelte | 25분 | 주의강화GSD(Supabase ACL) | GATE C:수동승인대기
+  - deleteProject: 삭제 id가 현재 선택일 때만 currentProject·nodes·CURRENT_PROJECT_KEY 정리(타 프로젝트 삭제 시 캔버스 유지)
+  - deleteAllAclRowsForProjectIfOwner: 소유자 검증 후 plannode_project_acl project_id 일괄 삭제; 미클라우드 no-op
+  - UI: .prow 좌측「삭제」·canShowProjectDelete(owner_user_id 또는 isCurrentUserProjectOwner)·confirm·closeAclModal·scheduleCloudFlush
+  - 빌드: npm run build ✓
+
+[2026-04-25 KST] ✓ GATE C | NOW-24 마감 | TASK.md·GSD_LOG | — | 👤「다음 진행」→ harness 정리·수동 체크리스트 NOW-24 항목 추가
+
+[2026-04-25 KST] ✓ GATE C | NOW-26 + NEXT-6(클립보드) 하네스 마감 | TASK.md·GSD_LOG | — | 👤채팅「GATE C 승인」
+
 ---
 
 *GSD_LOG.md | Plannode | Harness Flow v1.0*

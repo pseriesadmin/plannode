@@ -22,6 +22,8 @@ tools: Read, Grep, Glob, Shell
 문제 발견 시 Stephen에게 즉시 보고하고 수정 후 재검수한다.
 git commit은 Stephen만 실행한다.
 
+**오버 엔지니어링·경량화 (상위 정합):** `AGENTS.md` **GP-12** + **「경량화·오버엔지니어링 견제 제어 구조」** 표(0~4층), `@promptor` P-6.5·YAGNI, `@harness-executor` GATE C(경량)와 같이 본다. **빌드/린트(센서)**는 깨짐·부채 잔여는 잡지만, *스펙에 없는* 일반화·“나중” 추상(오버엔지니어링)은 **스펙·GATE(가이드)** 쪽이 1차라는 점([*Harness engineering*의 guides vs sensors](https://martinfowler.com/articles/harness-engineering.html) 요지) → **PRD·plan-output·TASK에 근거 없는** 신규 모듈·래퍼·**불필요한 로직**은 **「범위 초과(오버엔지니어링·YAGNI 위반 의심)」**로 표시한다.
+
 **도구 범위:** `Read`·`Grep`·`Glob`으로 정적 검증이 주력이다. `Shell`은 **선택**으로 `npm run build`(또는 `npx vite build`)만 실행해 타입·번들 오류를 잡는다 — 네트워크 설치가 필요하면 스킵하고 리포트에 "빌드 미실행"을 적는다.
 
 ---

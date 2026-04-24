@@ -4,18 +4,22 @@
 # 확정: 👤 GATE B 승인
 # 관리: @harness-executor 실행 중 NOW / NEXT / DONE / BACKLOG 갱신
 # 주의: GATE B 승인 전 @harness-executor 호출 금지
+# GP-12: 범위·PRD外 선제 일반화·불필요 추상·debug/TODO/any/무분별 의존성 지양 — @qa 2단계
 
 > **경량 경로 사용 시**: 이 파일 상단에 `경량 경로: step2·GATE A 생략` 한 줄 추가 후 GATE B 진입.
+
+경량 경로: step2·GATE A 생략
 
 ---
 
 ## 현재 아젠다
 
 ```
-단계: NEXT-5(자동정렬·mx/my 전체 초기화) 구현 완료 — BACKLOG: Supabase 이메일 로그인 등
-PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
-상태: #BAR → resetAllManualLayout; 수동 좌표 있을 때만 confirm + undo 스냅 + schedulePersist
-참고: docs/supabase/plannode_workspace.sql 수동 실행 + Anonymous sign-ins 필수
+단계: (대기) — 2026-04-25 **GATE C ✓** (NOW-26 + NEXT-6) 하네스 마감. 다음 사이클: 새 PRD/아젠다 → **GATE B** 후 NOW
+최근 완료(기록):
+  - NOW-26: 3트랙 배지·PRD/트리·AI 탭 buildPrompt·iaExporter·`Node.metadata`·파일럿 21배지
+  - NEXT-6: AI 탭 클립보드 원클릭
+차기(미착수): (없음 — NEXT-7 A+B 2026-04-25 구현) 이후: 👤 **GATE C** / 배포 **ANTHROPIC_API_KEY**·`plan_nodes`·`app_node_id` SQL
 ```
 
 ---
@@ -32,6 +36,7 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 ☑ 노드 제목 클릭 편집 모달, 배지·삭제·그룹 선택·스마트 가이드(이동 시) 시각 확인
 ☑ 프로젝트 전환 후 노드·탭(PRD/Spec/AI)이 현재 프로젝트와 동기되는가?
 ☑ localStorage: 새로고침 후 프로젝트·노드 복구 (SvelteKit stores 경로; 파일럿 단독 §1.4와 다름 — 하이브리드 기준으로 검증)
+☑ 프로젝트 관리 모달: 소유 카드만「삭제」표시·삭제 후 목록·현재 프로젝트·ACL(클라우드) 정합 (NOW-24)
 ```
 
 ---
@@ -59,8 +64,8 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 
 ```
 👤 승인 여부:  [x] 승인
-👤 확정 일시:  2026-04-23 14:30 (KST)
-👤 수정 내역:  —
+👤 확정 일시:  2026-04-25 (KST) — NOW-24 프로젝트 카드 삭제·ACL
+👤 수정 내역:  이전: 2026-04-23 14:30 NOW-1~4 확정
 ```
 
 > 위 승인 완료 후 `@harness-executor` 호출
@@ -69,8 +74,9 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 
 ## NOW (현재 실행 중)
 
-> **대기** — BACKLOG( 이메일 로그인 / 자동 정렬 등 ).  
-> 최근 완료: **NEXT-4(JSON 가져오기 plannode.tree v1)** ✓ 2026-04-24
+```
+(없음 — NEXT-7 서버/DB 연동 2026-04-25 반영. 배포: Vercel `ANTHROPIC_API_KEY`·Supabase `plan_nodes`/`app_node_id` SQL)
+```
 
 ---
 
@@ -80,9 +86,9 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 > **수동 검증 전용**: 위 체크리스트 완료 후 `GATE C 수동 검증 완료` 한 줄을 채팅에 남기면, NOW-23 착수 전 GATE로 기록 가능.
 
 ```
-👤 검증 결과:  [x] 승인(NOW-1~23)  [x] 수동 체크리스트 완료  [ ] 반려
+👤 검증 결과:  [x] 승인(NOW-1~25)  [x] 코드 검증(NOW-26)  [x] 승인(NOW-24)  [x] **승인(NOW-26 + NEXT-6, GATE C 최종)**  [ ] 반려
 👤 수정 지시:  —
-👤 확정 일시:  2026-04-24 (KST) — NOW-23 영속화 검증 완료
+👤 확정 일시:  2026-04-25 (KST) — **GATE C** NOW-26 + NEXT-6(클립보드) · 👤채팅「GATE C 승인」
 ```
 
 ---
@@ -95,6 +101,8 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 - [x] NEXT-3: Supabase 동기 — plannode_workspace + ☁↑/☁↓ + 익명 Auth (✓ 2026-04-24)
 - [x] NEXT-4: JSON 가져오기 — plannode.tree v1 → stores/localStorage + #BJI (✓ 2026-04-24)
 - [x] NEXT-5: 자동정렬 — 전체 mx/my 초기화 + #BAR + undo + index.html 동기 (✓ 2026-04-24)
+- [x] NEXT-6: AI 탭 **클립보드 원클릭** — `#ai-copy`·`#ai-result-toolbar` (`+page.svelte` + `plannodePilot.js`) (✓ 2026-04-25)
+- [x] NEXT-7: 서버 **callAI** (`POST /api/ai/messages`, Anthropic) · **plan_nodes** `meta` upsert(`POST /api/plan-nodes/sync-meta` + `app_node_id`) — **범위:** [.cursor/harness/NEXT7_SCOPE.md](NEXT7_SCOPE.md) (✓ 2026-04-25)
 ```
 
 ---
@@ -102,6 +110,10 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 ## DONE
 
 ```
+- [x] NEXT-7: callAI + plan_nodes·meta (`/api/ai/messages`, `/api/plan-nodes/sync-meta`, `Project.plan_project_id`) (✓ 2026-04-25)
+- [x] NOW-26: 배지 3트랙·AI 문서 자동화 연동 (✓ 2026-04-25 구현 — 후속: PRD 3트랙 열+AI탭 iaExporter ✓)
+- [x] NEXT-6: AI 프롬프트 클립보드 원클릭 (✓ 2026-04-25)
+- [x] NOW-25: 반응형(≤900px) 메뉴 시트 UX (✓ 2026-04-25)
 - [x] NOW-1: 노드 설정 모달 CSS 스코프 수정 (✓ 2026-04-23 14:45)
 - [x] NOW-2: 노드 UI/UX 개선 및 미니맵 강화 (✓ 2026-04-23 15:10)
 - [x] NOW-3: 스마트 가이드·그룹 이동·무한 댑스/노드 (✓ 2026-04-23)
@@ -128,6 +140,7 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 - [x] NEXT-2: Export — plannode.tree v1 JSON·#BJN·slug 파일명 (✓ 2026-04-24)
 - [x] NEXT-4: Import — plannode.tree v1·#BJI·parse + upsertImportedPlannodeTreeV1 (✓ 2026-04-24)
 - [x] NEXT-5: 자동정렬 — resetAllManualLayout·#BAR·plannodePilot.js (✓ 2026-04-24)
+- [x] NOW-24: 프로젝트 모달 카드별 삭제·소유자·ACL·deleteProject — projects.ts, projectAcl.ts, +page.svelte (✓ 2026-04-25, GATE C ✓)
 ```
 
 ---
@@ -155,7 +168,9 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 | GATE | 결과 | 확정 일시 | 담당 | 비고 |
 |------|------|-----------|------|------|
 | GATE A | ✓ 스킵 | 2026-04-23 | 👤→🤖 | 하이브리드 캔버스 Step4 검증·버그 픽스 |
+| GATE A | ✓ 스킵 | 2026-04-25 | 👤→🤖 | 경량: NOW-24 프로젝트 카드 삭제 |
 | GATE B | ✓ 승인 | 2026-04-23 14:30 | 👤→🤖 | TASK.md NOW-1~4 확정 |
+| GATE B | ✓ 승인 | 2026-04-25 | 👤→🤖 | NOW-24 확정·Plan Mode TASK 반영 |
 | GATE C (NOW-1) | ✓ 승인 | 2026-04-23 14:45 | 👤→🤖 | 모달 CSS 스코프 수정·검증 완료 |
 | GATE C (NOW-2) | ✓ 승인 | 2026-04-23 15:10 | 👤→🤖 | 노드 UI/UX 개선·미니맵 강화 완료 |
 | GATE C (NOW-3) | ✓ 승인 | 2026-04-23 | 👤→🤖 | 스마트 가이드·Shift 그룹 이동 완료 |
@@ -170,5 +185,7 @@ PRD: PILOT_FUNCTIONAL_SPEC.md §1·§9~§10 (DOM·상태·포팅 갭)
 | GATE C (NEXT-3 Supabase) | 구현 ✓ | 2026-04-24 | 🤖 | plannode_workspace·☁↑☁↓·익명+RLS; SQL 수동 |
 | GATE C (NEXT-4 JSON Import) | 구현 ✓ | 2026-04-24 | 🤖 | #BJI·plannodeTreeV1.ts·upsertImported; 동일 ID confirm |
 | GATE C (NEXT-5 자동정렬) | 구현 ✓ | 2026-04-24 | 🤖 | #BAR·mx/my 전체 null·confirm·undo·persist |
+| GATE C (NOW-24 프로젝트 카드 삭제) | ✓ 승인 | 2026-04-25 | 👤→🤖 | 채팅「다음 진행」마감; 삭제 UI·ACL·flush·빌드 검증 |
+| GATE C (NOW-26 + NEXT-6) | ✓ 승인 | 2026-04-25 | 👤→🤖 | 21배지·3트랙·AI탭 buildPrompt·클립보드; 👤채팅 `GATE C 승인` |
 | GATE D | — | — | — | 전체 구현 완료 여부 판정 |
 | GATE E | — | — | — | QA 판정·커밋 허가 여부 |

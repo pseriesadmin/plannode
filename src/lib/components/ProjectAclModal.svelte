@@ -80,16 +80,13 @@
   }
 </script>
 
-<div class="mbg">
+<div class="mbg" role="presentation" on:click|self={closeAclModal}>
   <div class="mo">
     <div class="hdr">
-      <h3>프로젝트 접근 계정</h3>
+      <h3>공유계정 설정</h3>
       <button type="button" class="mcl" on:click={closeAclModal}>✕</button>
     </div>
     <p class="pn">{project.name}</p>
-    <p class="desc">
-      등록된 이메일로 로그인한 사용자만 이 프로젝트의 노드를 추가·수정·삭제하고, 뷰어·출력(PR/MD/JSON)을 쓸 수 있어.
-    </p>
 
     {#if loadErr}
       <p class="err preline">{loadErr}</p>
@@ -130,7 +127,7 @@
 
     {#if canManage && (rows.length > 0 || project.owner_user_id)}
       <div class="add">
-        <span class="lb">이메일 초대</span>
+        <span class="lb">이메일 등록</span>
         <div class="row">
           <input class="in" type="email" placeholder="동료@example.com" bind:value={newEmail} />
           <button type="button" class="bcr sm" disabled={busy || !newEmail.trim()} on:click={() => void onAdd()}>추가</button>
@@ -183,16 +180,10 @@
     color: #888;
   }
   .pn {
-    margin: 0 0 8px;
+    margin: 0 0 14px;
     font-weight: 700;
     color: #6b4ef6;
     font-size: 14px;
-  }
-  .desc {
-    margin: 0 0 14px;
-    font-size: 12px;
-    color: #555;
-    line-height: 1.55;
   }
   .err {
     color: #b91c1c;

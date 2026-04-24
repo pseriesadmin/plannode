@@ -14,6 +14,15 @@
 - **파일럿 정합**은 `docs/PILOT_FUNCTIONAL_SPEC.md` — PRD에 없는 “Vanilla vs SvelteKit 갭”은 §9~§10이 우선, PRD F·Phase와 **모순**이 있으면 GATE A/B 전에 정리.
 - **상세 TypeScript/AI·4-레이어**는 PRD가 가리키는 `plannode-ai-enhancement-v3.md` 등과 **PRD·TASK**를 맞출 것.
 
+## 최소 구현·기술부채·경량화 (하네스 전역)
+
+- **오버 엔지니어링 견제:** `plan-output`·`TASK` **포함/제외**·PRD M#·F#·Phase를 넘는 **불필요한 로직**·**범용 뼈대**·PRD 밖 v2/LLM 파이프 **선제** — 금지(GP-7·GP-12·`@promptor` P-6.5).
+- **모듈·파일 수 억제:** “한 번 더 감싸는” 레이어, **PRD·TASK에 이름 없는** `src/lib/...` 신규 모듈 — **가능한 한 기존 파일에** 붙이거나 `BACKLOG`+승인 후. 동일 UX는 **최소 import 경로** 유지.
+- **기술부채:** `console.log`/TODO/any/미사용 import/무분별 의존성은 **@qa 2단계**에서 잡는다. `npm` 신규 패키지·스키마 컬럼·공개 API는 `TASK`·GATE B 없이 **불가**.
+- **제어 구조(요지):** `AGENTS.md` 표 **경량화·오버엔지니어링 견제 제어 구조** = 스캐폴드가 아니라 **GATE + 스코프 + NOW 크기 + @qa** 의 다층 차단. 상세: `.cursor/plans/harness-workflow_final.md` **「경량화 제어」** 절.
+- **Guides vs Sensors (외부 권고·정합):** *Guides(사전)* = `AGENTS`·`plan-output`·PRD·`@promptor` (행동 유도). *Sensors(사후)* = `npm run build`·`@qa`·린트 (깨짐/부채 검출). **불필요한 복잡도·“멋진” 일반화**는 센서만으론 부족하므로 **포함/제외·GATE**가 1차 방어 — `harness-workflow_final.md` **「외부 하네스·오버엔지니어링」** 절.
+- **층·툴 최소:** 하네스 전용 **문서·GATE·에이전트** 층을 “부작위 방지”만으로 **무한 증가**시키지 않는다(신규 체크리스트·sub-agent = **의무 정당화** 없으면 넣지 않음).
+
 ---
 
 ## 폴더 파일 역할

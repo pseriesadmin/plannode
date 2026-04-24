@@ -697,6 +697,21 @@ export async function isCurrentUserProjectOwner(project: Project): Promise<boole
   return !!(data as { is_owner?: boolean } | null)?.is_owner;
 }
 
+/** 소유자 세션만: 해당 프로젝트의 ACL 행 전부 삭제(RLS). 클라우드 미설정 시 no-op 성공. */
+export async function deleteAllAclRowsForProjectIfOwner(
+  project: Project
+): Promise<{ ok: boolean; message?: string }> {
+  if (!isAclEnforced()) return { ok: true };
+  if (!(await isCurrentUserProjectOwner(project))) {
+    return { ok: false, message: '소유자만 이 프로젝트의 접근 정보를 완전히 지울 수 있어.' };
+  }
+  const { error } = await supabase.from(TABLE).delete().eq('project_id', project.id);
+  if (error) {
+    return { ok: false, message: userFacingAclErrorFromSupabase(error) };
+  }
+  return { ok: true };
+}
+
 /** ACL 편집(소유자 등록·멤버 추가): 플랫폼 마스터 | 소유자 | 레거시(소유자·목록 없음) 첫 등록 */
 export async function canManageProjectAcl(project: Project): Promise<boolean> {
   if (!isAclEnforced()) return false;

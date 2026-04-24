@@ -3,23 +3,69 @@
  * DOM 계약: docs/PILOT_FUNCTIONAL_SPEC.md §1.1
  */
 import { buildPrdMarkdownV20, buildPrdViewHtmlV20 } from '$lib/prdStandardV20';
+import {
+  migrateLegacyBadgesToSet,
+  flattenBadgeSet,
+  BADGE_COLORS,
+  BADGE_LABELS,
+  DEV_BADGE_KEYS,
+  UX_BADGE_KEYS,
+  PRJ_BADGE_KEYS,
+  getBadgeSetFromNodeInput,
+  formatBadgeTracksForDisplay
+} from '$lib/ai/badgePromptInjector';
+import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 
 const V = '#6b4ef6',
   RD = '#dc2626',
   GY = '#4b5563';
 const DC = ['#9ca3af', '#6b4ef6', '#818cf8', '#f59e0b', '#10b981', '#f43f5e', '#0ea5e9', '#a78bfa'];
 const DN = ['루트', '모듈', '기능', '상세기능', '서브기능', '세부항목', '하위항목', '기타'];
-const BCLS = { tdd: 'btdd', ai: 'bai', crud: 'bcrud', api: 'bapi', usp: 'busp' };
-const ON = {
-  tdd: 'background:#fff1f0;color:#dc2626;border-color:#fca5a5',
-  ai: 'background:#f0fdf4;color:#16a34a;border-color:#86efac',
-  crud: 'background:#eff6ff;color:#1d4ed8;border-color:#93c5fd',
-  api: 'background:#faf5ff;color:#7c3aed;border-color:#c4b5fd',
-  usp: 'background:#fffbeb;color:#b45309;border-color:#fcd34d'
+const OFF_CHIP = 'background:#fff;color:#888;border-color:#d0cbc4;';
+const bl = (b) => {
+  const u = String(b).toUpperCase();
+  return BADGE_LABELS[u] || u;
 };
-const OFF = 'background:#fff;color:#888;border-color:#d0cbc4';
-const BTYPES = ['tdd', 'ai', 'crud', 'api', 'usp'];
-const bl = (b) => ({ tdd: 'TDD', ai: 'AI', crud: 'CRUD', api: 'API', usp: 'USP' }[b] || b);
+function chipStyle(key, isOn) {
+  if (!isOn) return OFF_CHIP;
+  const c = BADGE_COLORS[key];
+  if (!c) return 'background:#f3f4f6;color:#1a1a1a;border-color:#d1d5db;';
+  return `background:${c.bg};color:${c.text};border-color:${c.border};`;
+}
+function baseChipBtn() {
+  return 'padding:3px 8px;border-radius:20px;font-size:9px;font-weight:600;cursor:pointer;border:1.5px solid;';
+}
+function badgeClassForNode(b) {
+  const k = String(b).toLowerCase();
+  if (['tdd', 'crud', 'api', 'auth', 'realtime', 'payment'].includes(k)) return 'bdev';
+  if (['navi', 'head', 'list', 'card', 'form', 'butt', 'modal', 'feed', 'dash', 'media'].includes(k)) return 'bux';
+  if (['usp', 'mvp', 'ai', 'i18n', 'mobile'].includes(k)) return 'bprj';
+  return 'bggen';
+}
+function cloneBadgeSet(s) {
+  return { dev: [...s.dev], ux: [...s.ux], prj: [...s.prj] };
+}
+function getBadgeSetFromNode(n) {
+  const mb = n.metadata && n.metadata.badges;
+  if (mb && Array.isArray(mb.dev) && Array.isArray(mb.ux) && Array.isArray(mb.prj)) {
+    return cloneBadgeSet(mb);
+  }
+  return migrateLegacyBadgesToSet(n.badges || []);
+}
+function applyBadgeSetToNode(n, set) {
+  n.metadata = n.metadata || {};
+  n.metadata.badges = cloneBadgeSet(set);
+  n.badges = flattenBadgeSet(n.metadata.badges);
+}
+function buildTrackChipsHtml(track, title, keys, working) {
+  const btns = keys
+    .map((key) => {
+      const isOn = working[track].includes(key);
+      return `<button type="button" class="bchip" data-track="${track}" data-key="${key}" style="${baseChipBtn()}${chipStyle(key, isOn)}">${key}</button>`;
+    })
+    .join('');
+  return `<div class="btrack" style="margin-top:8px"><div style="font-size:10px;font-weight:600;color:#64748b;margin-bottom:4px">${title}</div><div style="display:flex;flex-wrap:wrap;gap:4px">${btns}</div></div>`;
+}
 const esc = (s) => {
   const d = document.createElement('div');
   d.textContent = s || '';
@@ -50,6 +96,10 @@ let projects = [],
 
 let syncing = false;
 let onPersist = null;
+/** @type {null | (() => Promise<string | null>)} */
+let getAccessToken = null;
+/** @type {null | (() => string | null | undefined)} */
+let getPlanProjectId = null;
 let persistTimer = null;
 
 /** 실행 취소(Undo): 노드 전체 스냅샷 스택 (최근 작업만 복원) */
@@ -108,6 +158,23 @@ function toast(m) {
 
 const find = (id) => nodes.find((n) => n.id === id);
 const getDC = (d) => DC[((d % DC.length) + DC.length) % DC.length];
+
+/** num 비어 있을 때(플레이스홀더) 표시·저장용 — 형제 순서 = nodes 상 동일 parent_id 그룹 순서 */
+function defaultNumForNode(node) {
+  if (!node) return '';
+  if (!node.parent_id) {
+    const t = (node.num && String(node.num).trim()) || '';
+    return t || 'PRD';
+  }
+  const p = find(node.parent_id);
+  if (!p) return '';
+  const sibs = nodes.filter((n) => n.parent_id === node.parent_id);
+  const idx = sibs.findIndex((k) => k.id === node.id);
+  const ord = (idx >= 0 ? idx : sibs.length - 1) + 1;
+  const pfx = p.num && String(p.num).trim() ? `${p.num}.` : '';
+  return pfx + ord;
+}
+
 function getDepth(id, v = new Set()) {
   if (v.has(id)) return 0;
   v.add(id);
@@ -228,10 +295,13 @@ function toMdLine(n, d = 0, lines = [], path = new Set()) {
   }
   path.add(n.id);
   const k = Math.min(d, _MD_DMAX);
-  const indent = '  '.repeat(k),
-    badges = (n.badges || []).map((b) => bl(b)).join(' ');
+  const indent = '  '.repeat(k);
+  const tr = formatBadgeTracksForDisplay(getBadgeSetFromNodeInput(n));
   const prefix = d === 0 ? '#' : d === 1 ? '##' : d === 2 ? '###' : '-';
-  lines.push(`${indent}${prefix} [${n.num || '—'}] ${n.name}${badges ? ' (' + badges + ')' : ''}`);
+  const badgePart = tr === '—' ? '' : ` (${tr})`;
+  lines.push(
+    `${indent}${prefix} [${n.num && String(n.num).trim() ? n.num : defaultNumForNode(n) || '—'}] ${n.name || '새 노드'}${badgePart}`
+  );
   if (n.description) lines.push(`${indent}  ${n.description}`);
   nodes.filter((c) => c && c.parent_id === n.id).forEach((c) => toMdLine(c, d + 1, lines, path));
   path.delete(n.id);
@@ -282,8 +352,11 @@ export function buildSpec() {
     .map((n) => {
       const d = getDepth(n.id),
         color = getDC(d);
-      const bgs = (n.badges || []).map((b) => `<span class="bg ${BCLS[b]}">${bl(b)}</span>`).join(' ');
-      return `<tr><td style="font-family:monospace;color:#888;font-size:11px">${esc(n.num || '—')}</td><td><span class="depth-pill" style="background:${color}">${DN[d] ?? 'Lv' + d}</span></td><td style="font-weight:500;color:#1a1a1a">${esc(n.name)}</td><td style="color:#888">${esc(n.description || '—')}</td><td>${bgs || '<span style="color:#ddd;font-size:11px">—</span>'}</td></tr>`;
+      const bgs = (n.badges || [])
+        .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
+        .join(' ');
+      const numDisp = n.num && String(n.num).trim() ? n.num : defaultNumForNode(n) || '—';
+      return `<tr><td style="font-family:monospace;color:#888;font-size:11px">${esc(numDisp)}</td><td><span class="depth-pill" style="background:${color}">${DN[d] ?? 'Lv' + d}</span></td><td style="font-weight:500;color:#1a1a1a">${esc(n.name || '새 노드')}</td><td style="color:#888">${esc(n.description || '—')}</td><td>${bgs || '<span style="color:#ddd;font-size:11px">—</span>'}</td></tr>`;
     })
     .join('');
 }
@@ -292,22 +365,114 @@ function getTreeText() {
   return nodes.filter((n) => !n.parent_id).flatMap((r) => toMdLine(r)).join('\n');
 }
 
-function triggerAI(type) {
+const AI_INTENT_BY_TYPE = {
+  prd: 'PRD',
+  wireframe: 'WIREFRAME_SPEC',
+  miss: 'SCREEN_LIST',
+  tdd: 'FUNCTIONAL_SPEC',
+  harness: 'IA_STRUCTURE'
+};
+
+function placeAiResult(text) {
+  const res = document.getElementById('ai-result');
+  const toolbar = document.getElementById('ai-result-toolbar');
+  if (res) {
+    res.className = 'ai-result show';
+    res.textContent = text;
+  }
+  if (toolbar) {
+    toolbar.classList.add('visible');
+    toolbar.setAttribute('aria-hidden', 'false');
+  }
+}
+
+async function triggerAI(type) {
   if (!curP) {
     toast('프로젝트를 먼저 열어줘');
     return;
   }
-  const prompts = {
-    prd: `다음 기능 트리를 완전한 PRD 문서로 변환해줘:\n\n${getTreeText()}`,
-    miss: `다음 기능 트리에서 누락된 기능을 탐지해줘:\n\n${getTreeText()}`,
-    tdd: `다음 기능 트리에서 TDD 우선순위(P0/P1/P2)를 정리해줘. 각 도메인별 핵심 테스트 케이스도 제안해줘:\n\n${getTreeText()}`,
-    harness: `다음 기능 트리를 Cursor AI Harness 워크플로우 플랜으로 변환해줘:\n\n${getTreeText()}`
-  };
-  void prompts[type];
-  const res = document.getElementById('ai-result');
-  if (res) {
-    res.className = 'ai-result show';
-    res.textContent = '분석 준비 중... (실제 배포 시 Claude API 연동)';
+  const outputIntent = AI_INTENT_BY_TYPE[type] || 'PRD';
+  const prompt = buildPrompt(
+    nodes,
+    { name: curP.name, description: curP.description || '' },
+    outputIntent,
+    'root'
+  );
+  const clipText = formatPromptForClipboard(prompt);
+
+  const token = typeof getAccessToken === 'function' ? await getAccessToken() : null;
+  if (!token) {
+    placeAiResult(clipText);
+    toast('System/User 프롬프트를 AI 탭에 표시했어. 로그인하면 서버 AI 응답을 받을 수 있어.「클립보드에 복사」로 수동 실행도 할 수 있어.');
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/ai/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ system: prompt.system, user: prompt.user })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 503) {
+      placeAiResult(clipText);
+      toast('서버 Supabase 환경이 없어. 프롬프트만 표시했어.');
+      return;
+    }
+    if (r.status === 401) {
+      placeAiResult(clipText);
+      toast('세션이 만료됐거나 로그인이 필요해. 프롬프트는 그대로 두었어.');
+      return;
+    }
+    if (!r.ok) {
+      const msg = j?.message || r.statusText || '요청 실패';
+      placeAiResult(clipText);
+      toast(`AI 요청 실패: ${msg}`);
+      return;
+    }
+    if (j.code === 'NO_KEY' || j.ok === false) {
+      placeAiResult(clipText);
+      toast(j.hint || '서버에 ANTHROPIC_API_KEY가 없어. 클립보드로 복사해 수동 실행해줘.');
+      return;
+    }
+    if (j.text) {
+      placeAiResult(j.text);
+      toast('AI 응답을 AI 탭에 표시했어.');
+      const planPid = typeof getPlanProjectId === 'function' ? getPlanProjectId() : null;
+      if (planPid && String(planPid).trim()) {
+        try {
+          const sync = await fetch('/api/plan-nodes/sync-meta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              planProjectId: String(planPid).trim(),
+              nodes: nodes.map((n) => ({
+                id: n.id,
+                name: n.name,
+                num: n.num,
+                description: n.description,
+                badges: n.badges,
+                metadata: n.metadata,
+                node_type: n.node_type
+              }))
+            })
+          });
+          if (!sync.ok && import.meta.env.DEV) {
+            const sj = await sync.json().catch(() => ({}));
+            console.warn('[plannodePilot] plan_nodes sync-meta', sj?.message || sync.status);
+          }
+        } catch (e) {
+          if (import.meta.env.DEV) console.warn('[plannodePilot] sync-meta', e);
+        }
+      }
+      return;
+    }
+    placeAiResult(clipText);
+    toast('응답 본문이 비어 있어. 프롬프트를 사용해줘.');
+  } catch (e) {
+    placeAiResult(clipText);
+    toast('네트워크 오류로 프롬프트만 표시했어.');
+    if (import.meta.env.DEV) console.warn('[plannodePilot] triggerAI', e);
   }
 }
 
@@ -439,6 +604,9 @@ function buildPlannodeExportV1() {
     description: n.description ?? '',
     num: n.num ?? '',
     badges: Array.isArray(n.badges) ? [...n.badges] : [],
+    ...(n.metadata && typeof n.metadata === 'object'
+      ? { metadata: JSON.parse(JSON.stringify(n.metadata)) }
+      : {}),
     node_type: n.node_type || 'detail',
     mx: n.mx == null ? null : n.mx,
     my: n.my == null ? null : n.my
@@ -489,6 +657,14 @@ const ap = (id) => {
 };
 const gp = (n) => (n.mx != null && n.my != null ? { x: n.mx, y: n.my } : ap(n.id));
 
+/** 연결선·SVG 앵커 Y — ·nd 실제 세로 중앙(`.nw`의 `top:50%` + 버튼과 동일). 고정 44px은 가변 카드 높이에서 +와 어긋남 */
+function nodeCenterY(n) {
+  const top = gp(n).y;
+  const el = document.getElementById('nd-' + n.id);
+  if (el && el.offsetHeight > 0) return top + el.offsetHeight / 2;
+  return top + 44;
+}
+
 function render() {
   clearSmartGuides();
   lm = {};
@@ -501,16 +677,21 @@ function render() {
       // (현재 루트의 모든 자식들을 배치 후 그 다음부터)
       globalRow = Object.keys(lm).length;
     });
-  CV.querySelectorAll('.nw,.cp').forEach((e) => e.remove());
+  CV.querySelectorAll('.nw,.cp-row').forEach((e) => e.remove());
   EG.innerHTML = '';
   const mc = Math.max(0, ...nodes.map((n) => lm[n.id]?.col || 0));
+  const cpRow = document.createElement('div');
+  cpRow.className = 'cp-row';
   for (let i = 0; i <= mc; i++) {
     const p = document.createElement('div');
     p.className = 'cp cp' + Math.min(i, 4);
-    p.style.left = i * COL_W + 28 + 'px';
     p.textContent = DN[i] ?? `Lv${i}`;
-    CV.appendChild(p);
+    p.style.flex = `0 0 ${COL_W}px`;
+    p.style.minWidth = '0';
+    p.style.boxSizing = 'border-box';
+    cpRow.appendChild(p);
   }
+  CV.appendChild(cpRow);
   nodes.forEach((n) => {
     const d = getDepth(n.id),
       bc = getDC(d),
@@ -526,8 +707,25 @@ function render() {
       (selId === n.id ? ' sel' : '') +
       (multiSel.has(n.id) ? ' msel' : '');
     nd.id = 'nd-' + n.id;
-    const bgs = (n.badges || []).map((b) => `<span class="bg ${BCLS[b]}">${bl(b)}</span>`).join('');
-    nd.innerHTML = `<div class="ndt"><div class="nb" style="background:${bc}"></div><div style="flex:1;min-width:0"><div class="nn">${esc(n.name)}<span class="ndepth">L${d}</span></div></div></div>${n.description ? `<div class="nds">${esc(n.description)}</div>` : ''}<div class="nm">${bgs}<span class="nnum">${n.num || ''}</span></div><div class="na" id="na-${n.id}"></div>`;
+      const bgs = (n.badges || [])
+        .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
+        .join('');
+    const hasDesc = !!(n.description && String(n.description).trim());
+    const numDisp = esc(n.num && String(n.num).trim() ? n.num : defaultNumForNode(n));
+    nd.innerHTML = `<div class="ndt"><div class="nb" style="background:${bc}"></div><div style="flex:1;min-width:0"><div class="nn">${esc(n.name || '새 노드')}<span class="ndepth">L${d}</span></div></div></div>${
+      hasDesc
+        ? `<div class="nds-wrap"><div class="nds">${esc(n.description || '')}</div><div class="nds-tooltip" role="tooltip"><div class="nds-tooltip-t">미리보기</div><div class="nds-tooltip-b"></div></div></div>`
+        : ''
+    }<div class="nm"><div class="nm-clamp">${bgs}</div></div><div class="na" id="na-${n.id}"><span class="nnum">${numDisp}</span></div>`;
+    if (hasDesc) {
+      const tipB = nd.querySelector('.nds-tooltip-b');
+      if (tipB) tipB.textContent = n.description || '';
+      const tip = nd.querySelector('.nds-tooltip');
+      if (tip) {
+        tip.addEventListener('pointerdown', (e) => e.stopPropagation());
+        tip.addEventListener('click', (e) => e.stopPropagation());
+      }
+    }
     nd.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || e.button !== 0) return;
       // 버튼 클릭은 sDrag 시작 안 함 (button 요소 또는 그 자식만 제외)
@@ -642,9 +840,9 @@ function drawEdges() {
         cp = gp(c),
         pw = d === 0 ? 168 : 188;
       const x1 = pp.x + pw,
-        y1 = pp.y + 44,
+        y1 = nodeCenterY(n),
         x2 = cp.x,
-        y2 = cp.y + 44,
+        y2 = nodeCenterY(c),
         mx = (x1 + x2) / 2;
       const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       p.setAttribute('d', `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`);
@@ -714,22 +912,22 @@ function addChild(pid) {
   const p = find(pid);
   if (!p) return;
   pushUndoSnapshot();
-  const kids = nodes.filter((n) => n.parent_id === pid);
-  const id = 'n' + ++nc,
-    num = (p.num ? p.num + '.' : '') + (kids.length + 1);
+  const id = 'n' + ++nc;
   const d = getDepth(pid),
     typeMap = { 0: 'module', 1: 'feature' };
   
   // 새 노드: mx/my를 null로 두어 render()의 bld() 자동 배치 사용
   // bld()가 트리 구조 기반으로 정확히 배치함
+  // num 은 '' → 모달에서 "분류 기호 및 번호 입력" placeholder 표시, 저장 시 defaultNumForNode
   const nn = {
     id,
     parent_id: pid,
-    name: '새 노드',
+    name: '',
     description: '',
     node_type: typeMap[d] ?? 'detail',
-    num,
+    num: '',
     badges: [],
+    metadata: { badges: { dev: [], ux: [], prj: [] } },
     mx: null, // 자동 배치 (bld 사용)
     my: null
   };
@@ -765,34 +963,38 @@ function cDel(id) {
 }
 
 function showEdit(n) {
-  const d = getDepth(n.id),
-    cb = [...(n.badges || [])];
-  const bh = BTYPES.map(
-    (b) =>
-      `<button type="button" data-b="${b}" style="padding:3px 9px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1.5px solid;${cb.includes(b) ? ON[b] : OFF}">${bl(b)}</button>`
-  ).join('');
+  const working = cloneBadgeSet(getBadgeSetFromNode(n));
+  const bh = [
+    buildTrackChipsHtml('dev', '🟣 개발 (DEV)', [...DEV_BADGE_KEYS], working),
+    buildTrackChipsHtml('ux', '🔵 화면 (UX)', [...UX_BADGE_KEYS], working),
+    buildTrackChipsHtml('prj', '🟢 기획 (PRJ)', [...PRJ_BADGE_KEYS], working)
+  ].join('');
   showIM(
-    `<h3>노드 편집 <span style="font-size:11px;color:#bbb;font-weight:400">— ${DN[d] ?? 'Lv' + d}</span></h3>
-    <label class="fl">이름</label><input class="fi ein" value="${esc(n.name)}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px">
-    <label class="fl">설명</label><textarea class="fi eid" rows="2" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;resize:vertical;margin-bottom:10px">${esc(n.description || '')}</textarea>
-    <label class="fl">번호</label><input class="fi einum" value="${esc(n.num || '')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px">
-    <label class="fl">배지</label><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${bh}</div>`,
+    `<input class="fi ein" type="text" value="${esc(n.name)}" placeholder="${esc('노드 이름 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off">
+    <textarea class="fi eid" rows="2" placeholder="${esc('노드 설명 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;resize:vertical;margin-bottom:10px" autocomplete="off">${esc(n.description || '')}</textarea>
+    <input class="fi einum" type="text" value="${esc(String(n.num ?? '').slice(0, 10))}" placeholder="${esc('분류 기호 및 번호 입력')}" maxlength="10" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off" title="최대 10자(영·숫자·한글)">
+    <label class="fl">배지 (21 · 3트랙)</label><div style="max-height:min(52vh,420px);overflow-y:auto;padding-right:4px;margin-top:4px">${bh}</div>`,
     [
       ['취소', GY, null],
       [
         '저장',
         V,
         () => {
+          // hydrateFromStore(스토어 동기) 후 이전 노드 참조 n은 nodes 배열에 없을 수 있음 — id로 최신 객체를 잡는다
+          const target = find(n.id) ?? n;
           if (skipFirstEditSaveUndo.has(n.id)) {
             skipFirstEditSaveUndo.delete(n.id);
           } else {
             pushUndoSnapshot();
           }
-          const nm = document.querySelector('.ein')?.value?.trim();
-          if (nm) n.name = nm;
-          n.description = document.querySelector('.eid')?.value?.trim() ?? '';
-          n.num = document.querySelector('.einum')?.value?.trim() ?? '';
-          n.badges = [...cb];
+          const nm = document.querySelector('.ein')?.value?.trim() ?? '';
+          target.name = nm.length > 0 ? nm : (target.name ? target.name : '새 노드');
+          target.description = document.querySelector('.eid')?.value?.trim() ?? '';
+          const numIn = String(document.querySelector('.einum')?.value ?? '')
+            .trim()
+            .slice(0, 10);
+          target.num = numIn || defaultNumForNode(target);
+          applyBadgeSetToNode(target, working);
           nodes = [...nodes];
           render();
           toast('저장됨(이 기기) · 클라우드 자동 반영');
@@ -800,22 +1002,18 @@ function showEdit(n) {
       ]
     ],
     (bg) => {
-      bg.querySelectorAll('[data-b]').forEach((btn) => {
+      bg.querySelectorAll('.bchip').forEach((btn) => {
         btn.onclick = () => {
-          const b = btn.dataset.b,
-            idx = cb.indexOf(b);
-          if (idx >= 0) {
-            cb.splice(idx, 1);
-            btn.setAttribute(
-              'style',
-              `padding:3px 9px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1.5px solid;${OFF}`
-            );
+          const { track, key } = btn.dataset;
+          if (!track || !key) return;
+          const arr = working[track];
+          const i = arr.indexOf(key);
+          if (i >= 0) {
+            arr.splice(i, 1);
+            btn.setAttribute('style', baseChipBtn() + chipStyle(key, false));
           } else {
-            cb.push(b);
-            btn.setAttribute(
-              'style',
-              `padding:3px 9px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1.5px solid;${ON[b]}`
-            );
+            arr.push(key);
+            btn.setAttribute('style', baseChipBtn() + chipStyle(key, true));
           }
         };
       });
@@ -861,8 +1059,20 @@ function showIM(html, btns, extra, onClose) {
   bg.appendChild(moDiv);
   
   R_.appendChild(bg);
-  
-  const finish = (how) => {
+
+  let pointerDownOnBackdrop = false;
+  function onBgPointerDown(e) {
+    pointerDownOnBackdrop = e.target === bg;
+  }
+  function onBgClick(e) {
+    if (e.target === bg && pointerDownOnBackdrop) finish('backdrop');
+    pointerDownOnBackdrop = false;
+  }
+  function finish(how) {
+    try {
+      bg.removeEventListener('pointerdown', onBgPointerDown);
+      bg.removeEventListener('click', onBgClick);
+    } catch (_) {}
     if (onClose) {
       try {
         onClose(how);
@@ -871,8 +1081,10 @@ function showIM(html, btns, extra, onClose) {
     try {
       bg.remove();
     } catch (_) {}
-  };
-  
+  }
+  bg.addEventListener('pointerdown', onBgPointerDown);
+  bg.addEventListener('click', onBgClick);
+
   const acts = bg.querySelector('#ima');
   btns.forEach(([l, c, fn]) => {
     const b = mkB(l, c, () => {
@@ -886,21 +1098,30 @@ function showIM(html, btns, extra, onClose) {
     b.style.cssText += ';padding:8px 18px;font-size:13px;border-radius:8px';
     acts.appendChild(b);
   });
-  
+
   if (extra) extra(bg);
-  
-  bg.addEventListener('click', (e) => {
-    if (e.target === bg) finish('backdrop');
-  });
 }
 
 function showCtx(e, n) {
   if (!CTX) return;
+  const bset = getBadgeSetFromNode(n);
+  const ctxTrack = (track, title, keys) =>
+    `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">${title}</div>` +
+    keys
+      .map(
+        (k) =>
+          `<div class="cx" data-a="bgt" data-track="${track}" data-key="${k}" data-id="${n.id}">${
+            bset[track].includes(k) ? '✓' : '○'
+          }  ${k}</div>`
+      )
+      .join('');
   CTX.innerHTML = `
     <div class="cx" data-a="edit" data-id="${n.id}">✎  이름·설명 편집</div>
     <div class="cx" data-a="add" data-id="${n.id}">+  하위 노드 추가</div>
-    <div class="cxsp"></div><div class="cxsc">배지</div>
-    ${BTYPES.map((b) => `<div class="cx" data-a="badge" data-badge="${b}" data-id="${n.id}">${(n.badges || []).includes(b) ? '✓' : '○'}  ${bl(b)}</div>`).join('')}
+    <div class="cxsp"></div><div class="cxsc">배지 (3트랙 · 21)</div>
+    ${ctxTrack('dev', 'DEV', [...DEV_BADGE_KEYS])}
+    ${ctxTrack('ux', 'UX', [...UX_BADGE_KEYS])}
+    ${ctxTrack('prj', 'PRJ', [...PRJ_BADGE_KEYS])}
     <div class="cxsp"></div>
     <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>
     ${n.parent_id ? `<div class="cxsp"></div><div class="cx dng" data-a="del" data-id="${n.id}">✕  삭제</div>` : ''}`;
@@ -918,7 +1139,7 @@ function showCtx(e, n) {
 function onCtxClick(e) {
   const row = e.target.closest('[data-a]');
   if (!row) return;
-  const { a, id, badge } = row.dataset,
+  const { a, id } = row.dataset,
     n = find(id);
   CTX.style.display = 'none';
   ctxOpen = false;
@@ -931,12 +1152,19 @@ function onCtxClick(e) {
     n.my = null;
     render();
     toast('위치 초기화');
-  }   else if (a === 'badge') {
-    if (!n.badges) n.badges = [];
-    const i = n.badges.indexOf(badge);
-    i >= 0 ? n.badges.splice(i, 1) : n.badges.push(badge);
+  } else if (a === 'bgt') {
+    const tr = row.dataset.track;
+    const ky = row.dataset.key;
+    if (!tr || !ky) return;
+    const set = getBadgeSetFromNode(n);
+    const arr = set[tr];
+    const i = arr.indexOf(ky);
+    if (i >= 0) arr.splice(i, 1);
+    else arr.push(ky);
+    applyBadgeSetToNode(n, set);
     nodes = [...nodes];
     render();
+    toast('배지 갱신');
   }
 }
 
@@ -1076,11 +1304,15 @@ function syncNcFromNodes() {
  * @param {boolean} [opts.delegateProjectModal]
  * @param {(payload: { nodes: any[]; curP: any | null }) => void} [opts.onPersist]
  * @param {boolean} [opts.seedDemoProjects]
+ * @param {() => Promise<string | null | undefined>} [opts.getAccessToken] Supabase 세션(서버 /api/ai/messages)
+ * @param {() => string | null | undefined} [opts.getPlanProjectId] plan_projects.id(UUID) — 있으면 AI 성공 후 plan_nodes 메타 동기
  */
 export function initPlannode(opts = {}) {
   const delegateTabs = opts.delegateTabs ?? false;
   const delegateProjectModal = opts.delegateProjectModal ?? false;
   onPersist = typeof opts.onPersist === 'function' ? opts.onPersist : null;
+  getAccessToken = typeof opts.getAccessToken === 'function' ? opts.getAccessToken : null;
+  getPlanProjectId = typeof opts.getPlanProjectId === 'function' ? opts.getPlanProjectId : null;
 
   R_ = document.getElementById('R');
   CW = document.getElementById('CW');
@@ -1122,6 +1354,7 @@ export function initPlannode(opts = {}) {
   }
 
   const aiPrd = document.getElementById('ai-prd');
+  const aiWireframe = document.getElementById('ai-wireframe');
   const aiMiss = document.getElementById('ai-miss');
   const aiTdd = document.getElementById('ai-tdd');
   const aiHarness = document.getElementById('ai-harness');
@@ -1132,9 +1365,30 @@ export function initPlannode(opts = {}) {
     disposers.push(() => el.removeEventListener('click', h));
   };
   bindAi(aiPrd, 'prd');
+  bindAi(aiWireframe, 'wireframe');
   bindAi(aiMiss, 'miss');
   bindAi(aiTdd, 'tdd');
   bindAi(aiHarness, 'harness');
+
+  const aiCopy = document.getElementById('ai-copy');
+  if (aiCopy) {
+    const copyAiPrompt = async () => {
+      const res = document.getElementById('ai-result');
+      const t = res?.textContent?.trim() ?? '';
+      if (!t) {
+        toast('먼저 위에서 분석 버튼을 눌러 프롬프트를 생성해줘');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(res.textContent || '');
+        toast('클립보드에 복사했어');
+      } catch (_) {
+        toast('복사에 실패했어. 브라우저 권한·HTTPS를 확인해줘');
+      }
+    };
+    aiCopy.addEventListener('click', copyAiPrompt);
+    disposers.push(() => aiCopy.removeEventListener('click', copyAiPrompt));
+  }
 
   const bft = document.getElementById('BFT');
   const bar = document.getElementById('BAR');
@@ -1377,6 +1631,8 @@ export function initPlannode(opts = {}) {
       disposers.forEach((d) => d());
       disposers = [];
       onPersist = null;
+      getAccessToken = null;
+      getPlanProjectId = null;
       clearUndoStack();
     },
     /** Svelte 스토어에서 프로젝트+노드 주입 */
@@ -1422,7 +1678,7 @@ export function initPlannode(opts = {}) {
         curP = null;
         nodes = [];
         if (ES) ES.style.display = 'flex';
-        if (CV) CV.querySelectorAll('.nw,.cp').forEach((e) => e.remove());
+        if (CV) CV.querySelectorAll('.nw,.cp-row').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';
         applyTx();
       } finally {

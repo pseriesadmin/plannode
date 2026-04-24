@@ -3,6 +3,8 @@ import type { Node, Project } from '$lib/supabase/client';
 import { currentProject, nodes as nodesStore } from '$lib/stores/projects';
 import { initPlannode } from './plannodePilot.js';
 import { persistNodesFromPilot } from '$lib/stores/projects';
+import { authSession } from '$lib/stores/authSession';
+import { supabase } from '$lib/supabase/client';
 
 function pilotNodeContentChanged(prev: Node | undefined, n: PilotRuntimeNode): boolean {
   if (!prev) return true;
@@ -12,6 +14,7 @@ function pilotNodeContentChanged(prev: Node | undefined, n: PilotRuntimeNode): b
     (prev.num ?? '') !== (n.num ?? '') ||
     (prev.parent_id ?? '') !== (n.parent_id ?? '') ||
     JSON.stringify(prev.badges ?? []) !== JSON.stringify(n.badges ?? []) ||
+    JSON.stringify(prev.metadata ?? {}) !== JSON.stringify(n.metadata ?? {}) ||
     (prev.mx ?? null) !== (n.mx ?? null) ||
     (prev.my ?? null) !== (n.my ?? null) ||
     (prev.node_type ?? '') !== (n.node_type ?? '')
@@ -36,6 +39,7 @@ export function pilotNodesToStore(projectId: string, pilotNodes: PilotRuntimeNod
       parent_id: n.parent_id ?? undefined,
       depth,
       badges: n.badges ?? [],
+      metadata: n.metadata,
       mx: n.mx ?? undefined,
       my: n.my ?? undefined,
       node_type: n.node_type,
@@ -52,6 +56,7 @@ type PilotRuntimeNode = {
   description?: string;
   num?: string;
   badges?: string[];
+  metadata?: unknown;
   node_type?: string;
   mx?: number | null;
   my?: number | null;
@@ -74,6 +79,7 @@ export function storeNodesToPilot(list: Node[]): PilotRuntimeNode[] {
     description: n.description ?? '',
     num: n.num,
     badges: n.badges ?? [],
+    metadata: n.metadata,
     node_type: (n as Node & { node_type?: string }).node_type,
     mx: n.mx ?? null,
     my: n.my ?? null
@@ -96,7 +102,14 @@ export function mountPilotBridge(): { destroy: () => void } {
       if (syncingFromStore || !curP) return;
       const mapped = pilotNodesToStore(curP.id, pilotNodes);
       persistNodesFromPilot(curP.id, mapped);
-    }
+    },
+    getAccessToken: async () => {
+      const s = get(authSession);
+      if (s?.access_token) return s.access_token;
+      const { data } = await supabase.auth.getSession();
+      return data.session?.access_token ?? null;
+    },
+    getPlanProjectId: () => get(currentProject)?.plan_project_id ?? null
   });
 
   if (!pilotApi) {
