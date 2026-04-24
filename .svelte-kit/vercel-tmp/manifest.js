@@ -12,9 +12,9 @@ return {
 	_: {
 		client: {start:"_app/immutable/entry/start.D9Z_Kg4e.js",app:"_app/immutable/entry/app.Crjb66IQ.js",imports:["_app/immutable/entry/start.D9Z_Kg4e.js","_app/immutable/chunks/xA40zHcw.js","_app/immutable/chunks/F-eHAax1.js","_app/immutable/entry/app.Crjb66IQ.js","_app/immutable/chunks/C1FmrZbK.js","_app/immutable/chunks/xA40zHcw.js","_app/immutable/chunks/BzA8RMQN.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
 		nodes: [
-			__memo(() => import('./nodes/0.js')),
-			__memo(() => import('./nodes/1.js')),
-			__memo(() => import('./nodes/2.js'))
+			__memo(() => import('../output/server/nodes/0.js')),
+			__memo(() => import('../output/server/nodes/1.js')),
+			__memo(() => import('../output/server/nodes/2.js'))
 		],
 		remotes: {
 			
