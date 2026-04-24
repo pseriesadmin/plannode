@@ -29,6 +29,7 @@ function makeRootNode(project: Project): Node {
     parent_id: undefined,
     depth: 0,
     badges: [],
+    metadata: {},
     node_type: 'root',
     created_at: now,
     updated_at: now
@@ -183,7 +184,10 @@ export function touchProjectUpdatedAt(projectId: string): void {
 }
 
 /** 로컬 프로젝트 메타 일부 갱신(소유자 id 등) */
-export function updateProjectMeta(projectId: string, patch: Partial<Pick<Project, 'owner_user_id'>>): void {
+export function updateProjectMeta(
+  projectId: string,
+  patch: Partial<Pick<Project, 'owner_user_id' | 'plan_project_id'>>
+): void {
   if (typeof window === 'undefined') return;
   projects.update((plist) => {
     const next = plist.map((p) =>
@@ -198,7 +202,13 @@ export function updateProjectMeta(projectId: string, patch: Partial<Pick<Project
   });
   const cur = get(currentProject);
   if (cur?.id === projectId) {
-    currentProject.set({ ...cur, ...patch, updated_at: new Date().toISOString() });
+    const next = { ...cur, ...patch, updated_at: new Date().toISOString() };
+    currentProject.set(next);
+    try {
+      localStorage.setItem(CURRENT_PROJECT_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
   }
   markCloudWorkspaceDirty();
 }

@@ -40,7 +40,7 @@
     projectPresenceSelectedEmail,
     toggleProjectPresencePeerEmail
   } from '$lib/supabase/projectPresence';
-  import { getAuthUserId, signOutEverywhere, authUser } from '$lib/stores/authSession';
+  import { getAuthUserId, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
   import { mountPilotBridge, pilotSetActiveView } from '$lib/pilot/pilotBridge';
   import type { PageData } from './$types';
@@ -62,6 +62,9 @@
 
   /** max-width:900px 툴바 레이아웃 — 모바일에서 프로젝트명으로 공유 모달 진입 */
   let toolbarCompact = false;
+
+  /** 뷰(#VIEWS) 터치 시 공통 툴바를 위로 접었다가, 상단 아이콘으로 다시 펼침(모바일·PC 공통) */
+  let toolbarSheetHidden = false;
 
   let aclInviteRows: AclInviteSummary[] = [];
   let aclInvitesErr = '';
@@ -202,6 +205,42 @@
     if (showOutputMenu && outputMenuWrapEl && !outputMenuWrapEl.contains(t)) closeOutputMenu();
     if (showViewMenu && viewMenuWrapEl && !viewMenuWrapEl.contains(t)) closeViewMenu();
     if (showViewportMenu && viewportMenuWrapEl && !viewportMenuWrapEl.contains(t)) closeViewportMenu();
+  }
+
+  function collapseToolbarSheet() {
+    if (toolbarSheetHidden) return;
+    closeOutputMenu();
+    closeViewMenu();
+    closeViewportMenu();
+    toolbarSheetHidden = true;
+  }
+
+  function expandToolbarSheet() {
+    toolbarSheetHidden = false;
+  }
+
+  /** #TB·#VIEWS 형제 구조라 캔버스/문서 터치는 여기서만 잡힘(툴바 영역 제외) */
+  function onViewsSurfacePointerDownCapture(ev: PointerEvent) {
+    if (toolbarSheetHidden) return;
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    collapseToolbarSheet();
+  }
+
+  function syncViewsTbPad(showPad: boolean) {
+    const r = document.getElementById('R');
+    const tb = document.getElementById('TB');
+    if (!r || !tb) return;
+    if (showPad) {
+      const h = Math.ceil(tb.getBoundingClientRect().height) + 8;
+      r.style.setProperty('--views-tb-pad', `${h}px`);
+    } else {
+      r.style.setProperty('--views-tb-pad', '0px');
+    }
+  }
+
+  $: if (typeof document !== 'undefined') {
+    const showPad = !toolbarSheetHidden;
+    void tick().then(() => syncViewsTbPad(showPad));
   }
 
   async function handleJsonImportChange(ev: Event) {
@@ -595,6 +634,17 @@
     };
     mqToolbar.addEventListener('change', onMqToolbar);
 
+    const tbElMount = document.getElementById('TB');
+    const onTbResize = () => {
+      const tb = document.getElementById('TB');
+      if (!tb) return;
+      const pad = !tb.classList.contains('tb--sheet-hidden');
+      syncViewsTbPad(pad);
+    };
+    const tbResizeObs = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onTbResize) : undefined;
+    if (tbElMount && tbResizeObs) tbResizeObs.observe(tbElMount);
+    window.addEventListener('resize', onTbResize);
+
     if (cloudSyncAvailable) startCloudBackgroundSync();
 
     const onExportSync = (ev: Event) => {
@@ -614,6 +664,8 @@
 
     return () => {
       mqToolbar.removeEventListener('change', onMqToolbar);
+      tbResizeObs?.disconnect();
+      window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
       document.removeEventListener('visibilitychange', onVis);
@@ -654,7 +706,11 @@
   <!-- SvelteKit 주입 props — 템플릿에서 참조해야 unused export 경고 없음 -->
   <span hidden>{JSON.stringify(data)}{JSON.stringify(params)}</span>
   <div id="R">
-    <div id="TB" class:tb-with-user={!!$authUser}>
+    <div
+      id="TB"
+      class:tb-with-user={!!$authUser}
+      class:tb--sheet-hidden={toolbarSheetHidden}
+    >
       <div class="tb-main">
         <div class="tb-row-logo">
           <span class="logo">Plannode</span>
@@ -852,7 +908,45 @@
       {/if}
     </div>
 
-    <div id="VIEWS">
+    {#if toolbarSheetHidden}
+      <button
+        type="button"
+        class="tb-menu-reveal"
+        aria-label="메뉴 보기"
+        title="메뉴 보기"
+        on:click={expandToolbarSheet}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="36"
+          height="36"
+          viewBox="0 0 36 36"
+          fill="none"
+          class="tb-menu-reveal-svg"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path
+            d="M12.7975 2.43327C14.3555 0.875274 16.4686 0 18.6719 0H27.6923C32.2805 0 36 3.71948 36 8.30769V27.6923C36 32.2805 32.2805 36 27.6923 36H8.30769C3.71948 36 0 32.2805 0 27.6923V18.6719C0 16.4686 0.875272 14.3555 2.43327 12.7975L12.7975 2.43327Z"
+            fill="#6B61F6"
+          />
+          <path
+            d="M19 7.32574C19 7.32574 19 5.55931 19 2.52966C19 -0.499998 16.5 -0.499998 12.5 2.5C8.50002 5.49999 4.85548 9.87946 2 13C-0.499986 16.5 -0.500014 19 4.85549 19C7.5573 19 8.6551 19 9.05069 19C9.03363 19 9.01651 19 8.99933 19C8.99933 19 9.52075 19 9.05069 19C12.9724 18.9993 13.6233 18.9205 15.1321 18.1339C16.465 17.4389 17.5487 16.33 18.2279 14.966C19 13.4154 19 11.3855 19 7.32574Z"
+            fill="#AAA4FF"
+          />
+          <path
+            d="M8.99933 19C8.99933 19 9.52075 19 9.05069 19C9.03363 19 9.01651 19 8.99933 19Z"
+            fill="#AAA4FF"
+          />
+        </svg>
+      </button>
+    {/if}
+
+    <div
+      id="VIEWS"
+      class:views-content-below-tb={!toolbarSheetHidden}
+      on:pointerdown|capture={onViewsSurfacePointerDownCapture}
+    >
       <div class="view" class:active={$activeView === 'tree'} id="V-TREE">
         <div id="CW">
           <div id="CV">
@@ -989,11 +1083,33 @@
         <div class="ai-inner">
           <div class="ai-title">AI 분석</div>
           <div class="ai-sub">현재 기능 트리를 분석해서 개발 가이드를 생성해</div>
+          <div class="ai-impl-hint" aria-live="polite">
+            {#if $authLoading}
+              <p class="ai-impl-hint__line">로그인 여부 확인 중…</p>
+            {:else if !cloudSyncAvailable}
+              <p class="ai-impl-hint__line">
+                <strong>지금 모드</strong> · 클라우드 연결이 꺼져 있어, 아래는 <em>이 컴퓨터에서만</em> 만든 «복사용 글(프롬프트)»이에요. 다른 AI(챗GPT 등)에 붙여넣어 쓰면 돼요.
+              </p>
+            {:else if $authUser}
+              <p class="ai-impl-hint__line">
+                <strong>지금 모드</strong> · 로그인됨. 서버에 AI 키가 있으면 <em>자동으로 AI(클로드) 답</em>이 아래에 뜨고, 없으면 «복사용 프롬프트»만 떠요.
+              </p>
+            {:else}
+              <p class="ai-impl-hint__line">
+                <strong>지금 모드</strong> · 로그인 전. 누르면 <em>복사용 글(프롬프트)</em>만 나와요. 위에서 로그인하면 서버를 거쳐 AI 답을 받을 수 있어요.
+              </p>
+            {/if}
+          </div>
           <div class="ai-btn-grid">
             <button type="button" class="ai-btn" id="ai-prd">
               <div class="ai-btn-icon">📄</div>
               <div class="ai-btn-title">PRD 완성본 생성</div>
               <div class="ai-btn-desc">기능 트리 → 완전한 PRD 문서</div>
+            </button>
+            <button type="button" class="ai-btn" id="ai-wireframe">
+              <div class="ai-btn-icon">🖼</div>
+              <div class="ai-btn-title">와이어프레임 / 화면 설계</div>
+              <div class="ai-btn-desc">UX·화면·컴포넌트 흐름, 구현·시안 작성용 프롬프트</div>
             </button>
             <button type="button" class="ai-btn" id="ai-miss">
               <div class="ai-btn-icon">🔍</div>
@@ -1010,6 +1126,10 @@
               <div class="ai-btn-title">하네스 플랜 생성</div>
               <div class="ai-btn-desc">Cursor AI 하네스 워크플로우 출력</div>
             </button>
+          </div>
+          <div class="ai-result-toolbar" id="ai-result-toolbar" aria-hidden="true">
+            <span class="ai-result-label">생성된 프롬프트</span>
+            <button type="button" class="ai-copy-btn" id="ai-copy">클립보드에 복사</button>
           </div>
           <div class="ai-result" id="ai-result"></div>
         </div>
@@ -1364,8 +1484,14 @@
     row-gap: 10px;
     z-index: 50;
     overflow: visible;
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
     /* 빈 영역은 캔버스로 클릭 통과; 자식(버튼·메뉴 등)은 유지 */
     pointer-events: none;
+  }
+
+  #TB.tb--sheet-hidden {
+    transform: translateY(calc(-100% - 4px));
   }
 
   #TB * {
@@ -1387,6 +1513,43 @@
     #TB {
       --tb-user-avatar-size: 56px;
     }
+  }
+
+  .tb-menu-reveal {
+    position: fixed;
+    z-index: 55;
+    top: calc(10px + env(safe-area-inset-top, 0px));
+    left: auto;
+    right: calc(14px + env(safe-area-inset-right, 0px));
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 4px 18px rgba(45, 35, 120, 0.18);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .tb-menu-reveal:focus-visible {
+    outline: 2px solid #6b61f6;
+    outline-offset: 3px;
+  }
+
+  .tb-menu-reveal:active {
+    transform: scale(0.96);
+  }
+
+  .tb-menu-reveal-svg {
+    display: block;
+    width: 36px;
+    height: 36px;
   }
 
   .tb-main {
@@ -2214,6 +2377,11 @@
     overflow: hidden;
   }
 
+  #VIEWS.views-content-below-tb {
+    padding-top: var(--views-tb-pad, 0px);
+    transition: padding-top 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
   .view {
     position: absolute;
     inset: 0;
@@ -2261,13 +2429,39 @@
     z-index: 6;
   }
 
-  :global(.cp) {
+  /* 댑스 라벨: 열마다 1칸(가로) — 세로로 글자가 쌓이지 않게 flex+nowrap */
+  :global(.cp-row) {
     position: absolute;
-    top: 10px;
+    top: 8px;
+    left: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    padding-left: 28px;
+    box-sizing: border-box;
+    z-index: 2;
+    pointer-events: none;
+  }
+  :global(.cp) {
+    position: static;
+    flex: 0 0 244px;
+    width: 244px;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-start;
     padding: 2px 10px;
     border-radius: 20px;
     font-size: 10px;
     font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    word-break: keep-all;
+    writing-mode: horizontal-tb;
+    box-sizing: border-box;
     pointer-events: none;
     z-index: 2;
   }
@@ -2301,6 +2495,8 @@
     z-index: 5;
   }
   :global(.nd) {
+    position: relative;
+    z-index: 0;
     background: #fff;
     border: 1px solid #e0dbd4;
     border-radius: 10px;
@@ -2312,6 +2508,7 @@
       box-shadow 0.15s;
   }
   :global(.nd:hover) {
+    z-index: 30;
     border-color: #b8aff0;
     box-shadow: 0 2px 10px rgba(107, 78, 246, 0.12);
   }
@@ -2353,19 +2550,77 @@
     font-family: monospace;
     margin-left: 3px;
   }
+  :global(.nds-wrap) {
+    position: relative;
+  }
   :global(.nds) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
     font-size: 10px;
     color: #999;
     margin: 1px 9px 0;
     line-height: 1.4;
+    word-break: break-word;
   }
+  :global(.nds-tooltip) {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    margin-top: -1px;
+    z-index: 200;
+    max-width: min(100vw, 300px);
+    background: #fff;
+    border: 1px solid #e0dbd4;
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+    padding: 0 0 8px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+      opacity 0.12s ease,
+      visibility 0.12s ease;
+  }
+  :global(.nds-wrap:hover .nds-tooltip) {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  :global(.nds-tooltip-t) {
+    font-size: 9px;
+    font-weight: 700;
+    color: #6b4ef6;
+    padding: 6px 9px 4px;
+    letter-spacing: 0.02em;
+  }
+  :global(.nds-tooltip-b) {
+    font-size: 10px;
+    color: #555;
+    line-height: 1.5;
+    padding: 0 9px 4px;
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  /* 배지: 2행까지만(넘는 행은 clip). 포인터는 부모 .nd에 그대로 — 드래그·제목·선택 로직 보존 */
   :global(.nm) {
+    padding: 4px 9px 3px;
+    min-height: 0;
+    box-sizing: border-box;
+  }
+  :global(.nm-clamp) {
     display: flex;
-    align-items: center;
-    padding: 4px 9px;
-    gap: 3px;
     flex-wrap: wrap;
-    min-height: 16px;
+    align-content: flex-start;
+    align-items: flex-start;
+    gap: 3px 4px;
+    max-height: 38px;
+    overflow: hidden;
+    line-height: 1.2;
   }
   :global(.bg) {
     font-size: 9px;
@@ -2398,17 +2653,39 @@
     color: #b45309;
     border: 1px solid #fcd34d;
   }
+  :global(.bdev) {
+    background: #fff1f0;
+    color: #991b1b;
+    border: 1px solid #fecaca;
+  }
+  :global(.bux) {
+    background: #e0e7ff;
+    color: #3730a3;
+    border: 1px solid #a5b4fc;
+  }
+  :global(.bprj) {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+  }
+  :global(.bggen) {
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+  }
   :global(.nnum) {
-    margin-left: auto;
     font-size: 9px;
-    color: #ccc;
+    color: #999;
     font-family: monospace;
+    flex-shrink: 0;
   }
   :global(.na) {
     display: flex;
-    justify-content: flex-end;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
     padding: 2px 7px 8px;
-    gap: 4px;
+    gap: 6px;
   }
   :global(.pb2) {
     position: absolute;
@@ -2775,7 +3052,28 @@
   .ai-sub {
     font-size: 12px;
     color: #aaa;
-    margin-bottom: 18px;
+    margin-bottom: 8px;
+  }
+  .ai-impl-hint {
+    background: #eceae4;
+    border: 1px solid #e0dcd4;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: #3f3a33;
+  }
+  .ai-impl-hint__line {
+    margin: 0;
+  }
+  .ai-impl-hint__line :global(strong) {
+    color: #1a1a1a;
+  }
+  .ai-impl-hint__line :global(em) {
+    font-style: normal;
+    font-weight: 600;
+    color: #5536c4;
   }
   .ai-btn-grid {
     display: grid;
@@ -2810,6 +3108,36 @@
     font-size: 11px;
     color: #aaa;
     line-height: 1.4;
+  }
+  .ai-result-toolbar {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 10px;
+    padding: 6px 2px 4px;
+  }
+  .ai-result-toolbar.visible {
+    display: flex;
+  }
+  .ai-result-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+  }
+  .ai-copy-btn {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    background: #6b4ef6;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .ai-copy-btn:hover {
+    opacity: 0.92;
   }
   .ai-result {
     background: #fff;

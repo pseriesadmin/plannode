@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import type { NodeMetadata } from '$lib/ai/types';
 
 const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL ?? '').trim();
 const SUPABASE_ANON_KEY = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim();
@@ -28,6 +29,11 @@ export type Project = {
   owner_user_id?: string | null;
   /** 초대 프로젝트: 클라우드 상 데이터가 담긴 소유자 워크스페이스 user_id (동기화 시 merge/fetch 대상) */
   cloud_workspace_source_user_id?: string | null;
+  /**
+   * Supabase `plan_projects.id`(UUID) — 설정 시 AI 응답 후 `plan_nodes` 메타 동기( NEXT-7 )
+   * 로컬 `proj_…` id와 별도
+   */
+  plan_project_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -39,6 +45,8 @@ export type Node = {
   num?: string;
   description?: string;
   badges?: string[];
+  /** 노드 확장 메타데이터 (3트랙 배지 등) */
+  metadata?: NodeMetadata;
   mx?: number;
   my?: number;
   parent_id?: string;

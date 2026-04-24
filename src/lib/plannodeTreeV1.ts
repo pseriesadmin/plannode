@@ -7,6 +7,7 @@ type RawNodeRow = {
   description?: unknown;
   num?: unknown;
   badges?: unknown;
+  metadata?: unknown;
   node_type?: unknown;
   mx?: unknown;
   my?: unknown;
@@ -102,6 +103,7 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
       p === null || p === undefined || p === '' ? null : String(p).trim() || null;
     const parent_id = parentRaw ?? undefined;
     const badges = Array.isArray(row.badges) ? (row.badges as string[]).map(String) : [];
+    const metadata = row.metadata != null && typeof row.metadata === 'object' ? (row.metadata as unknown) : undefined;
     const mxRaw = row.mx;
     const myRaw = row.my;
     const mx =
@@ -119,6 +121,7 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
       description: row.description != null ? String(row.description) : '',
       num: row.num != null ? String(row.num) : '',
       badges,
+      metadata,
       node_type: row.node_type != null ? String(row.node_type) : 'detail',
       mx: Number.isFinite(mx) ? mx : undefined,
       my: Number.isFinite(my) ? my : undefined,

@@ -3,10 +3,11 @@
  * 참고: PRD_표준작성가이드_v2.0.md — 문서 내 큰 제목은 가이드의 5개 섹션(기능명세·아키텍처·수용기준·로드맵·위험)에 대응.
  */
 import type { Node, Project } from '$lib/supabase/client';
+import { buildBadgeContext, getBadgeSetFromNodeInput, formatBadgeTracksForDisplay } from '$lib/ai/badgePromptInjector';
 
-/** 파일럿 런타임 노드와 호환 */
+/** 파일럿 런타임 노드와 호환 (metadata.badges = 3트랙) */
 export type PrdNodeInput = Pick<Node, 'id' | 'name'> &
-  Partial<Pick<Node, 'description' | 'num' | 'parent_id' | 'badges' | 'node_type' | 'depth' | 'mx' | 'my'>>;
+  Partial<Pick<Node, 'description' | 'num' | 'parent_id' | 'badges' | 'node_type' | 'depth' | 'mx' | 'my' | 'metadata'>>;
 
 export type PrdProjectInput = Pick<Project, 'id' | 'name' | 'author' | 'start_date' | 'end_date'> &
   Partial<Pick<Project, 'description' | 'owner_user_id'>>;
@@ -53,9 +54,10 @@ function toMdLine(
   path.add(n.id);
   const k = Math.min(d, 12);
   const indent = '  '.repeat(k);
-  const badges = (n.badges || []).join(', ');
+  const tr = formatBadgeTracksForDisplay(getBadgeSetFromNodeInput(n));
   const prefix = d === 0 ? '#' : d === 1 ? '##' : d === 2 ? '###' : '-';
-  lines.push(`${indent}${prefix} [${n.num || '—'}] ${n.name}${badges ? ' (' + badges + ')' : ''}`);
+  const badgePart = tr === '—' ? '' : ` (${tr})`;
+  lines.push(`${indent}${prefix} [${n.num || '—'}] ${n.name}${badgePart}`);
   if (n.description) lines.push(`${indent}  ${n.description}`);
   nodes.filter((c) => c && c.parent_id === n.id).forEach((c) => toMdLine(c, nodes, d + 1, lines, path));
   path.delete(n.id);
@@ -108,12 +110,16 @@ function nodeFeatureBlockMd(n: PrdNodeInput, nodes: PrdNodeInput[]): string {
   const fid = n.num || n.id;
   const d = getDepth(nodes, n.id);
   const depthLabel = DN[d] ?? `Lv${d}`;
-  const badges = (n.badges || []).length ? (n.badges || []).join(', ') : '—';
+  const bset = getBadgeSetFromNodeInput(n);
+  const tracksLine = formatBadgeTracksForDisplay(bset);
   const rawDesc = (n.description || '').trim();
   const desc = rawDesc || '_(노드 설명 없음 — 사용자 관점 1~2문장으로 보완)_';
   const nt = n.node_type || '—';
   const layout =
     n.mx != null && n.my != null ? `(${n.mx}, ${n.my})` : '_(자동 배치 — 수동 좌표 없음)_';
+
+  const badgeContext =
+    bset.dev.length || bset.ux.length || bset.prj.length ? buildBadgeContext(bset) : '';
 
   return `#### [${fid}]: ${n.name}
 
@@ -122,11 +128,12 @@ function nodeFeatureBlockMd(n: PrdNodeInput, nodes: PrdNodeInput[]): string {
 - **상위 기능**: ${formatParentLine(n, nodes)}
 - **node_type**: ${nt}
 - **뎁스(트리 기준)**: ${depthLabel}
-- **배지**: ${badges}
+- **배지 (3트랙)**: ${tracksLine}
 - **캔버스 mx / my**: ${layout}
 
 **기능 설명** (사용자 관점 — 노드 본문 전체):
 ${desc}
+${badgeContext}
 
 **데이터 모델** (SQL 스키마):
 \`\`\`sql
@@ -189,17 +196,20 @@ function nodeCatalogMarkdown(nodes: PrdNodeInput[]): string {
   const ordered = collectNodesDfsOrder(nodes);
   if (!ordered.length) return '_(노드 없음)_';
   const lines = [
-    '| 순서 | 번호 | 노드 id | 기능명 | 뎁스 | node_type | 배지 | 설명(발췌) |',
-    '|------|------|---------|--------|------|-------------|------|------------|'
+    '| 순서 | 번호 | 노드 id | 기능명 | 뎁스 | node_type | DEV | UX | PRJ | 설명(발췌) |',
+    '|------|------|---------|--------|------|-----------|-----|----|----|------------|'
   ];
   for (let i = 0; i < ordered.length; i++) {
     const n = ordered[i];
     const d = getDepth(nodes, n.id);
     const depthLabel = DN[d] ?? `Lv${d}`;
-    const badges = (n.badges || []).length ? (n.badges || []).join(', ') : '—';
+    const bs = getBadgeSetFromNodeInput(n);
+    const cDev = mdTableCell(bs.dev.length ? bs.dev.join(', ') : '—', 20);
+    const cUx = mdTableCell(bs.ux.length ? bs.ux.join(', ') : '—', 20);
+    const cPrj = mdTableCell(bs.prj.length ? bs.prj.join(', ') : '—', 16);
     const nt = n.node_type || '—';
     lines.push(
-      `| ${i + 1} | ${n.num || '—'} | \`${n.id}\` | ${mdTableCell(n.name, 80)} | ${depthLabel} | ${mdTableCell(nt, 28)} | ${mdTableCell(badges, 48)} | ${mdTableCell(n.description || '—', 260)} |`
+      `| ${i + 1} | ${n.num || '—'} | \`${n.id}\` | ${mdTableCell(n.name, 64)} | ${depthLabel} | ${mdTableCell(nt, 22)} | ${cDev} | ${cUx} | ${cPrj} | ${mdTableCell(n.description || '—', 200)} |`
     );
   }
   return lines.join('\n');
