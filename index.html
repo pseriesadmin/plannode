@@ -6,22 +6,27 @@
   <meta name="description" content="Plannode - AI 기획 도구 for PSeries">
   <meta name="author" content="Stephen Cconzy">
   <title>Plannode by pseries</title>
+  <link rel="icon" href="data:,">
   <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%;background:#f5f5f0}
 #root{width:100vw;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 
 #R{width:100%;height:100%;background:#f5f5f0;display:flex;flex-direction:column;position:relative;overflow:hidden;border-radius:0}
-#TB{height:52px;background:#fff;border-bottom:1.5px solid #e8e4de;display:flex;align-items:center;padding:0 14px;gap:8px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.05);z-index:50}
+#TB{min-height:52px;background:#fff;border-bottom:1.5px solid #e8e4de;display:flex;flex-wrap:wrap;align-items:center;align-content:flex-start;padding:8px 14px;gap:8px 10px;row-gap:10px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.05);z-index:50}
+.tb-main{display:flex;flex-wrap:wrap;align-items:center;gap:8px;flex:1 1 auto;min-width:0}
+.tb-proj-label{font-size:11px;color:#aaa;white-space:nowrap}
+@media (max-width:900px){.tb-dv-mid{display:none}}
 .logo{font-size:13px;font-weight:700;color:#6b4ef6;white-space:nowrap}
 .logo-s{font-size:10px;color:#bbb;margin-left:2px}
 .dv{width:1px;height:22px;background:#e0dbd4;flex-shrink:0}
 .pntag{font-size:12px;font-weight:600;color:#1a1a1a;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.vg{display:flex;gap:4px}
+.vg{display:flex;flex-wrap:wrap;gap:4px}
 .vtab{padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;border-radius:8px;white-space:nowrap;transition:all .15s;background:#fff;color:#6b4ef6;border:none}
 .vtab:hover{background:#f5f3ff;color:#6b4ef6;border-color:#b8aff0;border:1.5px solid #b8aff0}
 .vtab.on{background:#f0ecff;color:#6b4ef6;border:1.5px solid #6b4ef6}
-.tbr{margin-left:auto;display:flex;gap:5px;align-items:center;flex-shrink:0}
+.tbr{display:flex;flex-wrap:wrap;gap:5px 6px;row-gap:6px;align-items:center;justify-content:flex-start;flex:1 1 100%;width:100%;max-width:100%;min-width:0;margin-left:0;box-sizing:border-box}
+@media (min-width:1180px){#TB{flex-wrap:nowrap}.tbr{flex:0 1 auto;width:auto;margin-left:auto;justify-content:flex-end}}
 
 #VIEWS{flex:1;position:relative;overflow:hidden}
 .view{position:absolute;inset:0;display:none;overflow:hidden}
@@ -30,6 +35,7 @@ html,body{width:100%;height:100%;background:#f5f5f0}
 #CW{flex:1;position:relative;overflow:hidden;user-select:none}
 #CV{position:absolute;top:0;left:0;transform-origin:0 0}
 svg#EG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
+svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-index:6}
 .cp{position:absolute;top:10px;padding:2px 10px;border-radius:20px;font-size:10px;font-weight:700;pointer-events:none;z-index:2}
 .cp0{background:#6b4ef6;color:#fff}.cp1{background:#f0ecff;color:#6b4ef6;border:1px solid #d4caff}.cp2{background:#f3f0ff;color:#7c6fd4;border:1px solid #ddd6fe}.cp3{background:#f7f5ff;color:#9d8fe0;border:1px solid #ede9fe}.cp4{background:#faf8ff;color:#b4a8e8;border:1px solid #f0ecff}
 .nw{position:absolute;z-index:5}
@@ -132,8 +138,11 @@ svg#EG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
 
         <div class="tbr">
           <button id="BFT" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">맞춤 ⊡</button>
+          <button type="button" id="BAR" title="드래그로 저장된 수동 위치(mx/my) 전부 제거 → 트리 자동 배치" style="padding:6px 10px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">자동정렬</button>
+          <button type="button" id="BUN" title="실행 취소 (Ctrl+Z / ⌘Z)" style="padding:6px 10px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">↩</button>
           <button id="BMD" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #6b4ef6;color:#6b4ef6;background:#f0ecff;cursor:pointer;font-weight:600">MD 출력</button>
           <button id="BPR" style="padding:6px 12px;font-size:12px;border-radius:7px;border:none;background:#6b4ef6;color:#fff;cursor:pointer;font-weight:600">PRD 출력</button>
+          <button type="button" id="BJN" title="노드 트리 JSON (백업·재가져오기용)" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #6b4ef6;color:#6b4ef6;background:#f0ecff;cursor:pointer;font-weight:600">JSON</button>
           <div class="dv"></div>
           <button id="BPN" style="width:32px;height:32px;border-radius:8px;border:none;background:#6b4ef6;color:#fff;font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center">+</button>
         </div>
@@ -142,13 +151,16 @@ svg#EG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
       <div id="VIEWS">
         <div class="view active" id="V-TREE">
           <div id="CW">
-            <div id="CV"><svg id="EG"></svg></div>
+            <div id="CV">
+              <svg id="EG"></svg>
+              <svg id="SG"></svg>
+            </div>
             <div id="ES">
               <div style="font-size:36px;margin-bottom:12px">📋</div>
               <div style="font-size:14px;color:#bbb;margin-bottom:16px">프로젝트를 선택하거나 새로 만들어줘</div>
               <button id="BNE" style="padding:9px 22px;font-size:13px;border-radius:8px;border:none;background:#6b4ef6;color:#fff;font-weight:700;cursor:pointer">+ 새 프로젝트</button>
             </div>
-            <div class="zc"><button class="zb" id="ZO">−</button><span class="zp" id="ZP">85%</span><button class="zb" id="ZI">+</button><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">Shift+스크롤</span></div>
+            <div class="zc"><button class="zb" id="ZO">−</button><span class="zp" id="ZP">85%</span><button class="zb" id="ZI">+</button><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">축소확대: Ctrl+스크롤</span><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">그룹이동: Shift+노드선택</span></div>
             <div class="mm"><canvas id="MMC"></canvas><div class="mmvp" id="MMV"></div></div>
           </div>
         </div>
@@ -205,6 +217,10 @@ svg#EG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
     </div>
   </div>
 
-  <script src="plannode.js"></script>
+  <!-- 캔버스 단일 원본: src/lib/pilot/plannodePilot.js (Vite `npm run dev` / `npm run build` 로 열기) -->
+  <script type="module">
+    import { initPlannode } from './src/lib/pilot/plannodePilot.js';
+    initPlannode({ delegateTabs: false, delegateProjectModal: false, seedDemoProjects: true });
+  </script>
 </body>
 </html>
