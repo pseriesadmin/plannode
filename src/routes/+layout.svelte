@@ -42,11 +42,11 @@
   $: missingEnv = browser && mounted && !isSupabaseCloudConfigured();
 </script>
 
-<span hidden>{JSON.stringify(data)}{JSON.stringify(params)}</span>
+<!-- data/params는 레이아웃 계약 유지용(빈 객체일 때가 많음) -->
+<span hidden aria-hidden="true">{JSON.stringify(data)}{JSON.stringify(params)}</span>
 
-{#if !browser}
-  <SplashScreen />
-{:else if !mounted || $authLoading || !splashMinDone}
+<!-- 서버·클라이언트 동일 분기: !browser 전용 if와 else-if를 나누면 하이드레이션 불일치로 onMount 미실행·무한 스플래시 가능 -->
+{#if !browser || !mounted || $authLoading || !splashMinDone}
   <SplashScreen />
 {:else if missingEnv}
   <div class="splash wide">

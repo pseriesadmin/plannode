@@ -43,11 +43,19 @@ export function initAuthSession(): void {
     return;
   }
   authLoading.set(true);
-  void supabase.auth.getSession().then(({ data: { session } }) => {
-    authSession.set(session);
-    authUser.set(session?.user ?? null);
-    authLoading.set(false);
-  });
+  void supabase.auth
+    .getSession()
+    .then(({ data: { session } }) => {
+      authSession.set(session);
+      authUser.set(session?.user ?? null);
+    })
+    .catch(() => {
+      authSession.set(null);
+      authUser.set(null);
+    })
+    .finally(() => {
+      authLoading.set(false);
+    });
   if (unsub) unsub.unsubscribe();
   const { data } = supabase.auth.onAuthStateChange((_evt, session) => {
     authSession.set(session);
