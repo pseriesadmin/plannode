@@ -14,7 +14,9 @@ import {
   getBadgeSetFromNodeInput,
   formatBadgeTracksForDisplay
 } from '$lib/ai/badgePromptInjector';
+import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
+import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 
 const V = '#6b4ef6',
   RD = '#dc2626',
@@ -71,6 +73,82 @@ const esc = (s) => {
   d.textContent = s || '';
   return d.innerHTML;
 };
+/** HTML attribute 값용 (기능명세 그리드 input value) */
+const escAttr = (s) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;');
+
+function readFunctionalSpecRow(n) {
+  const fs =
+    n.metadata && typeof n.metadata === 'object' && n.metadata.functionalSpec && typeof n.metadata.functionalSpec === 'object'
+      ? n.metadata.functionalSpec
+      : {};
+  return {
+    userTypes: String(fs.userTypes ?? ''),
+    io: String(fs.io ?? ''),
+    exceptions: String(fs.exceptions ?? ''),
+    priority: String(fs.priority ?? '')
+  };
+}
+
+function applySpecGridField(n, field, raw) {
+  const val = typeof raw === 'string' ? raw : String(raw ?? '');
+  if (field === 'num') {
+    n.num = val;
+    return;
+  }
+  if (field === 'name') {
+    n.name = val.trim() ? val : '새 노드';
+    return;
+  }
+  if (field === 'description') {
+    n.description = val;
+    return;
+  }
+  n.metadata = n.metadata && typeof n.metadata === 'object' ? n.metadata : {};
+  const prevFs =
+    n.metadata.functionalSpec && typeof n.metadata.functionalSpec === 'object' ? n.metadata.functionalSpec : {};
+  const fs = { ...prevFs };
+  if (field === 'fsUserTypes') fs.userTypes = val;
+  else if (field === 'fsIo') fs.io = val;
+  else if (field === 'fsExceptions') fs.exceptions = val;
+  else if (field === 'fsPriority') fs.priority = val;
+  n.metadata.functionalSpec = fs;
+}
+
+function onSpecGridInput(ev) {
+  const t = ev.target;
+  if (!t || !t.matches || !curP) return;
+  if (!t.matches('input.spec-grid-inp, textarea.spec-grid-inp')) return;
+  const id = t.getAttribute('data-node-id');
+  const field = t.getAttribute('data-spec-field');
+  if (!id || !field) return;
+  const n = find(id);
+  if (!n) return;
+  applySpecGridField(n, field, t.value);
+  schedulePersist();
+  emitAutoCloudSync('node-edit');
+  if (field === 'name' || field === 'num') render();
+}
+
+/** 기능명세 표: 트리·PRD Markdown과 동일한 3트랙(DEV/UX/PRJ) — 단순 태그 나열이 아니라 파이프라인 축으로 묶어 표시 */
+function formatSpecBadgeTracksHtml(n) {
+  const set = getBadgeSetFromNodeInput(n);
+  if (!set.dev.length && !set.ux.length && !set.prj.length) {
+    return '<span class="spec-badge-empty">—</span>';
+  }
+  const trackRow = (cls, label, keys) => {
+    if (!keys.length) return '';
+    const chips = keys
+      .map((b) => `<span class="bg ${badgeClassForNode(b)}">${esc(bl(b))}</span>`)
+      .join('');
+    return `<div class="spec-badge-track spec-badge-track--${cls}"><span class="spec-badge-track-label">${label}</span><span class="spec-badge-track-chips">${chips}</span></div>`;
+  };
+  return `<div class="spec-badge-pipeline" title="개발 구현(DEV)·화면 구성(UX)·프로젝트 성격(PRJ) — AI·문서 출력 파이프라인 기준">${trackRow('dev', 'DEV', set.dev)}${trackRow('ux', 'UX', set.ux)}${trackRow('prj', 'PRJ', set.prj)}</div>`;
+}
+
 const COL_W = 244,
   ROW_H = 122;
 
@@ -86,6 +164,19 @@ let scale = 0.85,
   /** Shift+클릭으로 묶인 다중 선택(그룹 이동). 영속 필드 아님. */
   multiSel = new Set(),
   selectionBox = null, // Shift+드래그 범위 선택용
+  /** §4.0.1 재연결: 카드 1.5초 또는 `+` 1.5초 후 드래그로 대상 `+`에 놓기 */
+  relinkArm = null, // { mode:'single', nodeIds:string[] } | { mode:'children', anchorId:string }
+  relinkHoldCleanup = null,
+  relinkSuppressClick = false,
+  relinkDragActive = false,
+  relinkDragCleanup = null,
+  relinkHoveredPb = null,
+  plusHoldTimer = null,
+  plusDownTs = 0,
+  plusLongFired = false,
+  plusDownPointerId = null,
+  plusHoldAnchorId = null,
+  lastPlusPt = { x: 0, y: 0 },
   nc = 500,
   ctxOpen = false;
 let projects = [],
@@ -136,6 +227,8 @@ function undoLast() {
     if (selId && !find(selId)) selId = null;
     multiSel.clear();
     selectionBox = null;
+    clearRelinkArm();
+    clearRelinkHold();
     render();
     toast('실행 취소 ✓');
   } catch (_) {
@@ -148,16 +241,527 @@ function undoLast() {
 /** @type {(() => void)[]} */
 let disposers = [];
 
-function toast(m) {
+/** 이동 모드 안내(#TST) — 자동 숨김 없이 유지 */
+let tstPersistRelink = false;
+
+/** @param {string} m @param {{ persistRelink?: boolean }} [opts] */
+function toast(m, opts) {
   if (!TST) return;
   TST.textContent = m;
   TST.style.display = 'block';
   clearTimeout(TST._t);
-  TST._t = setTimeout(() => (TST.style.display = 'none'), 2400);
+  TST._t = null;
+  const persist = !!(opts && opts.persistRelink);
+  if (persist) {
+    tstPersistRelink = true;
+    TST.classList.add('tst--relink');
+    return;
+  }
+  tstPersistRelink = false;
+  TST.classList.remove('tst--relink');
+  TST._t = setTimeout(() => {
+    TST.style.display = 'none';
+    TST._t = null;
+  }, 2400);
+}
+
+function hideRelinkGuideToast() {
+  if (!tstPersistRelink) return;
+  tstPersistRelink = false;
+  if (!TST) return;
+  clearTimeout(TST._t);
+  TST._t = null;
+  TST.classList.remove('tst--relink');
+  TST.style.display = 'none';
+}
+
+/** #TST 공용 — 호스트가 다른 안내를 띄우기 전 이동 모드 배너 정리 */
+export function dismissPilotRelinkGuide() {
+  hideRelinkGuideToast();
 }
 
 const find = (id) => nodes.find((n) => n.id === id);
 const getDC = (d) => DC[((d % DC.length) + DC.length) % DC.length];
+
+const RELINK_HOLD_MS = 1500;
+const RELINK_MOVE_PX = 10;
+/** 고스트 카드와 겹침 판정 시 `+` 버튼 hit 영역을 픽셀만큼 넓힘 */
+const RELINK_PLUS_HIT_PAD = 16;
+
+/** 이동하려는 루트(및 그 자손)에 newParent가 포함되면 순환 */
+function subtreeIdSet(rootId) {
+  const s = new Set();
+  const walk = (id) => {
+    s.add(id);
+    for (const c of nodes.filter((k) => k.parent_id === id)) walk(c.id);
+  };
+  walk(rootId);
+  return s;
+}
+
+function clearRelinkHold() {
+  if (relinkHoldCleanup) {
+    try {
+      relinkHoldCleanup();
+    } catch (_) {}
+    relinkHoldCleanup = null;
+  }
+}
+
+function clearRelinkArm() {
+  hideRelinkGuideToast();
+  relinkArm = null;
+  endRelinkDragSession();
+}
+
+/** 앵커의 직속 자식 각각을 루트로 한 서브트리에 속한 모든 id (앵커 본인 제외) */
+function childrenForestIdSet(anchorId) {
+  const roots = nodes.filter((x) => x.parent_id === anchorId).map((x) => x.id);
+  const combined = new Set();
+  for (const rid of roots) {
+    for (const id of subtreeIdSet(rid)) combined.add(id);
+  }
+  return combined;
+}
+
+function relinkHighlightIds() {
+  if (!relinkArm || relinkDragActive) return null;
+  if (relinkArm.mode === 'single') return new Set(relinkArm.nodeIds);
+  return new Set(nodes.filter((x) => x.parent_id === relinkArm.anchorId).map((x) => x.id));
+}
+
+let relinkGhostLayer = null;
+
+function removeRelinkGhosts() {
+  if (relinkGhostLayer && relinkGhostLayer.parentNode) {
+    relinkGhostLayer.parentNode.removeChild(relinkGhostLayer);
+  }
+  relinkGhostLayer = null;
+}
+
+function clearRelinkSourceDim() {
+  try {
+    for (const el of document.querySelectorAll('.relink-source-dim')) {
+      el.classList.remove('relink-source-dim');
+    }
+  } catch (_) {}
+}
+
+/** @param {HTMLElement} ndEl */
+function cloneNdForGhost(ndEl) {
+  const c = /** @type {HTMLElement} */ (ndEl.cloneNode(true));
+  c.classList.add('relink-ghost-nd');
+  c.classList.remove('sel', 'msel', 'relink-pick', 'relink-source-dim');
+  c.removeAttribute('id');
+  c.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+  return c;
+}
+
+function setRelinkHoverPb(pb) {
+  if (relinkHoveredPb === pb) return;
+  if (relinkHoveredPb) relinkHoveredPb.classList.remove('pb2-relink-hover');
+  relinkHoveredPb = pb || null;
+  if (relinkHoveredPb) relinkHoveredPb.classList.add('pb2-relink-hover');
+}
+
+function endRelinkDragSession() {
+  relinkDragActive = false;
+  if (relinkDragCleanup) {
+    try {
+      relinkDragCleanup();
+    } catch (_) {}
+    relinkDragCleanup = null;
+  }
+  setRelinkHoverPb(null);
+  clearRelinkSourceDim();
+  removeRelinkGhosts();
+}
+
+function canDropOnParent(newParentId) {
+  if (!relinkArm || !newParentId) return false;
+  const parentNode = find(newParentId);
+  if (!parentNode) return false;
+  if (relinkArm.mode === 'single') {
+    const nid = relinkArm.nodeIds[0];
+    if (!nid || nid === newParentId) return false;
+    if (subtreeIdSet(nid).has(newParentId)) return false;
+    const m = find(nid);
+    return !!(m && m.parent_id !== newParentId);
+  }
+  if (relinkArm.mode === 'children') {
+    const aid = relinkArm.anchorId;
+    if (!aid || newParentId === aid) return false;
+    const kids = nodes.filter((x) => x.parent_id === aid);
+    if (!kids.length) return false;
+    const forest = childrenForestIdSet(aid);
+    if (forest.has(newParentId)) return false;
+    if (kids.some((k) => k.id === newParentId)) return false;
+    for (const k of kids) {
+      if (subtreeIdSet(k.id).has(newParentId)) return false;
+    }
+    const allSame = kids.every((k) => k.parent_id === newParentId);
+    return !allSame;
+  }
+  return false;
+}
+
+function findDropPbAt(clientX, clientY) {
+  try {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (const el of stack) {
+      const pb = el.closest?.('.pb2[data-relink-parent-id]');
+      if (pb) return pb;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function relinkInflateRect(r, pad) {
+  return {
+    left: r.left - pad,
+    right: r.right + pad,
+    top: r.top - pad,
+    bottom: r.bottom + pad
+  };
+}
+
+/** @param {DOMRectReadOnly | DOMRect} a @param {{ left: number; right: number; top: number; bottom: number }} b */
+function relinkRectIntersectionArea(a, b) {
+  const x1 = Math.max(a.left, b.left);
+  const y1 = Math.max(a.top, b.top);
+  const x2 = Math.min(a.right, b.right);
+  const y2 = Math.min(a.bottom, b.bottom);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  return (x2 - x1) * (y2 - y1);
+}
+
+/**
+ * 이동 고스트 카드 레이아웃이 대상 `+`(패딩 확장)과 겹치면 그 버튼을 우선.
+ * 겹침 없을 때만 포인터 좌표의 hit-test로 폴백.
+ */
+function findRelinkDropPb(clientX, clientY, flyEl) {
+  if (!relinkArm) return null;
+  let bestPb = null;
+  let bestArea = -1;
+  if (flyEl && flyEl.isConnected) {
+    try {
+      const gr = flyEl.getBoundingClientRect();
+      if (gr.width >= 2 && gr.height >= 2) {
+        const root = CV && CV.isConnected ? CV : document;
+        const pbs = root.querySelectorAll('.pb2[data-relink-parent-id]');
+        for (const pb of pbs) {
+          const pr = pb.getBoundingClientRect();
+          const ex = relinkInflateRect(pr, RELINK_PLUS_HIT_PAD);
+          const area = relinkRectIntersectionArea(gr, ex);
+          if (area <= 0) continue;
+          const pid = pb.getAttribute('data-relink-parent-id');
+          if (!pid || !canDropOnParent(pid)) continue;
+          if (area > bestArea) {
+            bestArea = area;
+            bestPb = pb;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  if (bestPb) return bestPb;
+  try {
+    const root = CV && CV.isConnected ? CV : document;
+    const pbs = root.querySelectorAll('.pb2[data-relink-parent-id]');
+    let nearPb = null;
+    let nearD = Infinity;
+    for (const pb of pbs) {
+      const pr = pb.getBoundingClientRect();
+      const ex = relinkInflateRect(pr, RELINK_PLUS_HIT_PAD);
+      if (clientX < ex.left || clientX > ex.right || clientY < ex.top || clientY > ex.bottom) continue;
+      const pid = pb.getAttribute('data-relink-parent-id');
+      if (!pid || !canDropOnParent(pid)) continue;
+      const cx = (pr.left + pr.right) / 2;
+      const cy = (pr.top + pr.bottom) / 2;
+      const d = (clientX - cx) ** 2 + (clientY - cy) ** 2;
+      if (d < nearD) {
+        nearD = d;
+        nearPb = pb;
+      }
+    }
+    if (nearPb) return nearPb;
+  } catch (_) {}
+  return findDropPbAt(clientX, clientY);
+}
+
+/** 1.5초 완료 후: 실제 노드 카드(또는 직속 하위 카드 묶음) 복제 고스트가 포인터를 따라가며 대상 `+`에 드롭 */
+function beginRelinkDragSession(pointerId, clientX, clientY) {
+  endRelinkDragSession();
+  if (!relinkArm) {
+    relinkDragActive = false;
+    return;
+  }
+  relinkDragActive = true;
+  removeRelinkGhosts();
+  relinkGhostLayer = document.createElement('div');
+  relinkGhostLayer.className = 'relink-ghost-layer';
+  relinkGhostLayer.setAttribute('aria-hidden', 'true');
+  relinkGhostLayer.style.cssText =
+    'position:fixed;inset:0;pointer-events:none;z-index:12000;overflow:visible;';
+  const fly = document.createElement('div');
+  fly.className = 'relink-ghost-fly';
+  fly.style.cssText =
+    'position:fixed;pointer-events:none;display:flex;flex-direction:column;gap:6px;align-items:flex-start;';
+
+  let grabDx = 0;
+  let grabDy = 0;
+  let useCenterTransform = false;
+  /** @type {string[]} */
+  const idsToDim = [];
+
+  if (relinkArm.mode === 'single') {
+    const nid = relinkArm.nodeIds[0];
+    idsToDim.push(nid);
+    const ndEl = document.getElementById('nd-' + nid);
+    if (ndEl) {
+      const rect = ndEl.getBoundingClientRect();
+      grabDx = clientX - rect.left;
+      grabDy = clientY - rect.top;
+      fly.classList.add('relink-ghost-fly--single');
+      fly.appendChild(cloneNdForGhost(ndEl));
+    } else {
+      const n = find(nid);
+      const label = n ? String(n.name || '노드').slice(0, 22) : '노드';
+      const pill = document.createElement('div');
+      pill.className = 'relink-ghost-fallback';
+      pill.textContent = label;
+      fly.appendChild(pill);
+      useCenterTransform = true;
+    }
+  } else {
+    const aid = relinkArm.anchorId;
+    const kids = nodes
+      .filter((x) => x.parent_id === aid)
+      .sort((a, b) => {
+        const pa = gp(a),
+          pb = gp(b);
+        if (pa.y !== pb.y) return pa.y - pb.y;
+        return pa.x - pb.x;
+      });
+    let minL = Infinity;
+    let minT = Infinity;
+    let anyRect = false;
+    for (const k of kids) {
+      const ndEl = document.getElementById('nd-' + k.id);
+      if (!ndEl) continue;
+      const rect = ndEl.getBoundingClientRect();
+      minL = Math.min(minL, rect.left);
+      minT = Math.min(minT, rect.top);
+      anyRect = true;
+    }
+    for (const k of kids) idsToDim.push(k.id);
+    if (anyRect && minL !== Infinity) {
+      grabDx = clientX - minL;
+      grabDy = clientY - minT;
+      fly.classList.add('relink-ghost-fly--stack');
+      for (const k of kids) {
+        const ndEl = document.getElementById('nd-' + k.id);
+        if (!ndEl) continue;
+        fly.appendChild(cloneNdForGhost(ndEl));
+      }
+    } else {
+      const pill = document.createElement('div');
+      pill.className = 'relink-ghost-fallback';
+      pill.textContent = `하위 ${kids.length}개`;
+      fly.appendChild(pill);
+      useCenterTransform = true;
+    }
+  }
+
+  if (!fly.querySelector('.relink-ghost-nd')) {
+    useCenterTransform = true;
+    if (!fly.firstChild) {
+      const pill = document.createElement('div');
+      pill.className = 'relink-ghost-fallback';
+      pill.textContent = '노드';
+      fly.appendChild(pill);
+    }
+  }
+  if (useCenterTransform) {
+    grabDx = 0;
+    grabDy = 0;
+    fly.style.left = `${clientX}px`;
+    fly.style.top = `${clientY}px`;
+    fly.style.transform = 'translate(-50%,-50%)';
+  } else {
+    fly.style.left = `${clientX - grabDx}px`;
+    fly.style.top = `${clientY - grabDy}px`;
+    fly.style.transform = 'none';
+  }
+
+  for (const id of idsToDim) {
+    const el = document.getElementById('nd-' + id);
+    if (el) el.classList.add('relink-source-dim');
+  }
+
+  relinkGhostLayer.appendChild(fly);
+  document.body.appendChild(relinkGhostLayer);
+
+  const move = (ev) => {
+    if (ev.pointerId !== pointerId) return;
+    if (useCenterTransform) {
+      fly.style.left = `${ev.clientX}px`;
+      fly.style.top = `${ev.clientY}px`;
+    } else {
+      fly.style.left = `${ev.clientX - grabDx}px`;
+      fly.style.top = `${ev.clientY - grabDy}px`;
+    }
+    const pb = findRelinkDropPb(ev.clientX, ev.clientY, fly);
+    const pid = pb?.getAttribute('data-relink-parent-id') || null;
+    if (pid && canDropOnParent(pid)) setRelinkHoverPb(pb);
+    else setRelinkHoverPb(null);
+  };
+  const up = (ev) => {
+    if (ev.pointerId !== pointerId) return;
+    const pb = findRelinkDropPb(ev.clientX, ev.clientY, fly);
+    const pid = pb?.getAttribute('data-relink-parent-id') || null;
+    const ok = !!(pid && canDropOnParent(pid));
+    endRelinkDragSession();
+    if (ok) {
+      applyRelinkDrop(pid);
+    } else {
+      clearRelinkArm();
+      render();
+      toast('연결 안 함 — 대상 노드의 + 위에서 손을 떼 줘');
+    }
+  };
+  document.addEventListener('pointermove', move, true);
+  document.addEventListener('pointerup', up, true);
+  document.addEventListener('pointercancel', up, true);
+  move({ pointerId, clientX, clientY });
+  relinkDragCleanup = () => {
+    document.removeEventListener('pointermove', move, true);
+    document.removeEventListener('pointerup', up, true);
+    document.removeEventListener('pointercancel', up, true);
+  };
+}
+
+function armRelinkCard(n) {
+  clearRelinkArm();
+  clearRelinkHold();
+  relinkArm = { mode: 'single', nodeIds: [n.id] };
+  selId = n.id;
+  relinkSuppressClick = true;
+  setTimeout(() => {
+    relinkSuppressClick = false;
+  }, 400);
+  toast('노드 이동 모드 — 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소', {
+    persistRelink: true
+  });
+}
+
+/** `+` 1.5초: 앵커 노드는 그대로 두고 직속 하위만 새 부모로 */
+function armRelinkChildrenGroup(anchorId) {
+  const root = find(anchorId);
+  if (!root) return;
+  const kids = nodes.filter((x) => x.parent_id === anchorId);
+  if (!kids.length) {
+    toast('옮길 직속 하위 노드가 없어');
+    return;
+  }
+  clearRelinkArm();
+  clearRelinkHold();
+  relinkArm = { mode: 'children', anchorId };
+  selId = anchorId;
+  toast('하위 노드만 이동 — 앵커는 그대로, 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소', {
+    persistRelink: true
+  });
+}
+
+function applyRelinkDrop(newParentId) {
+  if (!relinkArm) return;
+  if (!canDropOnParent(newParentId)) {
+    toast('여기엔 붙일 수 없어');
+    clearRelinkArm();
+    render();
+    return;
+  }
+  if (relinkArm.mode === 'single') {
+    const nid = relinkArm.nodeIds[0];
+    const moving = find(nid);
+    if (!moving) {
+      clearRelinkArm();
+      render();
+      return;
+    }
+    pushUndoSnapshot();
+    moving.parent_id = newParentId;
+    moving.mx = null;
+    moving.my = null;
+    nodes = [...nodes];
+  } else {
+    const anchorId = relinkArm.anchorId;
+    const kids = nodes.filter((x) => x.parent_id === anchorId);
+    pushUndoSnapshot();
+    for (const k of kids) {
+      k.parent_id = newParentId;
+      k.mx = null;
+      k.my = null;
+    }
+    nodes = [...nodes];
+  }
+  clearRelinkArm();
+  render();
+  schedulePersist();
+  emitAutoCloudSync('node-relink');
+  toast('노드 연결을 바꿨어');
+}
+
+/** 카드(또는 제목)에서: 1.5초 유지 → 재연결 / 그 전에 움직이면 기존 위치 드래그(제목 제외) */
+function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
+  clearRelinkHold();
+  const pid = e.pointerId;
+  let lastCx = e.clientX;
+  let lastCy = e.clientY;
+  const cx = e.clientX;
+  const cy = e.clientY;
+  const timer = setTimeout(() => {
+    if (relinkHoldCleanup) {
+      relinkHoldCleanup();
+      relinkHoldCleanup = null;
+    }
+    armRelinkCard(n);
+    queueMicrotask(() => beginRelinkDragSession(pid, lastCx, lastCy));
+  }, RELINK_HOLD_MS);
+  const onMove = (ev) => {
+    if (ev.pointerId !== pid) return;
+    lastCx = ev.clientX;
+    lastCy = ev.clientY;
+    const dx = ev.clientX - cx;
+    const dy = ev.clientY - cy;
+    if (dx * dx + dy * dy > RELINK_MOVE_PX * RELINK_MOVE_PX) {
+      clearTimeout(timer);
+      if (relinkHoldCleanup) {
+        relinkHoldCleanup();
+        relinkHoldCleanup = null;
+      }
+      if (!fromTitle) {
+        sDrag(ev, n, false);
+      }
+    }
+  };
+  const onUp = (ev) => {
+    if (ev.pointerId !== pid) return;
+    clearTimeout(timer);
+    if (relinkHoldCleanup) {
+      relinkHoldCleanup();
+      relinkHoldCleanup = null;
+    }
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onUp);
+  relinkHoldCleanup = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
+  };
+}
 
 /** num 비어 있을 때(플레이스홀더) 표시·저장용 — 형제 순서 = nodes 상 동일 parent_id 그룹 순서 */
 function defaultNumForNode(node) {
@@ -282,7 +886,20 @@ function schedulePersist() {
     try {
       onPersist({ nodes: JSON.parse(JSON.stringify(nodes)), curP });
     } catch (_) {}
+    persistTimer = null;
   }, 50);
+}
+
+/** 기능명세 등 그리드 편집 후 지연 저장을 즉시 실행 — 탭 이탈·SSoT 정합 */
+function flushPersistNow() {
+  if (persistTimer != null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (!onPersist || syncing || !curP) return;
+  try {
+    onPersist({ nodes: JSON.parse(JSON.stringify(nodes)), curP });
+  } catch (_) {}
 }
 
 const _MD_DMAX = 512;
@@ -339,12 +956,59 @@ export function buildPRD() {
   if (s5) s5.innerHTML = chunks.s5;
 }
 
+/** CSV(엑셀 호환) 셀 이스케이프 — 쉼표·따옴표·줄바꿈 포함 시 RFC4180 따옴표 규칙 */
+function csvCell(s) {
+  const t = String(s ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+  if (/[",\n]/.test(t)) return `"${t.replace(/"/g, '""')}"`;
+  return t;
+}
+
+function exportSpecSheetCsv() {
+  if (!curP) {
+    toast('프로젝트를 먼저 선택해줘');
+    return;
+  }
+  if (!nodes.length) {
+    toast('내보낼 노드가 없어');
+    return;
+  }
+  const headers = ['기능ID', '뎁스', '기능명', '설명', '사용자유형', '입출력', '예외', '우선순위', '3트랙 배지'];
+  const rows = [...nodes]
+    .sort((a, b) => (a.num || '').localeCompare(b.num || ''))
+    .map((n) => {
+      const d = getDepth(n.id);
+      const depthLabel = String(DN[d] ?? 'Lv' + d);
+      const numDisp = n.num && String(n.num).trim() ? n.num : defaultNumForNode(n) || '—';
+      const fs = readFunctionalSpecRow(n);
+      const badgeStr = formatBadgeTracksForDisplay(getBadgeSetFromNodeInput(n));
+      return [
+        numDisp,
+        depthLabel,
+        n.name || '새 노드',
+        n.description || '',
+        fs.userTypes,
+        fs.io,
+        fs.exceptions,
+        fs.priority,
+        badgeStr
+      ].map(csvCell);
+    });
+  /* UTF-8 BOM + CRLF: Windows/맥 엑셀에서 더블클릭 열기·한글 깨짐 방지에 유리 */
+  const body = [headers.map(csvCell).join(','), ...rows.map((r) => r.join(','))].join('\r\n');
+  const bom = '\uFEFF';
+  const slug = slugExportName(curP.name);
+  dlFile(bom + body, 'text/csv;charset=utf-8', `${slug}-functional-spec.csv`);
+  toast('CSV 다운로드 완료 · 파일을 더블클릭하면 엑셀에서 열려 ✓');
+}
+
 export function buildSpec() {
   const tbody = document.getElementById('spec-tbody');
   if (!tbody) return;
   if (!curP || !nodes.length) {
     tbody.innerHTML =
-      '<tr><td colspan="5" style="text-align:center;padding:40px;color:#bbb;font-size:13px">프로젝트를 먼저 열어줘.</td></tr>';
+      '<tr class="spec-sheet-row spec-sheet-row--empty"><td class="spec-sheet-td spec-sheet-td--empty" colspan="9">프로젝트를 먼저 열어줘.</td></tr>';
     return;
   }
   tbody.innerHTML = [...nodes]
@@ -352,11 +1016,13 @@ export function buildSpec() {
     .map((n) => {
       const d = getDepth(n.id),
         color = getDC(d);
-      const bgs = (n.badges || [])
-        .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
-        .join(' ');
+      const bgs = formatSpecBadgeTracksHtml(n);
       const numDisp = n.num && String(n.num).trim() ? n.num : defaultNumForNode(n) || '—';
-      return `<tr><td style="font-family:monospace;color:#888;font-size:11px">${esc(numDisp)}</td><td><span class="depth-pill" style="background:${color}">${DN[d] ?? 'Lv' + d}</span></td><td style="font-weight:500;color:#1a1a1a">${esc(n.name || '새 노드')}</td><td style="color:#888">${esc(n.description || '—')}</td><td>${bgs || '<span style="color:#ddd;font-size:11px">—</span>'}</td></tr>`;
+      const fs = readFunctionalSpecRow(n);
+      const nid = escAttr(n.id);
+      const numVal = numDisp === '—' ? '' : String(numDisp);
+      const depthLabel = esc(String(DN[d] ?? 'Lv' + d));
+      return `<tr class="spec-sheet-row"><td class="spec-sheet-td"><input class="spec-grid-inp spec-grid-inp--id" data-node-id="${nid}" data-spec-field="num" value="${escAttr(numVal)}" autocomplete="off" spellcheck="false" /></td><td class="spec-sheet-td spec-sheet-td--depth"><span class="spec-depth-chip" style="background:${color}">${depthLabel}</span></td><td class="spec-sheet-td"><input class="spec-grid-inp" data-node-id="${nid}" data-spec-field="name" value="${escAttr(n.name || '새 노드')}" autocomplete="off" /></td><td class="spec-sheet-td"><textarea class="spec-grid-inp" data-node-id="${nid}" data-spec-field="description" rows="2" autocomplete="off">${esc(n.description || '')}</textarea></td><td class="spec-sheet-td"><input class="spec-grid-inp" data-node-id="${nid}" data-spec-field="fsUserTypes" value="${escAttr(fs.userTypes)}" autocomplete="off" placeholder="-" /></td><td class="spec-sheet-td"><input class="spec-grid-inp" data-node-id="${nid}" data-spec-field="fsIo" value="${escAttr(fs.io)}" autocomplete="off" placeholder="-" /></td><td class="spec-sheet-td"><input class="spec-grid-inp" data-node-id="${nid}" data-spec-field="fsExceptions" value="${escAttr(fs.exceptions)}" autocomplete="off" placeholder="-" /></td><td class="spec-sheet-td"><input class="spec-grid-inp" data-node-id="${nid}" data-spec-field="fsPriority" value="${escAttr(fs.priority)}" autocomplete="off" placeholder="P" /></td><td class="spec-sheet-td spec-sheet-td--badges">${bgs}</td></tr>`;
     })
     .join('');
 }
@@ -411,7 +1077,7 @@ async function triggerAI(type) {
     const r = await fetch('/api/ai/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ system: prompt.system, user: prompt.user })
+      body: JSON.stringify({ system: prompt.system, user: prompt.user, outputIntent })
     });
     const j = await r.json().catch(() => ({}));
     if (r.status === 503) {
@@ -440,12 +1106,40 @@ async function triggerAI(type) {
       toast('AI 응답을 AI 탭에 표시했어.');
       const planPid = typeof getPlanProjectId === 'function' ? getPlanProjectId() : null;
       if (planPid && String(planPid).trim()) {
+        const planProjectId = String(planPid).trim();
+        const treeText = (() => {
+          try {
+            const t = buildTreeText(nodes);
+            return t.length > 50000 ? `${t.slice(0, 50000)}…` : t;
+          } catch (e) {
+            if (import.meta.env.DEV) console.warn('[plannodePilot] buildTreeText', e);
+            return '';
+          }
+        })();
+        void insertAiGenerationL5({
+          planProjectId,
+          outputIntent,
+          finalOutput: j.text,
+          nodeId: null,
+          modelUsed: typeof j.model === 'string' && j.model ? j.model : undefined,
+          contextSnapshot: {
+            source: 'ai-tab',
+            trigger: type,
+            plannodeProjectId: curP?.id ?? null,
+            nodeCount: nodes.length,
+            treeText: treeText || undefined
+          }
+        }).then((r) => {
+          if (!r.ok && import.meta.env.DEV) {
+            console.warn('[plannodePilot] ai_generations', r.message);
+          }
+        });
         try {
           const sync = await fetch('/api/plan-nodes/sync-meta', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-              planProjectId: String(planPid).trim(),
+              planProjectId,
               nodes: nodes.map((n) => ({
                 id: n.id,
                 name: n.name,
@@ -692,6 +1386,7 @@ function render() {
     cpRow.appendChild(p);
   }
   CV.appendChild(cpRow);
+  const relinkHi = relinkHighlightIds();
   nodes.forEach((n) => {
     const d = getDepth(n.id),
       bc = getDC(d),
@@ -705,18 +1400,35 @@ function render() {
       'nd' +
       (d === 0 ? ' rnd' : '') +
       (selId === n.id ? ' sel' : '') +
-      (multiSel.has(n.id) ? ' msel' : '');
+      (multiSel.has(n.id) ? ' msel' : '') +
+      (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '');
     nd.id = 'nd-' + n.id;
       const bgs = (n.badges || [])
         .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
         .join('');
     const hasDesc = !!(n.description && String(n.description).trim());
+    const nameStr = n.name != null ? String(n.name) : '';
+    const displayLabel = nameStr.trim() ? nameStr.trim() : '새 노드';
+    const hasLongTitle =
+      nameStr.includes('\n') || displayLabel.length > 16;
+    const titleTipBlock = hasLongTitle
+      ? '<div class="nn-tooltip" role="tooltip"><div class="nn-tooltip-t">제목 미리보기</div><div class="nn-tooltip-b"></div></div>'
+      : '';
     const numDisp = esc(n.num && String(n.num).trim() ? n.num : defaultNumForNode(n));
-    nd.innerHTML = `<div class="ndt"><div class="nb" style="background:${bc}"></div><div style="flex:1;min-width:0"><div class="nn">${esc(n.name || '새 노드')}<span class="ndepth">L${d}</span></div></div></div>${
+    nd.innerHTML = `<div class="ndt"><div class="nb" style="background:${bc}"></div><div class="nn-wrap${hasLongTitle ? ' nn-wrap--tip' : ''}" style="flex:1;min-width:0"><div class="nn-line"><span class="nn">${esc(displayLabel)}</span><span class="ndepth">L${d}</span></div>${titleTipBlock}</div></div>${
       hasDesc
         ? `<div class="nds-wrap"><div class="nds">${esc(n.description || '')}</div><div class="nds-tooltip" role="tooltip"><div class="nds-tooltip-t">미리보기</div><div class="nds-tooltip-b"></div></div></div>`
         : ''
     }<div class="nm"><div class="nm-clamp">${bgs}</div></div><div class="na" id="na-${n.id}"><span class="nnum">${numDisp}</span></div>`;
+    if (hasLongTitle) {
+      const nTipB = nd.querySelector('.nn-tooltip-b');
+      if (nTipB) nTipB.textContent = nameStr.length ? nameStr : '새 노드';
+      const nTip = nd.querySelector('.nn-tooltip');
+      if (nTip) {
+        nTip.addEventListener('pointerdown', (e) => e.stopPropagation());
+        nTip.addEventListener('click', (e) => e.stopPropagation());
+      }
+    }
     if (hasDesc) {
       const tipB = nd.querySelector('.nds-tooltip-b');
       if (tipB) tipB.textContent = n.description || '';
@@ -728,22 +1440,30 @@ function render() {
     }
     nd.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || e.button !== 0) return;
-      // 버튼 클릭은 sDrag 시작 안 함 (button 요소 또는 그 자식만 제외)
       if (e.target.closest('button')) return;
-      // Shift 없음 + 제목 클릭: sDrag 시작 안 함 (click 이벤트로 showEdit 호출하게)
-      if (!e.shiftKey && e.target.closest('.nn')) return;
       if (e.shiftKey) {
-        // Shift: 다중 선택 추가 (항상 추가, 제거는 안 함)
         multiSel.add(n.id);
-      } else {
-        // 일반: 단일 선택만 → multiSel 초기화 → 단일 드래그
-        multiSel.clear();
+        selId = n.id;
+        try {
+          e.preventDefault();
+        } catch (_) {}
+        sDrag(e, n, true);
+        return;
       }
+      if (e.target.closest('.nn-line')) {
+        selId = n.id;
+        try {
+          e.preventDefault();
+        } catch (_) {}
+        startRelinkHoldOrDeferDrag(e, n, true);
+        return;
+      }
+      multiSel.clear();
       selId = n.id;
       try {
         e.preventDefault();
       } catch (_) {}
-      sDrag(e, n, e.shiftKey);
+      startRelinkHoldOrDeferDrag(e, n, false);
     });
     nd.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -753,11 +1473,16 @@ function render() {
       showCtx(e, n);
     });
     // 노드 제목 클릭 시 편집 모달 호출 (Shift 없을 때만)
-    const titleEl = nd.querySelector('.nn');
+    const titleEl = nd.querySelector('.nn-line');
     if (titleEl) {
       titleEl.style.cursor = 'pointer';
       titleEl.addEventListener('click', (e) => {
-        if (e.shiftKey) return; // Shift: 모달 없이 다중 선택만
+        if (e.shiftKey) return;
+        if (relinkSuppressClick || relinkArm) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
         e.stopPropagation();
         e.preventDefault();
         selId = n.id;
@@ -768,16 +1493,61 @@ function render() {
     if (n.parent_id) na.appendChild(mkB('−', RD, () => cDel(n.id)));
     w.appendChild(nd);
     const pb = document.createElement('button');
-    pb.className = 'pb2';
+    pb.type = 'button';
+    pb.className = 'pb2' + (relinkArm && !relinkDragActive ? ' pb2-drop' : '');
     pb.textContent = '+';
+    pb.setAttribute('data-relink-parent-id', n.id);
+    pb.title =
+      '짧게 누름: 하위 노드 추가 · 1.5초 누름: 직속 하위만 새 상위로(이 노드는 그대로) — 끌어서 다른 노드의 + 근처에서 놓기';
+    pb.setAttribute('aria-label', '노드 추가 또는 하위만 상위 바꾸기');
     pb.setAttribute(
       'style',
       `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(0,0,0,.2)`
     );
-    pb.addEventListener('pointerdown', (e) => e.stopPropagation());
-    pb.addEventListener('click', (e) => {
+    pb.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
-      addChild(n.id);
+      if (relinkDragActive) return;
+      if (relinkArm) return;
+      clearTimeout(plusHoldTimer);
+      plusHoldTimer = null;
+      plusDownTs = Date.now();
+      plusLongFired = false;
+      plusDownPointerId = e.pointerId;
+      plusHoldAnchorId = n.id;
+      lastPlusPt = { x: e.clientX, y: e.clientY };
+      plusHoldTimer = setTimeout(() => {
+        plusHoldTimer = null;
+        plusLongFired = true;
+        armRelinkChildrenGroup(n.id);
+        queueMicrotask(() =>
+          beginRelinkDragSession(plusDownPointerId, lastPlusPt.x, lastPlusPt.y)
+        );
+      }, RELINK_HOLD_MS);
+    });
+    pb.addEventListener('pointermove', (e) => {
+      if (e.pointerId === plusDownPointerId && (e.buttons & 1)) {
+        lastPlusPt = { x: e.clientX, y: e.clientY };
+      }
+    });
+    pb.addEventListener('pointerup', (e) => {
+      e.stopPropagation();
+      clearTimeout(plusHoldTimer);
+      plusHoldTimer = null;
+      if (relinkDragActive) {
+        plusDownPointerId = null;
+        return;
+      }
+      if (!plusLongFired && Date.now() - plusDownTs < RELINK_HOLD_MS + 80) {
+        addChild(n.id);
+      }
+      plusLongFired = false;
+      plusDownPointerId = null;
+    });
+    pb.addEventListener('pointercancel', () => {
+      clearTimeout(plusHoldTimer);
+      plusHoldTimer = null;
+      plusLongFired = false;
+      plusDownPointerId = null;
     });
     pb.onmouseenter = () => (pb.style.opacity = '.8');
     pb.onmouseleave = () => (pb.style.opacity = '1');
@@ -1335,6 +2105,17 @@ export function initPlannode(opts = {}) {
   document.addEventListener('click', onDocClickCtx);
   disposers.push(() => document.removeEventListener('click', onDocClickCtx));
 
+  const vSpec = document.getElementById('V-SPEC');
+  if (vSpec) {
+    const specIn = (ev) => onSpecGridInput(ev);
+    vSpec.addEventListener('input', specIn);
+    vSpec.addEventListener('change', specIn);
+    disposers.push(() => {
+      vSpec.removeEventListener('input', specIn);
+      vSpec.removeEventListener('change', specIn);
+    });
+  }
+
   if (!delegateTabs) {
     const tabHandler = (t) => () => {
       curView = t.dataset.view;
@@ -1411,6 +2192,16 @@ export function initPlannode(opts = {}) {
     undoLast();
   });
   const onGlobalKeyDown = (e) => {
+    if (e.key === 'Escape' && (relinkArm || relinkDragActive)) {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      e.preventDefault();
+      clearRelinkArm();
+      clearRelinkHold();
+      render();
+      toast('노드 붙이기 취소');
+      return;
+    }
     if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z' || e.shiftKey) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -1473,7 +2264,7 @@ export function initPlannode(opts = {}) {
         return;
       }
 
-      // Shift 없음: 팬 활성화 + 그룹 선택 해제
+      // Shift 없음: 팬 활성화 + 그룹 선택 해제 (§4.0.1 재연결 모드는 Esc·드롭으로만 종료)
       if (e.button === 0) {
         multiSel.clear();
         render();
@@ -1533,9 +2324,12 @@ export function initPlannode(opts = {}) {
         mx = e.clientX - r.left,
         my = e.clientY - r.top,
         d = e.deltaY < 0 ? 1.1 : 0.909;
-      panX = mx - (mx - panX) * d;
-      panY = my - (my - panY) * d;
-      scale = Math.min(Math.max(scale * d, 0.12), 3);
+      const prev = scale;
+      const next = Math.min(Math.max(prev * d, 0.12), 3);
+      const z = next / prev;
+      panX = mx - (mx - panX) * z;
+      panY = my - (my - panY) * z;
+      scale = next;
       applyTx();
     } else {
       e.preventDefault();
@@ -1628,6 +2422,10 @@ export function initPlannode(opts = {}) {
 
   return {
     destroy() {
+      if (persistTimer != null) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+      }
       disposers.forEach((d) => d());
       disposers = [];
       onPersist = null;
@@ -1686,10 +2484,17 @@ export function initPlannode(opts = {}) {
       }
     },
     setActiveView(view) {
+      if (curView === 'spec' && view !== 'spec') flushPersistNow();
       curView = view;
       if (view === 'prd') buildPRD();
       if (view === 'spec') buildSpec();
     },
+    /** 기능명세 그리드 `schedulePersist`(지연) 대기 중 — 탭 닫기·이탈 전 플러시 판별용 */
+    hasPendingGridPersist() {
+      return persistTimer != null;
+    },
+    flushPersistNow,
+    exportSpecSheetCsv,
     getSnapshot() {
       return { nodes: JSON.parse(JSON.stringify(nodes)), curP };
     }

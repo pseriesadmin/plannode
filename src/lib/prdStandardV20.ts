@@ -3,6 +3,7 @@
  * 참고: PRD_표준작성가이드_v2.0.md — 문서 내 큰 제목은 가이드의 5개 섹션(기능명세·아키텍처·수용기준·로드맵·위험)에 대응.
  */
 import type { Node, Project } from '$lib/supabase/client';
+import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildBadgeContext, getBadgeSetFromNodeInput, formatBadgeTracksForDisplay } from '$lib/ai/badgePromptInjector';
 
 /** 파일럿 런타임 노드와 호환 (metadata.badges = 3트랙) */
@@ -36,32 +37,6 @@ function getDepth(
   const n = flat.find((x) => x.id === id);
   if (!n || !n.parent_id) return 0;
   return 1 + getDepth(flat, n.parent_id, seen);
-}
-
-function toMdLine(
-  n: PrdNodeInput,
-  nodes: PrdNodeInput[],
-  d = 0,
-  lines: string[] = [],
-  path = new Set<string>()
-): string[] {
-  if (!n?.id) return lines;
-  if (path.has(n.id)) {
-    const k = Math.min(d, 12);
-    lines.push(`${'  '.repeat(k)}- [${n.num || '—'}] (순환 parent_id 감지 — 건너뜀)`);
-    return lines;
-  }
-  path.add(n.id);
-  const k = Math.min(d, 12);
-  const indent = '  '.repeat(k);
-  const tr = formatBadgeTracksForDisplay(getBadgeSetFromNodeInput(n));
-  const prefix = d === 0 ? '#' : d === 1 ? '##' : d === 2 ? '###' : '-';
-  const badgePart = tr === '—' ? '' : ` (${tr})`;
-  lines.push(`${indent}${prefix} [${n.num || '—'}] ${n.name}${badgePart}`);
-  if (n.description) lines.push(`${indent}  ${n.description}`);
-  nodes.filter((c) => c && c.parent_id === n.id).forEach((c) => toMdLine(c, nodes, d + 1, lines, path));
-  path.delete(n.id);
-  return lines;
 }
 
 /** 루트부터 DFS(형제는 번호순) — 문서에 트리와 동일 순서로 전 노드 나열 */
@@ -218,8 +193,8 @@ function nodeCatalogMarkdown(nodes: PrdNodeInput[]): string {
 /** 기능명세: 프로젝트 메타 + 트리 + 전 노드 PRD 블록 + 요약표 + 배지 */
 function section1Markdown(project: PrdProjectInput, nodes: PrdNodeInput[]): string {
   const ordered = collectNodesDfsOrder(nodes);
-  const roots = nodes.filter((n) => !n.parent_id);
-  const tree = roots.length ? roots.flatMap((r) => toMdLine(r, nodes)).join('\n') : '_(루트 노드 없음)_';
+  /** PRD §1.1 = IA/LLM `buildTreeText`와 동일( v4 treeText SSoT ) */
+  const tree = buildTreeText(nodes as Node[]);
   const blocks = ordered.map((n) => nodeFeatureBlockMd(n, nodes)).join('\n');
   const tdd = nodes.filter((n) => (n.badges || []).includes('tdd'));
   const ai = nodes.filter((n) => (n.badges || []).includes('ai'));

@@ -42,7 +42,18 @@
   } from '$lib/supabase/projectPresence';
   import { getAuthUserId, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
-  import { mountPilotBridge, pilotSetActiveView } from '$lib/pilot/pilotBridge';
+  import IAExportMenu from '$lib/components/IAExportMenu.svelte';
+  import IAGridSheet from '$lib/components/IAGridSheet.svelte';
+  import {
+    mountPilotBridge,
+    pilotSetActiveView,
+    pilotExportSpecSheetCsv,
+    pilotFlushPersistNow,
+    pilotHasPendingGridPersist,
+    dismissPilotRelinkGuide
+  } from '$lib/pilot/pilotBridge';
+  import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
+  import type { IAExportIntent } from '$lib/ai/iaExportRunner';
   import type { PageData } from './$types';
 
   /** SvelteKit이 주입 — 미선언 시 콘솔 "unknown prop" 경고 */
@@ -131,6 +142,7 @@
   }
 
   function showPilotToast(msg: string) {
+    dismissPilotRelinkGuide();
     const t = document.getElementById('TST');
     if (!t) return;
     t.textContent = msg;
@@ -181,10 +193,11 @@
   let showViewMenu = false;
   let viewMenuWrapEl: HTMLDivElement | undefined;
 
-  const VIEW_MENU_LABELS: Record<'tree' | 'prd' | 'spec' | 'ai', string> = {
-    tree: '트리 뷰',
+  const VIEW_MENU_LABELS: Record<'tree' | 'prd' | 'spec' | 'ia' | 'ai', string> = {
+    tree: '노드',
     prd: 'PRD',
     spec: '기능명세',
+    ia: 'IA(정보구조)',
     ai: 'AI 분석'
   };
 
@@ -194,9 +207,16 @@
     showViewMenu = false;
   }
 
-  function pickView(v: 'tree' | 'prd' | 'spec' | 'ai') {
+  function pickView(v: 'tree' | 'prd' | 'spec' | 'ia' | 'ai') {
     activeView.set(v);
     closeViewMenu();
+  }
+
+  /** 상단 출력 → 화면 목록 인텐트: IA 탭으로 전환 후 `IAExportMenu`가 1회 실행 */
+  function goIaFromOutput(intent: IAExportIntent) {
+    closeOutputMenu();
+    pendingIaExportIntent.set(intent);
+    pickView('ia');
   }
 
   function onToolbarMenusOutside(ev: MouseEvent) {
@@ -654,13 +674,35 @@
     };
     window.addEventListener('plannode-auto-cloud-sync', onExportSync);
 
+    const onPilotToast = (ev: Event) => {
+      const msg = (ev as CustomEvent<{ message?: string }>).detail?.message;
+      if (msg) showPilotToast(msg);
+    };
+    window.addEventListener('plannode-pilot-toast', onPilotToast);
+
     const onVis = () => {
-      if (document.visibilityState === 'hidden') void flushCloudWorkspaceNow('visibility-hidden');
+      if (document.visibilityState === 'hidden') {
+        if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
+        void flushCloudWorkspaceNow('visibility-hidden');
+      }
     };
     document.addEventListener('visibilitychange', onVis);
 
-    const onPageHide = () => void flushCloudWorkspaceNow('pagehide');
+    const onPageHide = () => {
+      if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
+      void flushCloudWorkspaceNow('pagehide');
+    };
     window.addEventListener('pagehide', onPageHide);
+
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
+      const s = get(cloudSyncBadge);
+      if (s === 'pending' || s === 'syncing') {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
 
     return () => {
       mqToolbar.removeEventListener('change', onMqToolbar);
@@ -668,8 +710,10 @@
       window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
+      window.removeEventListener('plannode-pilot-toast', onPilotToast);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onBeforeUnload);
       pilotReady = false;
       destroy();
     };
@@ -770,7 +814,7 @@
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'tree'}
-                  on:click={() => pickView('tree')}>트리 뷰</button>
+                  on:click={() => pickView('tree')}>노드</button>
                 <button
                   type="button"
                   role="menuitem"
@@ -783,6 +827,12 @@
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'spec'}
                   on:click={() => pickView('spec')}>기능명세</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="tb-view-menu-item"
+                class:tb-view-menu-item--on={$activeView === 'ia'}
+                on:click={() => pickView('ia')}>IA(정보구조)</button>
                 <button
                   type="button"
                   role="menuitem"
@@ -798,7 +848,7 @@
               class="tb-viewport-btn"
               aria-haspopup="menu"
               aria-expanded={showViewportMenu}
-              title="캔버스 보기 — 모두보기(창에 맞춤), 자동정렬"
+              title="캔버스 맞춤 — 모두보기(창에 맞춤), 자동정렬"
               on:click={() => {
                 const next = !showViewportMenu;
                 showViewportMenu = next;
@@ -808,7 +858,7 @@
                 }
               }}
             >
-              <span class="tb-viewport-label">보기</span>
+              <span class="tb-viewport-label">캔버스</span>
               <span class="tb-viewport-caret" aria-hidden="true">▾</span>
             </button>
             {#if showViewportMenu}
@@ -855,27 +905,33 @@
                 role="menuitem"
                 class="tb-output-menu-item"
                 title="기능 맵 마크다운 파일로 저장"
-                on:click={() => triggerPilotOutput('BMD')}>MD 출력</button>
+                on:click={() => triggerPilotOutput('BMD')}>MD</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item tb-output-menu-item--prd"
                 title="PRD 표준 가이드 v2.0 구조 마크다운으로 저장"
-                on:click={() => triggerPilotOutput('BPR')}>PRD 출력 (v2.0)</button>
+                on:click={() => triggerPilotOutput('BPR')}>PRD</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
                 title="노드 트리 JSON (백업·재가져오기용)"
                 on:click={() => triggerPilotOutput('BJN')}>JSON</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="tb-output-menu-item"
+                title="화면 구조를 마크다운 파일로 저장 (와이어프레임)"
+                on:click={() => goIaFromOutput('SCREEN_LIST')}>와이어프레임</button>
             </div>
           {/if}
         </div>
         <div class="pilot-wire-sinks" aria-hidden="true">
           <button type="button" id="BFT" class="pilot-wire-sink" tabindex="-1">모두보기</button>
           <button type="button" id="BAR" class="pilot-wire-sink" tabindex="-1">자동정렬</button>
-          <button type="button" id="BMD" class="pilot-wire-sink" tabindex="-1">MD 출력</button>
-          <button type="button" id="BPR" class="pilot-wire-sink" tabindex="-1">PRD 출력</button>
+          <button type="button" id="BMD" class="pilot-wire-sink" tabindex="-1">MD</button>
+          <button type="button" id="BPR" class="pilot-wire-sink" tabindex="-1">PRD</button>
           <button type="button" id="BJN" class="pilot-wire-sink" tabindex="-1">JSON</button>
         </div>
         <div class="dv"></div>
@@ -964,7 +1020,9 @@
                 <button type="button" class="zb" id="ZO">−</button><span class="zp" id="ZP">85%</span><button type="button" class="zb" id="ZI">+</button><span
                   class="zc-hint"
                   >축소확대: Ctrl+스크롤</span
-                ><span class="zc-hint">그룹이동: Shift+노드선택</span>
+                ><span class="zc-hint">그룹이동: Shift+노드</span><span class="zc-hint" title="노드 1.5초: 카드가 따라 움직이며 다른 노드 + 근처에 놓기 · + 1.5초: 직속 하위 카드만 같이 이동(앵커 유지)"
+                  >상위바꿈: 노드 1.5초 드래그 / + 1.5초 하위만</span
+                >
               </div>
               {#if cloudSyncAvailable && $currentProject}
                 <div class="cw-presence" role="group" aria-label="이 프로젝트에 동시 접속 중인 허용 계정">
@@ -1057,25 +1115,62 @@
 
       <div class="view" class:active={$activeView === 'spec'} id="V-SPEC">
         <div class="spec-inner">
-          <div class="spec-title">기능명세서</div>
-          <table class="spec-table">
-            <thead>
-              <tr>
-                <th style="width:60px">번호</th>
-                <th style="width:80px">뎁스</th>
-                <th>기능명</th>
-                <th>설명</th>
-                <th style="width:120px">배지</th>
-              </tr>
-            </thead>
-            <tbody id="spec-tbody">
-              <tr
-                ><td colspan="5" style="text-align:center;padding:40px;color:#bbb;font-size:13px"
-                  >프로젝트를 열면 자동 생성돼.</td
-                ></tr
-              >
-            </tbody>
-          </table>
+          <header class="spec-header" aria-label="기능명세 상단">
+            <div class="spec-header-main">
+              <div class="spec-title">기능명세서</div>
+              <p class="spec-hint">엑셀형 스프레드시트 · v3 FUNCTIONAL_SPEC — 기능ID·기능명·설명은 트리 SSoT; 사용자유형·입출력·예외·우선순위는 기획·요구 서술용 메타(`functionalSpec`). 배지는 DEV·UX·PRJ 파이프라인만 표시.</p>
+              <p class="spec-toolbar-note">
+                트리·캔버스와 동일 노드가 반영돼요. 탭을 바꿀 때 기능명세 셀 편집분은 곧바로 저장 경로로 넘어가요. AI용 트리
+                텍스트(<code>buildTreeText</code>)는 번호·이름·배지 중심이고, 그리드에만 있는 값은 IA/기능정의서 프롬프트에
+                별도 블록으로 붙어요.
+              </p>
+            </div>
+            <div class="spec-header-actions" role="toolbar" aria-label="기능명세 내보내기">
+              <button type="button" class="spec-dl-btn" on:click={() => pilotExportSpecSheetCsv()}>
+                엑셀용 CSV 다운로드
+              </button>
+            </div>
+          </header>
+          <div class="spec-sheet-scroll" role="region" aria-label="기능명세 표">
+            <table class="spec-sheet-table">
+              <colgroup>
+                <col class="spec-col spec-col--id" />
+                <col class="spec-col spec-col--depth" />
+                <col class="spec-col spec-col--name" />
+                <col class="spec-col spec-col--desc" />
+                <col class="spec-col spec-col--short" />
+                <col class="spec-col spec-col--short" />
+                <col class="spec-col spec-col--short" />
+                <col class="spec-col spec-col--prio" />
+                <col class="spec-col spec-col--badge" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th class="spec-sheet-th">기능ID</th>
+                  <th class="spec-sheet-th">뎁스</th>
+                  <th class="spec-sheet-th">기능명</th>
+                  <th class="spec-sheet-th">설명</th>
+                  <th class="spec-sheet-th">사용자유형</th>
+                  <th class="spec-sheet-th">입출력</th>
+                  <th class="spec-sheet-th">예외</th>
+                  <th class="spec-sheet-th">우선순위</th>
+                  <th class="spec-sheet-th spec-sheet-th--badge">3트랙 배지</th>
+                </tr>
+              </thead>
+              <tbody id="spec-tbody">
+                <tr class="spec-sheet-row spec-sheet-row--empty">
+                  <td class="spec-sheet-td spec-sheet-td--empty" colspan="9">프로젝트를 열면 자동 생성돼.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" class:active={$activeView === 'ia'} id="V-IA">
+        <div class="ia-view-inner">
+          <IAGridSheet />
+          <IAExportMenu />
         </div>
       </div>
 
@@ -2519,6 +2614,37 @@
   :global(.nd.msel) {
     box-shadow: 0 0 0 2px rgba(225, 29, 72, 0.35);
   }
+  /* §4.0.1 재연결 모드 — 옮길 노드·트리 강조 */
+  :global(.nd.relink-pick) {
+    box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.45);
+    border-color: #0ea5e9;
+  }
+  :global(.nd.relink-source-dim) {
+    opacity: 0.36;
+    transition: none;
+    filter: saturate(0.85);
+  }
+  :global(.relink-ghost-fly .relink-ghost-nd) {
+    flex-shrink: 0;
+    cursor: grabbing;
+    opacity: 0.97;
+    box-shadow:
+      0 16px 40px rgba(15, 23, 42, 0.22),
+      0 0 0 2px rgba(14, 165, 233, 0.95);
+    transition: none;
+    pointer-events: none;
+  }
+  :global(.relink-ghost-fly .relink-ghost-fallback) {
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.92);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    border: 2px solid #0ea5e9;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    white-space: nowrap;
+  }
   :global(.nd.rnd) {
     width: 168px;
     border-color: #d4caff;
@@ -2537,18 +2663,77 @@
     align-self: stretch;
     min-height: 12px;
   }
-  :global(.nn) {
+  :global(.nn-wrap) {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+  }
+  :global(.nn-line) {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    gap: 3px;
+  }
+  :global(.nn-line .nn) {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: normal;
     font-size: 12px;
     color: #1a1a1a;
     font-weight: 500;
     line-height: 1.35;
+  }
+  :global(.nn-tooltip) {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    margin-top: 2px;
+    z-index: 201;
+    max-width: min(100vw, 320px);
+    background: #fff;
+    border: 1px solid #e0dbd4;
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+    padding: 0 0 8px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+      opacity 0.12s ease,
+      visibility 0.12s ease;
+  }
+  :global(.nn-wrap--tip:hover .nn-tooltip) {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  :global(.nn-tooltip-t) {
+    font-size: 9px;
+    font-weight: 700;
+    color: #6b4ef6;
+    padding: 6px 9px 4px;
+    letter-spacing: 0.02em;
+  }
+  :global(.nn-tooltip-b) {
+    font-size: 11px;
+    color: #1a1a1a;
+    line-height: 1.45;
+    padding: 0 9px 4px;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
     word-break: break-word;
   }
   :global(.ndepth) {
+    flex-shrink: 0;
     font-size: 9px;
     color: #ccc;
     font-family: monospace;
-    margin-left: 3px;
+    margin-left: 0;
   }
   :global(.nds-wrap) {
     position: relative;
@@ -2706,6 +2891,13 @@
     justify-content: center;
     z-index: 6;
     box-shadow: 0 2px 5px rgba(107, 78, 246, 0.35);
+  }
+  :global(.pb2.pb2-drop) {
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.45);
+  }
+  :global(.pb2.pb2-relink-hover) {
+    box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.95);
+    filter: brightness(1.08);
   }
 
   /* PC: 가이드(좌) · 미니맵+배지(우) / 모바일: column-reverse로 가이드 맨 아래, 그 위 맵·배지, 전부 우측 정렬 */
@@ -3011,20 +3203,314 @@
     margin: 0;
   }
 
+  /* display/flex는 `.view.active`에만 둠 — 여기서 display:flex 넣으면 특이도가 `.view{display:none}`보다 높아 비활성에도 보임(트리 가림) */
   #V-SPEC {
-    background: #fff;
-    overflow-y: auto;
-    gap: 0;
+    background: #f0f2f5;
+    overflow: hidden;
+  }
+  #V-SPEC.view.active {
+    min-height: 0;
+  }
+  /* 기능명세(#V-SPEC)와 동일 톤 — 스프레드시트 작업 화면 */
+  #V-IA {
+    background: #f0f2f5;
+    overflow: hidden;
+  }
+  #V-IA.view.active {
+    min-height: 0;
+  }
+  .ia-view-inner {
+    max-width: none;
+    min-height: 0;
+    flex: 1;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 16px 18px 18px;
+    display: flex;
+    flex-direction: column;
   }
   .spec-inner {
-    padding: 22px 26px;
+    padding: 16px 18px 18px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
   }
   .spec-title {
     font-size: 15px;
     font-weight: 700;
     color: #1a1a1a;
-    margin-bottom: 14px;
+    margin-bottom: 8px;
   }
+  .spec-hint {
+    font-size: 11px;
+    color: #64748b;
+    line-height: 1.45;
+    margin: 0 0 6px;
+    max-width: 920px;
+  }
+  .spec-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px 20px;
+    margin-bottom: 10px;
+  }
+  .spec-header-main {
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+  .spec-header-actions {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin-inline-end: 6px;
+    padding-top: 1px;
+  }
+  .spec-dl-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid #1d6b4a;
+    background: linear-gradient(180deg, #22a06b 0%, #18805a 100%);
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+  .spec-dl-btn:hover {
+    filter: brightness(1.05);
+  }
+  .spec-dl-btn:active {
+    transform: translateY(1px);
+  }
+  .spec-toolbar-note {
+    font-size: 11px;
+    color: #64748b;
+    line-height: 1.4;
+    margin: 0;
+    max-width: 920px;
+  }
+  /* 기능명세: 엑셀/스프레드시트형 셀 — 입력은 테두리 없이 셀에 맞춤 */
+  .spec-sheet-scroll {
+    flex: 1;
+    min-height: 200px;
+    overflow: auto;
+    border: 1px solid #8fa0b2;
+    border-radius: 2px;
+    background: #fff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+  .spec-sheet-table {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 1120px;
+    border-collapse: collapse;
+    border-spacing: 0;
+    font-size: 12px;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans KR', sans-serif;
+  }
+  .spec-col--id {
+    width: 84px;
+  }
+  .spec-col--depth {
+    width: 76px;
+  }
+  .spec-col--name {
+    width: 160px;
+  }
+  .spec-col--desc {
+    width: 220px;
+  }
+  .spec-col--short {
+    width: 100px;
+  }
+  .spec-col--prio {
+    width: 72px;
+  }
+  .spec-col--badge {
+    width: 220px;
+  }
+  .spec-sheet-th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    padding: 6px 8px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 11px;
+    color: #1e293b;
+    background: linear-gradient(180deg, #e8edf4 0%, #d8e0eb 100%);
+    border-right: 1px solid #9aaabe;
+    border-bottom: 1px solid #7a8a9e;
+    box-shadow: 0 1px 0 #f8fafc inset;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .spec-sheet-th:first-child {
+    border-left: none;
+  }
+  .spec-sheet-th:last-child {
+    border-right: none;
+  }
+  .spec-sheet-th--badge {
+    white-space: normal;
+    line-height: 1.25;
+    max-width: 220px;
+  }
+  .spec-sheet-td {
+    padding: 0;
+    border-right: 1px solid #c5ccd5;
+    border-bottom: 1px solid #c5ccd5;
+    vertical-align: middle;
+    background: #fff;
+    color: #0f172a;
+  }
+  .spec-sheet-td:last-child {
+    border-right: none;
+  }
+  .spec-sheet-row:nth-child(even) .spec-sheet-td {
+    background: #f7f9fc;
+  }
+  .spec-sheet-row:hover .spec-sheet-td {
+    background: #eef6ff;
+  }
+  .spec-sheet-row:nth-child(even):hover .spec-sheet-td {
+    background: #e8f2fc;
+  }
+  .spec-sheet-td--empty {
+    padding: 48px 16px;
+    text-align: center;
+    color: #94a3b8;
+    font-size: 13px;
+    border: none;
+  }
+  .spec-sheet-td--depth {
+    text-align: center;
+    padding: 4px 6px;
+    vertical-align: middle;
+  }
+  .spec-sheet-td--badges {
+    padding: 6px 8px;
+    vertical-align: top;
+    line-height: 1.35;
+  }
+  /* 기능명세(#V-SPEC) 안에서만 적용 — 트리·캔버스 DOM과 클래스 충돌 원천 차단 */
+  #V-SPEC :global(.spec-depth-chip) {
+    display: inline-block;
+    min-width: 52px;
+    padding: 2px 6px;
+    border-radius: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    text-align: center;
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.12);
+  }
+  #V-SPEC :global(.spec-grid-inp) {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.35;
+    padding: 5px 8px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #0f172a;
+    outline: none;
+    min-height: 30px;
+  }
+  #V-SPEC :global(.spec-grid-inp:focus) {
+    background: #fffef0;
+    box-shadow: inset 0 0 0 2px #217346;
+  }
+  #V-SPEC :global(.spec-grid-inp::placeholder) {
+    color: #94a3b8;
+  }
+  #V-SPEC :global(.spec-grid-inp--id) {
+    font-family: ui-monospace, 'SF Mono', 'Consolas', 'Malgun Gothic', monospace;
+    font-size: 11px;
+    text-align: center;
+  }
+  #V-SPEC :global(.spec-badge-empty) {
+    color: #cbd5e1;
+    font-size: 11px;
+    padding: 0 6px;
+  }
+  #V-SPEC :global(.spec-badge-pipeline) {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+    min-width: 0;
+  }
+  #V-SPEC :global(.spec-badge-track) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+    padding: 3px 0;
+    border-bottom: 1px dashed #e2e8f0;
+  }
+  #V-SPEC :global(.spec-badge-track:last-child) {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  #V-SPEC :global(.spec-badge-track-label) {
+    flex: 0 0 auto;
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    padding: 3px 5px;
+    border-radius: 3px;
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+  }
+  #V-SPEC :global(.spec-badge-track--dev .spec-badge-track-label) {
+    background: #fff1f2;
+    color: #9f1239;
+    border-color: #fecdd3;
+  }
+  #V-SPEC :global(.spec-badge-track--ux .spec-badge-track-label) {
+    background: #eff6ff;
+    color: #1e40af;
+    border-color: #bfdbfe;
+  }
+  #V-SPEC :global(.spec-badge-track--prj .spec-badge-track-label) {
+    background: #f0fdf4;
+    color: #166534;
+    border-color: #bbf7d0;
+  }
+  #V-SPEC :global(.spec-badge-track-chips) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    min-width: 0;
+  }
+  #V-SPEC :global(.spec-badge-track-chips .bg) {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  #V-SPEC :global(textarea.spec-grid-inp) {
+    resize: vertical;
+    min-height: 52px;
+    max-height: 200px;
+    font-family: inherit;
+  }
+  /* 캔버스 노드 카드용 depth-pill — 기능명세에서는 spec-depth-chip 사용 */
   :global(.depth-pill) {
     display: inline-block;
     font-size: 9px;
@@ -3213,6 +3699,13 @@
     white-space: nowrap;
     pointer-events: none;
   }
+  .tst.tst--relink {
+    white-space: normal;
+    max-width: min(94vw, 560px);
+    text-align: center;
+    line-height: 1.4;
+    padding: 10px 18px;
+  }
 
   .prd-section {
     margin-bottom: 18px;
@@ -3224,31 +3717,6 @@
     margin-bottom: 8px;
     padding-left: 10px;
     border-left: 3px solid #6b4ef6;
-  }
-
-  .spec-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
-  .spec-table th {
-    background: #f5f5f0;
-    padding: 8px 12px;
-    text-align: left;
-    font-weight: 700;
-    color: #555;
-    border-bottom: 2px solid #e8e4de;
-    white-space: nowrap;
-  }
-  .spec-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid #f0ece8;
-    color: #333;
-    vertical-align: top;
-    line-height: 1.5;
-  }
-  .spec-table tr:hover td {
-    background: #faf9ff;
   }
 
   :global(.mbg) {

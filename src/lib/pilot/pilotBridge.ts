@@ -1,8 +1,9 @@
 import { get } from 'svelte/store';
 import type { Node, Project } from '$lib/supabase/client';
 import { currentProject, nodes as nodesStore } from '$lib/stores/projects';
-import { initPlannode } from './plannodePilot.js';
-import { persistNodesFromPilot } from '$lib/stores/projects';
+import { initPlannode, dismissPilotRelinkGuide } from './plannodePilot.js';
+export { dismissPilotRelinkGuide };
+import { persistNodesFromPilot, isNodesSetFromPilotPersist } from '$lib/stores/projects';
 import { authSession } from '$lib/stores/authSession';
 import { supabase } from '$lib/supabase/client';
 
@@ -131,15 +132,47 @@ export function mountPilotBridge(): { destroy: () => void } {
     }
   });
 
+  const unsubNodes = nodesStore.subscribe((list) => {
+    if (!pilotApi || syncingFromStore || isNodesSetFromPilotPersist()) return;
+    const p = get(currentProject);
+    if (!p?.id) return;
+    if (list.length > 0) {
+      const pid = list[0]?.project_id;
+      if (pid && pid !== p.id) return;
+    }
+    syncingFromStore = true;
+    try {
+      pilotApi.hydrateFromStore(p, storeNodesToPilot(list));
+    } finally {
+      syncingFromStore = false;
+    }
+  });
+
   return {
     destroy() {
       unsub();
+      unsubNodes();
       pilotApi?.destroy();
       pilotApi = null;
     }
   };
 }
 
-export function pilotSetActiveView(view: 'tree' | 'prd' | 'spec' | 'ai') {
+export function pilotSetActiveView(view: 'tree' | 'prd' | 'spec' | 'ia' | 'ai') {
   pilotApi?.setActiveView(view);
+}
+
+/** 기능명세 그리드와 동일 SSoT — UTF-8 BOM CSV(CRLF), 엑셀 더블클릭 열기용 */
+export function pilotExportSpecSheetCsv() {
+  pilotApi?.exportSpecSheetCsv?.();
+}
+
+/** 기능명세 그리드 편집분 즉시 스토어 반영(지연 persist 플러시) */
+export function pilotFlushPersistNow() {
+  pilotApi?.flushPersistNow?.();
+}
+
+/** 지연 persist(50ms)가 대기 중이면 이탈 직전에 `pilotFlushPersistNow()` 호출 권장 */
+export function pilotHasPendingGridPersist(): boolean {
+  return pilotApi?.hasPendingGridPersist?.() ?? false;
 }

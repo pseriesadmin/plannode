@@ -3,6 +3,8 @@
 > 이 폴더는 **인간 게이트용 산출물**과 **운영 원칙**을 보관한다.
 > AI 에이전트 정의 파일은 `.cursor/agents/`에 있다.
 
+> **현재(2026-04-26):** [TASK.md](TASK.md) 기준 **M1 Step3·GATE A~D 마감** 유지 · **별행:** 뷰·출력 재정립 — 👤 **GATE A(뷰·출력) ✓** · 코드 착수는 👤 **GATE B(M2-뷰출력)** 후 `NOW-M2VO-*`. 제품 후속은 v4 **§1.2**·BACKLOG-M1·BACKLOG-M2-뷰출력.
+
 ---
 
 ## PRD(제품)와 하네스(절차)의 연계
@@ -13,15 +15,18 @@
   - `TASK.md`: `현재 아젠다`와 각 NOW에 `| PRD: M# F#-#` 한 줄(또는 `해당 없음: 인프라/버그만`).
 - **파일럿 정합**은 `docs/PILOT_FUNCTIONAL_SPEC.md` — PRD에 없는 “Vanilla vs SvelteKit 갭”은 §9~§10이 우선, PRD F·Phase와 **모순**이 있으면 GATE A/B 전에 정리.
 - **상세 TypeScript/AI·4-레이어**는 PRD가 가리키는 `plannode-ai-enhancement-v3.md` 등과 **PRD·TASK**를 맞출 것.
+- **트리뷰 핵심 보호:** `AGENTS.md` **GP-13**·**「트리뷰 핵심 보호 헌장」** — 하네스 NOW가 파일럿·`#V-TREE`·`pilotBridge`·노드 스토어를 건드리면 **트리 회귀**를 TASK·GATE C에 명시한다. 부가 뷰 전용 작업도 **캔버스 가림·SSoT 분열·`.view` 전환 파손**을 금지한다.
 
 ## 최소 구현·기술부채·경량화 (하네스 전역)
 
 - **오버 엔지니어링 견제:** `plan-output`·`TASK` **포함/제외**·PRD M#·F#·Phase를 넘는 **불필요한 로직**·**범용 뼈대**·PRD 밖 v2/LLM 파이프 **선제** — 금지(GP-7·GP-12·`@promptor` P-6.5).
+- **메뉴·출력 면 = `plan-output`·§4.0 고정:** `TASK` NOW ID·v4 `M2-*`·BACKLOG는 **후보**일 뿐, **상단/출력/보기에 항목을 추가하는 허가가 아님**. 신규 면 조각은 👤 채팅 또는 GATE B 보완 + `plan-output` 반영 후에만 구현. 체크리스트·사례: [harness-workflow_final.md §경량화 제어 — 「면(메뉴·출력) — 플랜 후보와 UI 분리」](../plans/harness-workflow_final.md).
 - **모듈·파일 수 억제:** “한 번 더 감싸는” 레이어, **PRD·TASK에 이름 없는** `src/lib/...` 신규 모듈 — **가능한 한 기존 파일에** 붙이거나 `BACKLOG`+승인 후. 동일 UX는 **최소 import 경로** 유지.
 - **기술부채:** `console.log`/TODO/any/미사용 import/무분별 의존성은 **@qa 2단계**에서 잡는다. `npm` 신규 패키지·스키마 컬럼·공개 API는 `TASK`·GATE B 없이 **불가**.
 - **제어 구조(요지):** `AGENTS.md` 표 **경량화·오버엔지니어링 견제 제어 구조** = 스캐폴드가 아니라 **GATE + 스코프 + NOW 크기 + @qa** 의 다층 차단. 상세: `.cursor/plans/harness-workflow_final.md` **「경량화 제어」** 절.
 - **Guides vs Sensors (외부 권고·정합):** *Guides(사전)* = `AGENTS`·`plan-output`·PRD·`@promptor` (행동 유도). *Sensors(사후)* = `npm run build`·`@qa`·린트 (깨짐/부채 검출). **불필요한 복잡도·“멋진” 일반화**는 센서만으론 부족하므로 **포함/제외·GATE**가 1차 방어 — `harness-workflow_final.md` **「외부 하네스·오버엔지니어링」** 절.
 - **층·툴 최소:** 하네스 전용 **문서·GATE·에이전트** 층을 “부작위 방지”만으로 **무한 증가**시키지 않는다(신규 체크리스트·sub-agent = **의무 정당화** 없으면 넣지 않음).
+- **노드 수·캔버스 부하·안정성:** 프로젝트별 노드 **N**이 커질수록 `render`·`drawEdges`·미니맵·전량 JSON persist·`IAGridSheet` 행 수가 **한꺼번에** 비용을 만든다. **지침:** `.cursor/rules/plannode-architecture.mdc` **§9**. **하네스:** `.cursor/plans/harness-workflow_final.md` **「노드 규모·부하·안정성」** — `plan-output` 포함/제외·`TASK` NOW 한 줄·GATE C(스케일 회귀)·`GSD_LOG`·`@qa` 성능 표기. 대규모 최적화는 **승인된 BACKLOG/NOW**로만 진행(YAGNI).
 
 ---
 
