@@ -1,51 +1,21 @@
 /**
- * Plannode IA/와이어프레임/기능정의서 내보내기 엔진
- * - 로컬 노드 배열 → 트리 텍스트 + 프롬프트 조립
- * - 향후 plan_nodes DB + 실제 callAI 통합 가능
+ * Plannode IA/와이어/기능정의서 내보내기 — 노드 배열 → `buildTreeText` + 배지 + `promptMatrix` 시스템 프롬프트.
+ *
+ * v4: `WIREFRAME_SPEC` = 와이어 **MD** 서술; `SCREEN_LIST` = **화면 목록 표**(고정 헤더)·`buildIaGridPromptSupplement` 병행.
+ * `IA_STRUCTURE` / `FUNCTIONAL_SPEC` 은 각각 IA·기능명세 그리드 메타 보강과 짝을 이룸 (`gridMetaPromptSupplement`).
  */
 
 import type { Node } from '$lib/supabase/client';
 import type { BadgeSet, OutputIntent } from './types';
-import { buildBadgeContext, getBadgeSetFromNodeInput, formatBadgeTracksForDisplay } from './badgePromptInjector';
+import { buildTreeText } from './contextSerializer';
+import { buildBadgeContext, getBadgeSetFromNodeInput } from './badgePromptInjector';
 import { getSystemPrompt } from './promptMatrix';
+import {
+  buildFunctionalSpecPromptSupplement,
+  buildIaGridPromptSupplement
+} from './gridMetaPromptSupplement';
 
-/**
- * 노드 배열 → 계층 텍스트 직렬화 (마크다운 형식)
- * @param nodes 노드 배열
- * @returns 마크다운 트리 문자열
- */
-export function nodesToTreeText(nodes: Node[]): string {
-  if (nodes.length === 0) return '_(노드 없음)_';
-
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const roots = nodes.filter((n) => !n.parent_id);
-
-  function buildTreeLine(node: Node, depth = 0): string[] {
-    const indent = '  '.repeat(depth);
-    const num = node.num ? `[${node.num}]` : '';
-    const tr = formatBadgeTracksForDisplay(getBadgeSetFromNodeInput(node));
-    const badgePart = tr === '—' ? '' : ` 《${tr}》`;
-    const prefix = node.node_type === 'root' ? '# ' : '';
-    const line = `${indent}${prefix}${num} ${node.name}${badgePart}`;
-
-    const lines: string[] = [line];
-
-    // 자식 노드 추가
-    const children = nodes.filter((n) => n.parent_id === node.id);
-    for (const child of children) {
-      lines.push(...buildTreeLine(child, depth + 1));
-    }
-
-    return lines;
-  }
-
-  const allLines: string[] = [];
-  for (const root of roots) {
-    allLines.push(...buildTreeLine(root));
-  }
-
-  return allLines.join('\n');
-}
+export { buildTreeText, nodesToTreeText } from './contextSerializer';
 
 /**
  * @deprecated getBadgeSetFromNodeInput 사용 권장 (레거시·metadata 통합)
@@ -70,7 +40,7 @@ export function buildPrompt(
   outputIntent: OutputIntent = 'WIREFRAME_SPEC',
   nodeType: 'root' | 'module' | 'feature' | 'detail' = 'root'
 ): { system: string; user: string } {
-  const treeText = nodesToTreeText(nodes);
+  const treeText = buildTreeText(nodes);
 
   const devM = new Set<string>();
   const uxM = new Set<string>();
@@ -89,6 +59,13 @@ export function buildPrompt(
 
   const badgeContext = buildBadgeContext(mergedBadgeSet);
 
+  let gridMetaSupplement = '';
+  if (outputIntent === 'IA_STRUCTURE' || outputIntent === 'SCREEN_LIST') {
+    gridMetaSupplement = buildIaGridPromptSupplement(nodes);
+  } else if (outputIntent === 'FUNCTIONAL_SPEC') {
+    gridMetaSupplement = buildFunctionalSpecPromptSupplement(nodes);
+  }
+
   const projectInfo = activeProject
     ? `프로젝트: ${activeProject.name}\n설명: ${activeProject.description || '—'}\n`
     : '';
@@ -101,7 +78,7 @@ ${projectInfo}
 \`\`\`
 ${treeText}
 \`\`\`
-${badgeContext}`;
+${badgeContext}${gridMetaSupplement}`;
 
   const systemPrompt = getSystemPrompt(nodeType, outputIntent);
 
@@ -191,7 +168,7 @@ export async function exportDocument(
               project: activeProject,
               intent: outputIntent,
               nodeType,
-              tree: nodesToTreeText(nodes),
+              tree: buildTreeText(nodes),
               prompt,
             },
             null,

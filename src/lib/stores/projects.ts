@@ -9,8 +9,14 @@ export const currentProject = writable<Project | null>(null);
 // 노드 상태
 export const nodes = writable<Node[]>([]);
 
+/** `persistNodesFromPilot` → `nodes.set` 구간: 파일럿 브리지가 동일 쓰기로 재수화하지 않도록 */
+let nodesSetFromPilotPersist = false;
+export function isNodesSetFromPilotPersist(): boolean {
+  return nodesSetFromPilotPersist;
+}
+
 // UI 상태
-export const activeView = writable<'tree' | 'prd' | 'spec' | 'ai'>('tree');
+export const activeView = writable<'tree' | 'prd' | 'spec' | 'ia' | 'ai'>('tree');
 export const showProjectModal = writable(false);
 
 // localStorage 키
@@ -73,8 +79,8 @@ export function loadProjectsFromLocalStorage() {
 // 프로젝트 선택 (노드를 먼저 반영한 뒤 currentProject를 설정 — 파일럿 브리지 구독 순서)
 export function selectProject(project: Project | null) {
   if (!project) {
-    nodes.set([]);
     currentProject.set(null);
+    nodes.set([]);
     if (typeof window !== 'undefined') {
       localStorage.removeItem(CURRENT_PROJECT_KEY);
     }
@@ -223,7 +229,12 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
   } catch (e) {
     console.error('Failed to save nodes:', e);
   }
-  nodes.set(list);
+  nodesSetFromPilotPersist = true;
+  try {
+    nodes.set(list);
+  } finally {
+    nodesSetFromPilotPersist = false;
+  }
   touchProjectUpdatedAt(projectId);
 }
 

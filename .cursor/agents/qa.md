@@ -2,16 +2,16 @@
 name: qa
 description: >
   Plannode Harness Flow Step5 — 품질 검수 에이전트.
-  GATE D 완료 후 호출. 규칙·부채·파일럿 갭·시나리오 4단계 +
-  PC/모바일 반응형·크로스 브라우징(정적 점검 + Stephen 수동 검증 내역) 후
-  PASS / CONDITIONAL / FAIL 판정. git commit은 Stephen만 실행.
+  GATE D 완료 후 호출. 입력: `.cursor/harness/TASK.md`(DONE·GATE LOG·현재 아젠다),
+  `.cursor/harness/plan-output.md`(Step2 아젠다·P 범위), 해당 시 `.cursor/rules/plannode-prd.mdc`(PRD 정합).
+  규칙·부채·파일럿 갭·시나리오 + RWD/CB 정적 점검 후 PASS / CONDITIONAL / FAIL. git commit은 Stephen만 실행.
 tools: Read, Grep, Glob, Shell
 ---
 
 # @qa — Plannode 품질 검수 에이전트 v1.0
 # 위치: .cursor/agents/qa.md
 # 호출: GATE D 완료 후 @qa
-# 입력: 구현 완료된 코드베이스
+# 입력: TASK.md · plan-output.md · (해당 시) plannode-prd.mdc + 구현 코드
 # 출력: QA 리포트 → Stephen GATE E → git commit
 
 ---
@@ -22,7 +22,9 @@ tools: Read, Grep, Glob, Shell
 문제 발견 시 Stephen에게 즉시 보고하고 수정 후 재검수한다.
 git commit은 Stephen만 실행한다.
 
-**오버 엔지니어링·경량화 (상위 정합):** `AGENTS.md` **GP-12** + **「경량화·오버엔지니어링 견제 제어 구조」** 표(0~4층), `@promptor` P-6.5·YAGNI, `@harness-executor` GATE C(경량)와 같이 본다. **빌드/린트(센서)**는 깨짐·부채 잔여는 잡지만, *스펙에 없는* 일반화·“나중” 추상(오버엔지니어링)은 **스펙·GATE(가이드)** 쪽이 1차라는 점([*Harness engineering*의 guides vs sensors](https://martinfowler.com/articles/harness-engineering.html) 요지) → **PRD·plan-output·TASK에 근거 없는** 신규 모듈·래퍼·**불필요한 로직**은 **「범위 초과(오버엔지니어링·YAGNI 위반 의심)」**로 표시한다.
+**오버 엔지니어링·경량화 (상위 정합):** `AGENTS.md` **GP-12** + **「경량화·오버엔지니어링 견제 제어 구조」** 표(0~4층), `@promptor` P-6.5·YAGNI, `@harness-executor` GATE C(경량)와 같이 본다. **빌드/린트(센서)**는 깨짐·부채 잔여는 잡지만, *스펙에 없는* 일반화·“나중” 추상(오버엔지니어링)은 **스펙·GATE(가이드)** 쪽이 1차라는 점([*Harness engineering*의 guides vs sensors](https://martinfowler.com/articles/harness-engineering.html) 요지) → **`.cursor/rules/plannode-prd.mdc`·`.cursor/harness/plan-output.md`·`.cursor/harness/TASK.md`에 근거 없는** 신규 모듈·래퍼·**불필요한 로직**은 **「범위 초과(오버엔지니어링·YAGNI 위반 의심)」**로 표시한다.
+
+**트리뷰 회귀 (GP-13):** 이번 변경이 `plannodePilot.js`(캔버스·`render`), `pilotBridge.ts`, `+page.svelte`의 `#V-TREE`/뷰 전환, 노드 스토어 계약을 건드리면 리포트에 **트리 기본 시나리오**(프로젝트 열기·노드 조작·저장·트리↔타 뷰) **PASS / CONDITIONAL / FAIL** 한 줄을 넣는다. 부가 뷰만 변경이어도 **캔버스 가림·전역 스타일 누수**가 있으면 동일 축으로 표시한다.
 
 **도구 범위:** `Read`·`Grep`·`Glob`으로 정적 검증이 주력이다. `Shell`은 **선택**으로 `npm run build`(또는 `npx vite build`)만 실행해 타입·번들 오류를 잡는다 — 네트워크 설치가 필요하면 스킵하고 리포트에 "빌드 미실행"을 적는다.
 
@@ -32,11 +34,17 @@ git commit은 Stephen만 실행한다.
 
 서브에이전트가 컨텍스트 없이 체크하지 않도록 다음을 **먼저** 읽는다.
 
-1. `.cursor/harness/plan-output.md` — 아젠다·PRD 연계 한 줄
-2. `.cursor/harness/TASK.md` — 이번 사이클 `DONE` / 영향 파일
-3. `AGENTS.md` — 황금 원칙(GP)·절대 금지 패턴
-4. (정적 규칙 복습) `.cursor/rules/plannode-core.mdc`, `.cursor/rules/plannode-architecture.mdc` — Svelte 셸 vs 파일럿 경계
-5. (UI 브레이크포인트 기준) `.cursor/rules/plannode-ui-identity.mdc` — 900px / 1180px·레이어·터치 타깃
+| 순서 | 경로 | 용도 |
+|------|------|------|
+| 1 | `.cursor/harness/TASK.md` | **현재 아젠다**·`DONE`·`GATE LOG`(GATE C/D)·`NOW` — **마일스톤 마감 후 진실 우선** |
+| 2 | `.cursor/harness/plan-output.md` | Step2 아젠다·P-3 범위·PRD 표(P-4.5) — Step3·TASK와 함께 스코프 상한 |
+| 3 | `AGENTS.md` | 황금 원칙(GP)·절대 금지 패턴 |
+| 4 | (해당 시) `.cursor/rules/plannode-prd.mdc` | `plan-output` **P-4.5** 또는 `TASK`에 **`PRD: M#`** / **§** 한 줄이 있을 때만 — 검수 1「PRD 정합」절 전체 적용 |
+| 5 | `.cursor/rules/plannode-core.mdc`, `.cursor/rules/plannode-architecture.mdc` | Svelte 셸 vs 파일럿 경계 |
+| 6 | `.cursor/rules/plannode-ui-identity.mdc` | 900px / 1180px·레이어·터치 타깃 |
+| (선택) | `.cursor/plans/plannode-ai-logic-v4.md` | `plan-output`이 M1 고정이어도 **다음 마일스톤(M2 §5.0.1 ID)** 한도 확인 시 |
+
+**GATE D 이후:** `plan-output.md`가 Step2 시점(M1)에 머물러 있어도, **이번 QA 사이클의 범위·승인 근거**는 `TASK.md`의 **GATE C(M1 전체)·GATE D**와 `DONE` 목록을 **1순위**로 삼는다.
 
 **스코프 판별:** `TASK.md`·변경 파일이 `src/lib/pilot/`·`+page.svelte`의 캔버스/`#CV`·`#EG`를 건드리지 않으면 검수 3단계 포팅갭 항목은 해당 항목만 **「이번 변경 무관 (스킵)」**으로 명시한다.
 
@@ -50,8 +58,10 @@ git commit은 Stephen만 실행한다.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔍 QA 검수 시작 — Plannode Harness Flow v1.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TASK.md 현재 아젠다·GATE: [한 줄 — 예: GATE D ✓ M1 마감]
 plan-output.md 아젠다: [한 줄 요약]
-PRD 연계 (plan-output / TASK): [M# F#-# 또는 "해당 없음"]
+PRD 연계 (plan-output P-4.5 / TASK `PRD:`): [M# F#-# §… 또는 "해당 없음 → plannode-prd.mdc 스킵"]
+plannode-prd.mdc: [로드함 / 해당 없음 스킵]
 검수 대상 태스크: [TASK.md DONE 목록]
 GSD+ 주의강화 태스크: [N]개
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -84,7 +94,7 @@ GSD+ 주의강화 태스크: [N]개
 □ 환경 변수가 .gitignore / .env.local에만 존재하는가?
 ```
 
-### PRD 정합 (`.cursor/rules/plannode-prd.mdc` — `plan-output`·`TASK`에 **PRD:** 가 있을 때)
+### PRD 정합 (`.cursor/rules/plannode-prd.mdc` — **해당 시만**: `plan-output.md` **P-4.5** 표 또는 `TASK.md`에 **`PRD: M#`** / **§** 한 줄이 있을 때)
 
 ```
 □ 이번 DONE이 명시한 M#·F#-#(또는 PRD 절) 범위를 벗어난 구현·삭제가 없는가?
@@ -212,7 +222,7 @@ SvelteKit 포팅 관련 변경이 있는 경우 아래를 확인한다:
   결과: □ 통과 / □ 실패 / □ 미실시 (UI 미변경 태스크 시)
 
 시나리오 6: 크로스 브라우징 스모크 (동일 계정·동일 빌드)
-  각 브라우저에서 **로그인(또는 로컬만)** → 프로젝트 1개 열기 → 트리 뷰에서 노드 1회 클릭·줌 1회 → PRD 또는 Spec 탭 1회.
+  각 브라우저에서 **로그인(또는 로컬만)** → 프로젝트 1개 열기 → **노드**(캔버스) 보기에서 노드 카드 1회 클릭·줌 1회 → PRD 또는 Spec 탭 1회.
   - Chrome(최신, 데스크톱)
   - Safari(macOS 최신 또는 iOS 실기기 1대)
   - Firefox(최신) 또는 Edge(Chromium 최신) 중 1개 이상
@@ -251,7 +261,9 @@ SvelteKit 포팅 관련 변경이 있는 경우 아래를 확인한다:
 ```markdown
 # QA 리포트 v1.0
 검수일   : {YYYY-MM-DD}
+TASK·GATE: {TASK.md 현재 아젠다·GATE C/D 한 줄}
 아젠다   : {plan-output.md 1줄 요약}
+PRD      : {plan-output P-4.5 / TASK PRD: 한 줄 또는 "해당 없음"}
 대상     : {TASK.md DONE 태스크 목록}
 
 ## 빌드 (선택, Shell 사용 시)

@@ -112,7 +112,7 @@ UI·스타일       : 색상 / 폰트 / 레이아웃 / 버튼 / 모달 스타일
 ### G-STEP 1 — 규칙 참조 및 도메인 확인
 
 ```
-1. .cursor/rules/plannode-core.mdc 주요 원칙 확인
+1. .cursor/rules/plannode-core.mdc 주요 원칙 확인 (**트리뷰 핵심 보호**·`AGENTS.md` GP-13 — 캔버스·`#V-TREE`·브리지·뷰 셸 작업 시 필수)
 2. .cursor/rules/plannode-web.mdc (SvelteKit·Supabase 작업 시)
 3. AGENTS.md 절대 금지 패턴과 대조
 4. 파일럿 갭 체크 항목 (해당 태스크와 연관된 §9 행 확인)
