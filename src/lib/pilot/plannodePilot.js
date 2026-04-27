@@ -16,12 +16,20 @@ import { getEffectiveBadgePool } from '$lib/ai/badgePoolConfig';
 import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
+import {
+  unionNodeBoundsAndViewport,
+  computeMinimapViewBox,
+  minimapPixelToWorldUniform,
+  minimapUniformFit,
+} from '$lib/pilot/minimapXyflow.js';
 
 const V = '#6b4ef6',
   RD = '#dc2626',
   GY = '#4b5563';
 const DC = ['#9ca3af', '#6b4ef6', '#818cf8', '#f59e0b', '#10b981', '#f43f5e', '#0ea5e9', '#a78bfa'];
 const DN = ['루트', '모듈', '기능', '상세기능', '서브기능', '세부항목', '하위항목', '기타'];
+/** 좌측 뎁스 스트립 — 짧은 한 줄 라벨(폭 최소화), 전체 명은 `title` */
+const DN_STRIP = ['루트', '모듈', '기능', '상세', '서브', '세부', '하위', '기타'];
 const OFF_CHIP = 'background:#fff;color:#888;border-color:#d0cbc4;';
 const bl = (b) => {
   const u = String(b).toUpperCase();
@@ -150,7 +158,23 @@ function formatSpecBadgeTracksHtml(n) {
 }
 
 const COL_W = 244,
-  ROW_H = 122;
+  ROW_H = 122,
+  /** 노드 카드 폭(+20%) — 스타일·연결선·미니맵과 동일 값 */
+  NODE_CARD_W_ROOT = 202,
+  NODE_CARD_W_CHILD = 226,
+  /** 하위분포: 깊이(행) 간격 — ROW_H 대비 배수 · 이전 간격 대비 ×1.5 적용 시 2.25 (=1.5²) */
+  TOPDOWN_ROW_GAP_MULT = 2.25,
+  /** 하위분포 좌측 뎁스 스트립 폭 — 한 줄 라벨 기준 최소 */
+  TOPDOWN_DEPTH_STRIP_W = 26;
+
+function layoutRowH() {
+  return nodeMapLayoutMode === 'topdown' ? ROW_H * TOPDOWN_ROW_GAP_MULT : ROW_H;
+}
+function layoutOriginX() {
+  return 28 + (nodeMapLayoutMode === 'topdown' ? TOPDOWN_DEPTH_STRIP_W : 0);
+}
+/** 노드맵 배치 선호 — `nodes` SSoT 아님 · localStorage 키 plan-output P-4.5 */
+const NODE_MAP_LAYOUT_LS = 'plannode.nodeMapLayout';
 
 let R_, CW, CV, EG, SG, CTX, PM, ES, TST;
 let scale = 0.85,
@@ -179,11 +203,19 @@ let scale = 0.85,
   lastPlusPt = { x: 0, y: 0 },
   nc = 500,
   ctxOpen = false;
+/** 터치 길게 누르기 메뉴 직후 제목 탭으로 편집 모달이 뜨는 것 방지 */
+let suppressNodeCardUiUntil = 0;
+let touchCtxTimer = null;
+let touchCtxDocCleanup = null;
+const TOUCH_CTX_LP_MS = 510;
+const TOUCH_CTX_MOVE_PX = 14;
 let projects = [],
   curP = null,
   nodes = [],
   lm = {},
   curView = 'tree';
+/** @type {'right' | 'topdown'} — 우측분포(기본) · 하위분포(탑다운) */
+let nodeMapLayoutMode = 'right';
 
 let syncing = false;
 let onPersist = null;
@@ -689,10 +721,17 @@ function applyRelinkDrop(newParentId) {
       render();
       return;
     }
+    const oldPid = moving.parent_id;
     pushUndoSnapshot();
     moving.parent_id = newParentId;
     moving.mx = null;
     moving.my = null;
+    nodes = [...nodes];
+    reorderFlatSiblingsByVisualY(newParentId);
+    if (oldPid !== newParentId && oldPid != null) reorderFlatSiblingsByVisualY(oldPid);
+    clearSiblingManualLayout(newParentId);
+    if (oldPid !== newParentId && oldPid != null) clearSiblingManualLayout(oldPid);
+    applyHierarchyNumsFromTreeOrder();
     nodes = [...nodes];
   } else {
     const anchorId = relinkArm.anchorId;
@@ -704,12 +743,18 @@ function applyRelinkDrop(newParentId) {
       k.my = null;
     }
     nodes = [...nodes];
+    reorderFlatSiblingsByVisualY(newParentId);
+    reorderFlatSiblingsByVisualY(anchorId);
+    clearSiblingManualLayout(newParentId);
+    clearSiblingManualLayout(anchorId);
+    applyHierarchyNumsFromTreeOrder();
+    nodes = [...nodes];
   }
   clearRelinkArm();
   render();
   schedulePersist();
   emitAutoCloudSync('node-relink');
-  toast('노드 연결을 바꿨어');
+  toast('노드 연결을 바꿨어 · 순서·분류번호 자동 반영됨');
 }
 
 /** 카드(또는 제목)에서: 1.5초 유지 → 재연결 / 그 전에 움직이면 기존 위치 드래그(제목 제외) */
@@ -779,6 +824,79 @@ function defaultNumForNode(node) {
   return pfx + ord;
 }
 
+/** 형제 그룹의 수동 좌표 제거 → bld/ap 자동 열 배치만 사용 */
+function clearSiblingManualLayout(parentId) {
+  for (const n of nodes) {
+    if (n.parent_id === parentId) {
+      n.mx = null;
+      n.my = null;
+    }
+  }
+}
+
+/**
+ * 같은 부모 아래 형제를 화면 위치로 `nodes` 평면 배열에 반영.
+ * 우선 Y(위→아래), 같은 줄이면 X(왼→오) — 가로로만 옮긴 순서도 반영됨.
+ * @returns 순서가 바뀌었으면 true
+ */
+function reorderFlatSiblingsByVisualY(parentId) {
+  const sibs = nodes.filter((n) => n.parent_id === parentId);
+  if (sibs.length < 2) return false;
+  const idxOf = (id) => nodes.findIndex((n) => n.id === id);
+  const sorted = [...sibs].sort((a, b) => {
+    const pa = gp(a),
+      pb = gp(b);
+    const dy = pa.y - pb.y;
+    if (Math.abs(dy) >= 8) return dy;
+    const dx = pa.x - pb.x;
+    if (Math.abs(dx) >= 8) return dx;
+    return idxOf(a.id) - idxOf(b.id);
+  });
+  const orig = sibs.map((s) => s.id).join('|');
+  const neu = sorted.map((s) => s.id).join('|');
+  if (orig === neu) return false;
+  const idSet = new Set(sibs.map((s) => s.id));
+  const idxs = sibs.map((s) => idxOf(s.id)).filter((i) => i >= 0);
+  const insertAt = Math.min(...idxs);
+  const without = nodes.filter((n) => !idSet.has(n.id));
+  nodes = [...without.slice(0, insertAt), ...sorted, ...without.slice(insertAt)];
+  return true;
+}
+
+/** 트리·nodes 순서에 맞춰 분류 번호 일괄 재부여(부모 먼저, DFS) */
+function applyHierarchyNumsFromTreeOrder() {
+  const roots = nodes.filter((n) => !n.parent_id);
+  for (const r of roots) {
+    if (!String(r.num || '').trim()) r.num = 'PRD';
+  }
+  function walk(pid) {
+    const kids = nodes.filter((n) => n.parent_id === pid);
+    for (const k of kids) {
+      k.num = defaultNumForNode(k);
+      walk(k.id);
+    }
+  }
+  for (const r of roots) walk(r.id);
+}
+
+/** 수동 드래그 종료: 형제 순서·번호·자동열 배치 반영 */
+function syncSiblingOrderAndNumsAfterDrag(draggedIds) {
+  if (!draggedIds.length || !nodes.length) return { changedOrder: false };
+  const parents = new Set();
+  for (const id of draggedIds) {
+    const node = find(id);
+    if (node) parents.add(node.parent_id);
+  }
+  let changedOrder = false;
+  for (const pid of parents) {
+    if (reorderFlatSiblingsByVisualY(pid)) changedOrder = true;
+    clearSiblingManualLayout(pid);
+  }
+  applyHierarchyNumsFromTreeOrder();
+  nodes = [...nodes];
+  return { changedOrder };
+}
+
 function getDepth(id, v = new Set()) {
   if (v.has(id)) return 0;
   v.add(id);
@@ -792,7 +910,7 @@ const SNAP_PX = 6;
 const NODE_H = 88;
 const GUIDE_SPAN = 8000;
 function nodeWn(n) {
-  return getDepth(n.id) === 0 ? 168 : 188;
+  return getDepth(n.id) === 0 ? NODE_CARD_W_ROOT : NODE_CARD_W_CHILD;
 }
 function clearSmartGuides() {
   if (SG) SG.innerHTML = '';
@@ -820,16 +938,23 @@ function drawSmartGuides(segs) {
     SG.appendChild(line);
   }
 }
+/**
+ * 드래그 스냅: 같은 부모 형제는 스냅 대상에서 제외 — 나란히 둘 때 6px 자석에 안 끌림.
+ * 다른 가지·부모의 카드에만 정렬 스냅 적용.
+ */
 function snapNodePosition(n, x, y, excludeIds) {
   const w = nodeWn(n);
-  const h = NODE_H;
+  const h = nodeCardHeightPx(n);
+  const myPid = n.parent_id ?? null;
   let bestX = { d: SNAP_PX + 1, nx: x };
   let bestY = { d: SNAP_PX + 1, ny: y };
   for (const o of nodes) {
     if (!o || o.id === n.id) continue;
     if (excludeIds && excludeIds.has(o.id)) continue;
+    if ((o.parent_id ?? null) === myPid) continue;
     const ow = nodeWn(o);
     const op = gp(o);
+    const ohOther = nodeCardHeightPx(o);
     for (let i = 0; i < 3; i++) {
       for (let j = 0; j < 3; j++) {
         const nxi = x + (i === 0 ? 0 : i === 1 ? w / 2 : w);
@@ -839,7 +964,7 @@ function snapNodePosition(n, x, y, excludeIds) {
           bestX = { d: Math.abs(ddx), nx: x - ddx };
         }
         const nyi = y + (i === 0 ? 0 : i === 1 ? h / 2 : h);
-        const oyj = op.y + (j === 0 ? 0 : j === 1 ? h / 2 : h);
+        const oyj = op.y + (j === 0 ? 0 : j === 1 ? ohOther / 2 : ohOther);
         const ddy = nyi - oyj;
         if (Math.abs(ddy) <= SNAP_PX && Math.abs(ddy) < bestY.d) {
           bestY = { d: Math.abs(ddy), ny: y - ddy };
@@ -855,11 +980,13 @@ function snapNodePosition(n, x, y, excludeIds) {
 function collectAlignmentGuides(n, nx, ny, excludeIds) {
   const w = nodeWn(n);
   const h = NODE_H;
+  const myPid = n.parent_id ?? null;
   const vx = new Set();
   const hy = new Set();
   for (const o of nodes) {
     if (!o || o.id === n.id) continue;
     if (excludeIds && excludeIds.has(o.id)) continue;
+    if ((o.parent_id ?? null) === myPid) continue;
     const ow = nodeWn(o);
     const op = gp(o);
     for (let i = 0; i < 3; i++) {
@@ -1186,20 +1313,61 @@ function mkB(lbl, bg, fn) {
   return b;
 }
 
+/** 노드 카드 삭제 — 기존 사각형 높이(26px)와 동일 너비의 원형 버튼 */
+function mkNodeDeleteBtn(fn) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = '−';
+  b.setAttribute(
+    'aria-label',
+    '노드 삭제'
+  );
+  b.setAttribute(
+    'style',
+    'display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;min-width:26px;min-height:26px;padding:0;background:#FF6969;color:#fff;border:none;border-radius:50%;font-size:14px;font-weight:700;line-height:1;cursor:pointer;box-sizing:border-box'
+  );
+  b.onmouseenter = () => (b.style.opacity = '.88');
+  b.onmouseleave = () => (b.style.opacity = '1');
+  b.onclick = (e) => {
+    e.stopPropagation();
+    fn();
+  };
+  return b;
+}
+
 function fitToScreen() {
   if (!nodes.length) {
     toast('노드가 없어');
     return;
   }
-  const xs = nodes.map((n) => gp(n).x),
-    ys = nodes.map((n) => gp(n).y);
-  const minX = Math.min(...xs) - 20,
-    minY = Math.min(...ys) - 20,
-    maxX = Math.max(...xs) + 200,
-    maxY = Math.max(...ys) + 100;
-  const ns = Math.max(Math.min(Math.min((CW.offsetWidth - 40) / (maxX - minX), (CW.offsetHeight - 40) / (maxY - minY)), 1.2), 0.15);
-  panX = (CW.offsetWidth - 40) / 2 + 20 - ((minX + maxX) / 2) * ns;
-  panY = (CW.offsetHeight - 40) / 2 + 20 - ((minY + maxY) / 2) * ns;
+  /** 미니맵(updMM)과 동일한 카드 AABB — 모두보기 후 시야·미니맵 전체 맵 중심이 맞도록 */
+  let mnX = Infinity,
+    mnY = Infinity,
+    mxX = -Infinity,
+    mxY = -Infinity;
+  for (const n of nodes) {
+    const p = gp(n),
+      w = nodeCardWidth(n),
+      h = nodeCardHeightPx(n);
+    mnX = Math.min(mnX, p.x);
+    mnY = Math.min(mnY, p.y);
+    mxX = Math.max(mxX, p.x + w);
+    mxY = Math.max(mxY, p.y + h);
+  }
+  const edge = 20;
+  mnX -= edge;
+  mnY -= edge;
+  mxX += edge;
+  mxY += edge;
+  const gw = mxX - mnX,
+    gh = mxY - mnY;
+  const W0 = CW.offsetWidth,
+    H0 = CW.offsetHeight;
+  const ns = Math.max(Math.min(Math.min((W0 - 40) / gw, (H0 - 40) / gh), 1.2), 0.15);
+  const cx = (mnX + mxX) / 2,
+    cy = (mnY + mxY) / 2;
+  panX = W0 / 2 - cx * ns;
+  panY = H0 / 2 - cy * ns;
   scale = ns;
   applyTx();
   toast('전체 노드 맞춤 완료 ⊡');
@@ -1350,9 +1518,68 @@ function bld(nid, col, r) {
   lm[nid] = { col, row: (startRow + row - 1) / 2 };
   return row;
 }
+
+function loadNodeMapLayoutPreference() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const v = localStorage.getItem(NODE_MAP_LAYOUT_LS);
+    if (v === 'topdown' || v === 'right') nodeMapLayoutMode = v;
+  } catch (_) {}
+}
+function saveNodeMapLayoutPreference() {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(NODE_MAP_LAYOUT_LS, nodeMapLayoutMode);
+  } catch (_) {}
+}
+function dispatchNodeMapLayoutEvent() {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('plannode-node-map-layout', { detail: { mode: nodeMapLayoutMode } }));
+    }
+  } catch (_) {}
+}
+function applyNodeMapLayout(mode) {
+  if (mode !== 'right' && mode !== 'topdown') return;
+  if (nodeMapLayoutMode === mode) return;
+  nodeMapLayoutMode = mode;
+  saveNodeMapLayoutPreference();
+  render();
+  dispatchNodeMapLayoutEvent();
+}
+
+/** 탑다운: `row` = 깊이, `col` = 가로(부모는 자식 col 범위의 중심) */
+function bldTopDown(nid, depth, colCursor) {
+  const kids = nodes
+    .filter((n) => n.parent_id === nid)
+    .sort(
+      (a, b) =>
+        String(a.num ?? '').localeCompare(String(b.num ?? ''), undefined, { numeric: true }) ||
+        String(a.id).localeCompare(String(b.id))
+    );
+  if (!kids.length) {
+    lm[nid] = { col: colCursor + 0.5, row: depth };
+    return colCursor + 1;
+  }
+  let c = colCursor;
+  for (const k of kids) {
+    c = bldTopDown(k.id, depth + 1, c);
+  }
+  let minC = Infinity;
+  let maxC = -Infinity;
+  for (const k of kids) {
+    const L = lm[k.id];
+    if (L) {
+      minC = Math.min(minC, L.col);
+      maxC = Math.max(maxC, L.col);
+    }
+  }
+  lm[nid] = { col: (minC + maxC) / 2, row: depth };
+  return c;
+}
+
 const ap = (id) => {
   const l = lm[id];
-  return l ? { x: l.col * COL_W + 28, y: l.row * ROW_H + 30 } : { x: 0, y: 0 };
+  return l ? { x: l.col * COL_W + layoutOriginX(), y: l.row * layoutRowH() + 30 } : { x: 0, y: 0 };
 };
 const gp = (n) => (n.mx != null && n.my != null ? { x: n.mx, y: n.my } : ap(n.id));
 
@@ -1364,33 +1591,87 @@ function nodeCenterY(n) {
   return top + 44;
 }
 
+function nodeCardWidth(n) {
+  const d = getDepth(n.id);
+  return d === 0 ? NODE_CARD_W_ROOT : NODE_CARD_W_CHILD;
+}
+/** 미니맵·뷰포트 — DOM 측정, 없으면 스냅/엣지용 근사 */
+function nodeCardHeightPx(n) {
+  if (!n) return NODE_H;
+  const el = document.getElementById('nd-' + n.id);
+  const h = el ? el.offsetHeight : 0;
+  return h > 28 ? h : NODE_H;
+}
+function nodeTopY(n) {
+  return gp(n).y;
+}
+function nodeBottomY(n) {
+  const top = gp(n).y;
+  const el = document.getElementById('nd-' + n.id);
+  if (el && el.offsetHeight > 0) return top + el.offsetHeight;
+  return top + 88;
+}
+
 function render() {
   clearSmartGuides();
   lm = {};
-  let globalRow = 0;
-  nodes
-    .filter((n) => !n.parent_id)
-    .forEach((n, i) => {
-      bld(n.id, 0, globalRow);
-      // 각 루트 노드 이후, 다음 루트 노드의 시작 row 계산
-      // (현재 루트의 모든 자식들을 배치 후 그 다음부터)
-      globalRow = Object.keys(lm).length;
-    });
-  CV.querySelectorAll('.nw,.cp-row').forEach((e) => e.remove());
-  EG.innerHTML = '';
-  const mc = Math.max(0, ...nodes.map((n) => lm[n.id]?.col || 0));
-  const cpRow = document.createElement('div');
-  cpRow.className = 'cp-row';
-  for (let i = 0; i <= mc; i++) {
-    const p = document.createElement('div');
-    p.className = 'cp cp' + Math.min(i, 4);
-    p.textContent = DN[i] ?? `Lv${i}`;
-    p.style.flex = `0 0 ${COL_W}px`;
-    p.style.minWidth = '0';
-    p.style.boxSizing = 'border-box';
-    cpRow.appendChild(p);
+  if (nodeMapLayoutMode === 'right') {
+    let globalRow = 0;
+    nodes
+      .filter((n) => !n.parent_id)
+      .forEach((n) => {
+        bld(n.id, 0, globalRow);
+        globalRow = Object.keys(lm).length;
+      });
+  } else {
+    let gc = 0;
+    nodes
+      .filter((n) => !n.parent_id)
+      .forEach((root) => {
+        gc = bldTopDown(root.id, 0, gc);
+      });
   }
-  CV.appendChild(cpRow);
+  CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
+  EG.innerHTML = '';
+  const rhGrid = layoutRowH();
+  if (nodeMapLayoutMode === 'right') {
+    const cpRow = document.createElement('div');
+    cpRow.className = 'cp-row';
+    const mc = Math.max(0, ...nodes.map((n) => lm[n.id]?.col || 0));
+    const mcInt = Math.ceil(mc);
+    for (let i = 0; i <= mcInt; i++) {
+      const p = document.createElement('div');
+      p.className = 'cp cp' + Math.min(i, 4);
+      p.textContent = DN[i] ?? `Lv${i}`;
+      p.style.flex = `0 0 ${COL_W}px`;
+      p.style.minWidth = '0';
+      p.style.boxSizing = 'border-box';
+      cpRow.appendChild(p);
+    }
+    CV.appendChild(cpRow);
+  } else if (nodes.length) {
+    let maxRow = 0;
+    for (const node of nodes) {
+      const L = lm[node.id];
+      if (L && L.row > maxRow) maxRow = L.row;
+    }
+    const strip = document.createElement('div');
+    strip.className = 'cp-depth-strip';
+    strip.style.cssText = `position:absolute;left:0;top:30px;width:${TOPDOWN_DEPTH_STRIP_W}px;display:flex;flex-direction:column;align-items:stretch;box-sizing:border-box;z-index:2;pointer-events:none`;
+    for (let r = 0; r <= maxRow; r++) {
+      const p = document.createElement('div');
+      p.className = 'cp cp-depth-cell cp' + Math.min(r, 4);
+      const full = DN[r] ?? `Lv${r}`;
+      p.textContent = DN_STRIP[r] ?? `L${r}`;
+      p.title = full;
+      p.style.flex = '0 0 auto';
+      p.style.height = `${rhGrid}px`;
+      p.style.minHeight = `${rhGrid}px`;
+      p.style.boxSizing = 'border-box';
+      strip.appendChild(p);
+    }
+    CV.appendChild(strip);
+  }
   const relinkHi = relinkHighlightIds();
   nodes.forEach((n) => {
     const d = getDepth(n.id),
@@ -1446,6 +1727,8 @@ function render() {
     nd.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || e.button !== 0) return;
       if (e.target.closest('button')) return;
+      if (e.pointerType === 'touch') touchCtxMaybeStart(e, n);
+      else touchCtxClearAll();
       if (e.shiftKey) {
         multiSel.add(n.id);
         selId = n.id;
@@ -1483,6 +1766,7 @@ function render() {
       titleEl.style.cursor = 'pointer';
       titleEl.addEventListener('click', (e) => {
         if (e.shiftKey) return;
+        if (Date.now() < suppressNodeCardUiUntil) return;
         if (relinkSuppressClick || relinkArm) {
           e.stopPropagation();
           e.preventDefault();
@@ -1495,7 +1779,7 @@ function render() {
       });
     }
     const na = nd.querySelector('#na-' + n.id);
-    if (n.parent_id) na.appendChild(mkB('−', RD, () => cDel(n.id)));
+    if (n.parent_id) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
     w.appendChild(nd);
     const pb = document.createElement('button');
     pb.type = 'button';
@@ -1507,7 +1791,9 @@ function render() {
     pb.setAttribute('aria-label', '노드 추가 또는 하위만 상위 바꾸기');
     pb.setAttribute(
       'style',
-      `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+      nodeMapLayoutMode === 'topdown'
+        ? `position:absolute;left:50%;bottom:-22px;top:auto;right:auto;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+        : `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(0,0,0,.2)`
     );
     pb.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
@@ -1560,7 +1846,6 @@ function render() {
     CV.appendChild(w);
   });
   drawEdges();
-  updMM();
   applyTx();
   
   // Shift+드래그 범위 선택 박스 그리기
@@ -1612,15 +1897,29 @@ function drawEdges() {
     nodes.filter((c) => c.parent_id === n.id).forEach((c) => {
       const d = getDepth(n.id),
         pp = gp(n),
-        cp = gp(c),
-        pw = d === 0 ? 168 : 188;
-      const x1 = pp.x + pw,
-        y1 = nodeCenterY(n),
-        x2 = cp.x,
-        y2 = nodeCenterY(c),
-        mx = (x1 + x2) / 2;
+        cp = gp(c);
       const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      p.setAttribute('d', `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`);
+      let pathD;
+      if (nodeMapLayoutMode === 'topdown') {
+        const pw = nodeCardWidth(n),
+          cw = nodeCardWidth(c);
+        const x1 = pp.x + pw / 2,
+          y1 = nodeBottomY(n),
+          x2 = cp.x + cw / 2,
+          y2 = nodeTopY(c),
+          mx = (x1 + x2) / 2,
+          my = (y1 + y2) / 2;
+        pathD = `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+      } else {
+        const pw = nodeCardWidth(n);
+        const x1 = pp.x + pw,
+          y1 = nodeCenterY(n),
+          x2 = cp.x,
+          y2 = nodeCenterY(c),
+          mx = (x1 + x2) / 2;
+        pathD = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+      }
+      p.setAttribute('d', pathD);
       p.setAttribute('stroke', getDC(d) + '66');
       p.setAttribute('stroke-width', '1.5');
       p.setAttribute('fill', 'none');
@@ -1643,13 +1942,15 @@ function sDrag(e, n, isShiftPressed) {
   if (!start.has(n.id)) return;
   const p0 = start.get(n.id);
   const dragPid = e.pointerId;
-  const sx = (e.clientX - panX) / scale - p0.x;
-  const sy = (e.clientY - panY) / scale - p0.y;
+  const startG = cwClientToGraph(e.clientX, e.clientY);
+  const sx = startG.gx - p0.x;
+  const sy = startG.gy - p0.y;
   const excl = new Set(ids);
   const mv = (ev) => {
     if (ev.pointerId !== dragPid) return;
-    const rawX = (ev.clientX - panX) / scale - sx;
-    const rawY = (ev.clientY - panY) / scale - sy;
+    const g = cwClientToGraph(ev.clientX, ev.clientY);
+    const rawX = g.gx - sx;
+    const rawY = g.gy - sy;
     const { x: snapX, y: snapY } = snapNodePosition(n, rawX, rawY, excl);
     const ddx = snapX - p0.x;
     const ddy = snapY - p0.y;
@@ -1668,7 +1969,7 @@ function sDrag(e, n, isShiftPressed) {
     const guides = collectAlignmentGuides(n, snapX, snapY, excl);
     drawSmartGuides(guides);
     drawEdges();
-    updMM();
+    scheduleUpdMM();
   };
   const up = (ev) => {
     if (ev && 'pointerId' in ev && ev.pointerId !== dragPid) return;
@@ -1676,7 +1977,9 @@ function sDrag(e, n, isShiftPressed) {
     document.removeEventListener('pointermove', mv);
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);
+    const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(ids);
     render();
+    if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
   };
   document.addEventListener('pointermove', mv);
   document.addEventListener('pointerup', up);
@@ -1879,6 +2182,62 @@ function showIM(html, btns, extra, onClose) {
   if (extra) extra(bg);
 }
 
+function touchCtxClearAll() {
+  if (touchCtxTimer) {
+    clearTimeout(touchCtxTimer);
+    touchCtxTimer = null;
+  }
+  const c = touchCtxDocCleanup;
+  touchCtxDocCleanup = null;
+  if (c) {
+    try {
+      c();
+    } catch (_) {}
+  }
+}
+
+/** 터치 홀드 → 루트 메뉴와 동일 (contextmenu 미지원·지연되는 기기 보완) */
+function touchCtxMaybeStart(e, n) {
+  if (e.shiftKey) return;
+  touchCtxClearAll();
+  const pid = e.pointerId;
+  const ox = e.clientX,
+    oy = e.clientY;
+  touchCtxTimer = setTimeout(() => {
+    touchCtxTimer = null;
+    if (touchCtxDocCleanup) {
+      try {
+        touchCtxDocCleanup();
+      } catch (_) {}
+      touchCtxDocCleanup = null;
+    }
+    clearRelinkHold();
+    selId = n.id;
+    render();
+    suppressNodeCardUiUntil = Date.now() + 750;
+    showCtx({ clientX: ox, clientY: oy }, n);
+  }, TOUCH_CTX_LP_MS);
+  const onMove = (ev) => {
+    if (ev.pointerId !== pid) return;
+    if (!touchCtxTimer) return;
+    const dx = ev.clientX - ox,
+      dy = ev.clientY - oy;
+    if (dx * dx + dy * dy > TOUCH_CTX_MOVE_PX * TOUCH_CTX_MOVE_PX) touchCtxClearAll();
+  };
+  const onEnd = (ev) => {
+    if (ev.pointerId !== pid) return;
+    touchCtxClearAll();
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onEnd);
+  document.addEventListener('pointercancel', onEnd);
+  touchCtxDocCleanup = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onEnd);
+    document.removeEventListener('pointercancel', onEnd);
+  };
+}
+
 function showCtx(e, n) {
   if (!CTX) return;
   const bset = getBadgeSetFromNode(n);
@@ -1894,7 +2253,14 @@ function showCtx(e, n) {
       )
       .join('');
   const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
+  const rootLayoutCtx = !n.parent_id
+    ? `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">노드맵 배치</div>
+    <div class="cx" data-a="nml" data-mode="right" data-id="${n.id}">${nodeMapLayoutMode === 'right' ? '✓' : '○'}  우측분포</div>
+    <div class="cx" data-a="nml" data-mode="topdown" data-id="${n.id}">${nodeMapLayoutMode === 'topdown' ? '✓' : '○'}  하위분포</div>
+    <div class="cxsp"></div>`
+    : '';
   CTX.innerHTML = `
+    ${rootLayoutCtx}
     <div class="cx" data-a="edit" data-id="${n.id}">✎  이름·설명 편집</div>
     <div class="cx" data-a="add" data-id="${n.id}">+  하위 노드 추가</div>
     <div class="cxsp"></div><div class="cxsc">배지 (3트랙 · ${nPool})</div>
@@ -1905,12 +2271,21 @@ function showCtx(e, n) {
     <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>
     ${n.parent_id ? `<div class="cxsp"></div><div class="cx dng" data-a="del" data-id="${n.id}">✕  삭제</div>` : ''}`;
   const ar = R_.getBoundingClientRect();
-  let lx = e.clientX - ar.left + 2,
-    ly = e.clientY - ar.top + 2;
+  const cx = typeof e.clientX === 'number' ? e.clientX : ar.left + 24;
+  const cy = typeof e.clientY === 'number' ? e.clientY : ar.top + 24;
+  let lx = cx - ar.left + 2,
+    ly = cy - ar.top + 2;
   CTX.style.cssText = `display:block;left:${lx}px;top:${ly}px`;
   requestAnimationFrame(() => {
-    if (lx + CTX.offsetWidth > R_.offsetWidth - 4) CTX.style.left = lx - CTX.offsetWidth - 4 + 'px';
-    if (ly + CTX.offsetHeight > R_.offsetHeight - 4) CTX.style.top = ly - CTX.offsetHeight + 'px';
+    const pad = 6;
+    const rw = R_.clientWidth,
+      rh = R_.clientHeight,
+      cw = CTX.offsetWidth,
+      ch = CTX.offsetHeight;
+    lx = Math.min(Math.max(lx, pad), Math.max(pad, rw - cw - pad));
+    ly = Math.min(Math.max(ly, pad), Math.max(pad, rh - ch - pad));
+    CTX.style.left = lx + 'px';
+    CTX.style.top = ly + 'px';
   });
   ctxOpen = true;
 }
@@ -1931,7 +2306,7 @@ function onCtxClick(e) {
     n.my = null;
     render();
     toast('위치 초기화');
-  } else if (a === 'bgt') {
+  }   else if (a === 'bgt') {
     const tr = row.dataset.track;
     const ky = row.dataset.key;
     if (!tr || !ky) return;
@@ -1944,6 +2319,9 @@ function onCtxClick(e) {
     nodes = [...nodes];
     render();
     toast('배지 갱신');
+  } else if (a === 'nml') {
+    const mode = row.dataset.mode;
+    if (mode === 'right' || mode === 'topdown') applyNodeMapLayout(mode);
   }
 }
 
@@ -1955,34 +2333,104 @@ function onDocClickCtx(e) {
   }
 }
 
+/** #CW 클라이언트 영역 기준 → 그래프(#CV 콘텐츠) 좌표. 화면 절대 clientX 단독 사용 금지 */
+function cwClientToGraph(clientX, clientY) {
+  if (!CW) return { gx: 0, gy: 0 };
+  const r = CW.getBoundingClientRect();
+  const lx = clientX - r.left;
+  const ly = clientY - r.top;
+  return {
+    gx: (lx - panX) / scale,
+    gy: (ly - panY) / scale,
+  };
+}
+
+/** XY Flow MiniMap viewBox 스냅샷 — 클릭 시 minimapPixelToWorld 에 사용 */
+let mmViewBox = { x: 0, y: 0, width: 1, height: 1 };
+const MM_OFFSET_SCALE = 5;
+function graphFromMiniMapClient(clientX, clientY) {
+  const mc = document.getElementById('MMC');
+  if (!mc || mmViewBox.width <= 1e-9) return null;
+  const r = mc.getBoundingClientRect();
+  const px = clientX - r.left;
+  const py = clientY - r.top;
+  const mw = mc.offsetWidth || 120,
+    mh = mc.offsetHeight || 72;
+  return minimapPixelToWorldUniform(px, py, mmViewBox, mw, mh);
+}
+let mmRaf = null;
+function scheduleUpdMM() {
+  if (mmRaf != null) cancelAnimationFrame(mmRaf);
+  mmRaf = requestAnimationFrame(() => {
+    mmRaf = null;
+    requestAnimationFrame(() => {
+      updMM();
+    });
+  });
+}
+
 function applyTx() {
   CV.style.transform = `translate(${panX}px,${panY}px) scale(${scale})`;
   const zp = document.getElementById('ZP');
   if (zp) zp.textContent = Math.round(scale * 100) + '%';
-  updMM();
+  scheduleUpdMM();
 }
 
 function updMM() {
   const mc = document.getElementById('MMC');
-  if (!mc) return;
+  const vp = document.getElementById('MMV');
+  if (!mc || !CW) return;
   const mw = mc.offsetWidth || 120,
     mh = mc.offsetHeight || 72;
-  mc.width = mw;
-  mc.height = mh;
+  const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+  mc.width = Math.round(mw * dpr);
+  mc.height = Math.round(mh * dpr);
+  mc.style.width = `${mw}px`;
+  mc.style.height = `${mh}px`;
   const c = mc.getContext('2d');
+  if (!c) return;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
   c.clearRect(0, 0, mw, mh);
+  if (vp) vp.style.display = 'none';
   if (!nodes.length) return;
-  const xs = nodes.map((n) => gp(n).x),
-    ys = nodes.map((n) => gp(n).y);
-  const mnX = Math.min(...xs) - 12,
-    mnY = Math.min(...ys) - 12,
-    mxX = Math.max(...xs) + 198,
-    mxY = Math.max(...ys) + 78;
-  const rw = mxX - mnX,
-    rh = mxY - mnY,
-    s2 = Math.min(mw / rw, mh / rh) * 0.88;
-  const ox = (mw - rw * s2) / 2 - mnX * s2,
-    oy = (mh - rh * s2) / 2 - mnY * s2;
+
+  let mnX = Infinity,
+    mnY = Infinity,
+    mxX = -Infinity,
+    mxY = -Infinity;
+  for (const n of nodes) {
+    const p = gp(n),
+      w = nodeCardWidth(n),
+      h = nodeCardHeightPx(n);
+    mnX = Math.min(mnX, p.x);
+    mnY = Math.min(mnY, p.y);
+    mxX = Math.max(mxX, p.x + w);
+    mxY = Math.max(mxY, p.y + h);
+  }
+  const pad = 32;
+  mnX -= pad;
+  mnY -= pad;
+  mxX += pad;
+  mxY += pad;
+  const Wcw = CW.clientWidth,
+    Hcw = CW.clientHeight;
+  /** 시야(viewBB) — transform[0]/[1]/[2] 와 동일한 의미: Flow MiniMap selector */
+  const vx = -panX / scale,
+    vy = -panY / scale,
+    vw = Wcw / scale,
+    vh = Hcw / scale;
+  const nodeBounds = { x: mnX, y: mnY, width: mxX - mnX, height: mxY - mnY };
+  const viewBB = { x: vx, y: vy, width: vw, height: vh };
+  const boundingRect = unionNodeBoundsAndViewport(nodeBounds, viewBB);
+  const { viewBox } = computeMinimapViewBox(boundingRect, mw, mh, MM_OFFSET_SCALE);
+  mmViewBox = viewBox;
+  /** 균일 스케일 — SVG minimap 의 meet·중앙 정렬 과 동일(모두보기 후 전체 맵이 미니맹 중앙에 보임) */
+  const { scale: mmScale, padX: mmPadX, padY: mmPadY } = minimapUniformFit(viewBox, mw, mh);
+  const mmXY = (gx, gy) => ({
+    px: (gx - viewBox.x) * mmScale + mmPadX,
+    py: (gy - viewBox.y) * mmScale + mmPadY,
+  });
+
   nodes.forEach((n) => {
     const p = gp(n),
       d = getDepth(n.id),
@@ -1990,24 +2438,50 @@ function updMM() {
     c.fillStyle = isSelected ? getDC(d) + 'dd' : getDC(d) + '22';
     c.strokeStyle = isSelected ? getDC(d) : getDC(d) + '88';
     c.lineWidth = isSelected ? 1.5 : 0.5;
-    const rx = p.x * s2 + ox,
-      ry = p.y * s2 + oy,
-      rw = (d === 0 ? 168 : 188) * s2,
-      rh = 42 * s2;
+    const { px: rx, py: ry } = mmXY(p.x, p.y);
+    const rw = nodeCardWidth(n) * mmScale,
+      rh = nodeCardHeightPx(n) * mmScale;
     c.beginPath();
     if (typeof c.roundRect === 'function') {
-      c.roundRect(rx, ry, rw, rh, 2);
+      c.roundRect(rx, ry, rw, rh, 3);
     } else {
       c.rect(rx, ry, rw, rh);
     }
     c.fill();
     c.stroke();
   });
-  const vp = document.getElementById('MMV'),
-    W = CW.offsetWidth,
-    H = CW.offsetHeight;
-  if (vp)
-    vp.style.cssText = `left:${(-panX / scale) * s2 + ox}px;top:${(-panY / scale) * s2 + oy}px;width:${(W / scale) * s2}px;height:${(H / scale) * s2}px`;
+
+  if (selId) {
+    const sn = find(selId);
+    if (sn) {
+      const p = gp(sn),
+        w = nodeCardWidth(sn),
+        h = nodeCardHeightPx(sn);
+      const { px: rx, py: ry } = mmXY(p.x, p.y);
+      const rw = w * mmScale,
+        rh = h * mmScale;
+      c.save();
+      c.strokeStyle = 'rgba(234, 88, 12, 0.95)';
+      c.lineWidth = 2;
+      c.setLineDash([4, 3]);
+      c.strokeRect(rx + 0.5, ry + 0.5, Math.max(0, rw - 1), Math.max(0, rh - 1));
+      c.setLineDash([]);
+      c.restore();
+    }
+  }
+
+  /** #CW 시야 직사각형 — viewBB 와 동일 꼭짓점 */
+  const { px: vLeft, py: vTop } = mmXY(vx, vy);
+  const vW = vw * mmScale,
+    vH = vh * mmScale;
+  c.save();
+  c.fillStyle = 'rgba(107, 78, 246, 0.14)';
+  c.strokeStyle = 'rgba(107, 78, 246, 0.92)';
+  c.lineWidth = 2;
+  c.setLineDash([]);
+  c.fillRect(vLeft, vTop, Math.max(2, vW), Math.max(2, vH));
+  c.strokeRect(vLeft + 0.5, vTop + 0.5, Math.max(2, vW) - 1, Math.max(2, vH) - 1);
+  c.restore();
 }
 
 function getDemoNodes(pid) {
@@ -2106,6 +2580,8 @@ export function initPlannode(opts = {}) {
     console.warn('[plannodePilot] 필수 DOM(#R,#CW,#CV,#EG) 없음');
     return null;
   }
+
+  loadNodeMapLayoutPreference();
 
   if (CTX) {
     CTX.addEventListener('click', onCtxClick);
@@ -2211,15 +2687,24 @@ export function initPlannode(opts = {}) {
       toast('노드 붙이기 취소');
       return;
     }
-    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z' || e.shiftKey) return;
+    /** Win Ctrl+Z / Mac ⌘Z — 코드 레이아웃 호환(KeyZ), IME·일부 브라우저 대비 */
+    const isZ =
+      e.code === 'KeyZ' ||
+      String(e.key || '')
+        .toLowerCase()
+        .trim() === 'z';
+    const undoChord =
+      isZ && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
+    if (!undoChord) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (!curP) return;
     e.preventDefault();
+    e.stopPropagation();
     undoLast();
   };
-  document.addEventListener('keydown', onGlobalKeyDown);
-  disposers.push(() => document.removeEventListener('keydown', onGlobalKeyDown));
+  document.addEventListener('keydown', onGlobalKeyDown, true);
+  disposers.push(() => document.removeEventListener('keydown', onGlobalKeyDown, true));
   wireBtn(bmd, () => {
     if (!curP) {
       toast('프로젝트를 먼저 선택해줘');
@@ -2264,12 +2749,8 @@ export function initPlannode(opts = {}) {
       } catch (_) {}
       // Shift 누름 상태: 범위 선택 모드 시작
       if (e.shiftKey && e.button === 0) {
-        selectionBox = {
-          x0: (e.clientX - panX) / scale,
-          y0: (e.clientY - panY) / scale,
-          x: (e.clientX - panX) / scale,
-          y: (e.clientY - panY) / scale,
-        };
+        const g = cwClientToGraph(e.clientX, e.clientY);
+        selectionBox = { x0: g.gx, y0: g.gy, x: g.gx, y: g.gy };
         return;
       }
 
@@ -2287,8 +2768,9 @@ export function initPlannode(opts = {}) {
     if (activeCwPointerId != null && e.pointerId !== activeCwPointerId) return;
     if (selectionBox) {
       // Shift+드래그: 선택 박스 업데이트
-      selectionBox.x = (e.clientX - panX) / scale;
-      selectionBox.y = (e.clientY - panY) / scale;
+      const g = cwClientToGraph(e.clientX, e.clientY);
+      selectionBox.x = g.gx;
+      selectionBox.y = g.gy;
       render(); // 박스 시각화를 위해 render 필요
       return;
     }
@@ -2311,7 +2793,8 @@ export function initPlannode(opts = {}) {
       // 범위 내 모든 노드 감지 및 multiSel에 추가
       nodes.forEach((n) => {
         const pos = gp(n);
-        const w = 160, h = 80; // 노드 대략 크기
+        const w = NODE_CARD_W_CHILD,
+          h = 80; // 노드 대략 높이
         if (pos.x < x2 && pos.x + w > x1 && pos.y < y2 && pos.y + h > y1) {
           multiSel.add(n.id);
         }
@@ -2358,6 +2841,26 @@ export function initPlannode(opts = {}) {
   disposers.push(() => document.removeEventListener('pointercancel', onPanUp));
   CW.addEventListener('wheel', onWheel, { passive: false });
   disposers.push(() => CW.removeEventListener('wheel', onWheel));
+
+  const mmc = document.getElementById('MMC');
+  if (mmc) {
+    mmc.title = '클릭: 해당 위치를 캔버스 중앙으로 이동';
+    mmc.style.cursor = 'pointer';
+    const onMiniMapClick = (e) => {
+      if (!nodes.length || e.button !== 0) return;
+      const g = graphFromMiniMapClient(e.clientX, e.clientY);
+      if (!g) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const W = CW.clientWidth,
+        H = CW.clientHeight;
+      panX = W / 2 - g.gx * scale;
+      panY = H / 2 - g.gy * scale;
+      applyTx();
+    };
+    mmc.addEventListener('click', onMiniMapClick);
+    disposers.push(() => mmc.removeEventListener('click', onMiniMapClick));
+  }
 
   if (!delegateProjectModal) {
     const bpn = document.getElementById('BPN');
@@ -2443,6 +2946,13 @@ export function initPlannode(opts = {}) {
       clearUndoStack();
     },
     /** Svelte 스토어에서 프로젝트+노드 주입 */
+    /** 스토어 프로젝트 메타만 갱신 — 노드·Undo 유지 (`touchProjectUpdatedAt` 등) */
+    patchProjectMeta(project) {
+      if (!project || !curP || curP.id !== project.id) return;
+      curP = { ...curP, ...project };
+      const pnt = document.getElementById('PNT');
+      if (pnt) pnt.textContent = curP.name || '—';
+    },
     hydrateFromStore(project, pilotNodes) {
       syncing = true;
       try {
@@ -2485,7 +2995,7 @@ export function initPlannode(opts = {}) {
         curP = null;
         nodes = [];
         if (ES) ES.style.display = 'flex';
-        if (CV) CV.querySelectorAll('.nw,.cp-row').forEach((e) => e.remove());
+        if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';
         applyTx();
       } finally {
@@ -2506,6 +3016,12 @@ export function initPlannode(opts = {}) {
     exportSpecSheetCsv,
     getSnapshot() {
       return { nodes: JSON.parse(JSON.stringify(nodes)), curP };
+    },
+    getNodeMapLayoutMode() {
+      return nodeMapLayoutMode;
+    },
+    setNodeMapLayout(mode) {
+      applyNodeMapLayout(mode);
     }
   };
 }

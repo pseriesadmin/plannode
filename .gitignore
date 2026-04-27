@@ -14,3 +14,5 @@ node_modules/
 .vscode/*
 !.vscode/tasks.json
 dist/
+# Plannode 하네스 — 로컬 @qa 보고(워크플로·중요, 저장소 커밋 대상 아님)
+.cursor/harness/QA_REPORT.md

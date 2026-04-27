@@ -256,6 +256,73 @@ export function updateProjectMeta(
   markCloudWorkspaceDirty();
 }
 
+/** 제목·메타 수정. 이름 변경 시 루트 노드(`…-r`) 표시명도 맞춤 — 트리·파일럿 일치 */
+export function updateProjectFields(
+  projectId: string,
+  patch: Partial<Pick<Project, 'name' | 'author' | 'description' | 'start_date' | 'end_date'>>
+): void {
+  if (typeof window === 'undefined') return;
+  const keys = Object.keys(patch);
+  if (!keys.length) return;
+  const now = new Date().toISOString();
+  projects.update((plist) => {
+    const next = plist.map((p) => (p.id === projectId ? { ...p, ...patch, updated_at: now } : p));
+    try {
+      localStorage.setItem(PROJECTS_KEY, JSON.stringify(next));
+    } catch (e) {
+      console.error('Failed to persist project fields:', e);
+    }
+    return next;
+  });
+  const cur = get(currentProject);
+  if (cur?.id === projectId) {
+    const merged = { ...cur, ...patch, updated_at: now };
+    currentProject.set(merged);
+    try {
+      localStorage.setItem(CURRENT_PROJECT_KEY, JSON.stringify(merged));
+    } catch {
+      /* ignore */
+    }
+  }
+  if (patch.name !== undefined && String(patch.name).trim() !== '') {
+    syncProjectRootNodeTitle(projectId, String(patch.name).trim(), now);
+  }
+  markCloudWorkspaceDirty();
+  try {
+    window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'project-meta' } }));
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProjectRootNodeTitle(projectId: string, name: string, now: string): void {
+  const rid = `${projectId}-r`;
+  const touch = (list: Node[]): Node[] =>
+    list.map((n) => (n.id === rid ? { ...n, name, updated_at: now } : n));
+
+  const curProj = get(currentProject);
+  if (curProj?.id === projectId) {
+    nodes.update((list) => {
+      const updated = touch(list);
+      try {
+        localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(updated));
+      } catch (e) {
+        console.error('Failed to persist root title:', e);
+      }
+      return updated;
+    });
+    return;
+  }
+  try {
+    const raw = localStorage.getItem(NODES_KEY_PREFIX + projectId);
+    const list: Node[] = raw ? JSON.parse(raw) : [];
+    const updated = touch(Array.isArray(list) ? list : []);
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(updated));
+  } catch (e) {
+    console.error('syncProjectRootNodeTitle:', e);
+  }
+}
+
 /** 파일럿 캔버스에서 전체 노드 스냅샷 저장 (현재 프로젝트와 id 일치 시만) */
 export function persistNodesFromPilot(projectId: string, list: Node[]) {
   if (typeof window === 'undefined') return;
