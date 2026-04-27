@@ -6,6 +6,7 @@ import { writable } from 'svelte/store';
 import { selectProject, updateProjectMeta, upsertImportedPlannodeTreeV1 } from '$lib/stores/projects';
 import { isMissingRelationError, userFacingAclErrorFromSupabase } from '$lib/supabase/aclErrors';
 import { isPlatformMaster } from '$lib/supabase/platformMaster';
+import { MAX_SHARED_COLLABORATORS } from '$lib/plannodeCollabLimits';
 
 const TABLE = 'plannode_project_acl';
 
@@ -25,6 +26,27 @@ export async function countAclRows(projectId: string): Promise<number> {
   if (!isAclEnforced()) return 0;
   const q = () =>
     supabase.from(TABLE).select('id', { count: 'exact', head: true }).eq('project_id', projectId);
+  let { count, error } = await q();
+  if (error && isMissingRelationError(error)) {
+    await new Promise((r) => setTimeout(r, 700));
+    ({ count, error } = await q());
+  }
+  if (error) {
+    if (isMissingRelationError(error)) return -2;
+    return -1;
+  }
+  return count ?? 0;
+}
+
+/** 소유자 제외 멤버 행 개수. -2 = 테이블 없음, -1 = 기타 오류 */
+export async function countMemberAclRows(projectId: string): Promise<number> {
+  if (!isAclEnforced()) return 0;
+  const q = () =>
+    supabase
+      .from(TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('project_id', projectId)
+      .eq('is_owner', false);
   let { count, error } = await q();
   if (error && isMissingRelationError(error)) {
     await new Promise((r) => setTimeout(r, 700));
@@ -99,10 +121,6 @@ export async function fetchMyAclInviteSummaries(): Promise<{ rows: AclInviteSumm
   if (!email) return { rows: [], error: '로그인이 필요해.' };
   const em = normalizeAclEmail(email);
 
-  if (import.meta.env.DEV) {
-    console.info('[fetchMyAclInviteSummaries] query with email:', em);
-  }
-
   // 명시적으로 없는 컬럼을 select 하면 400 → '*' 는 «존재하는 컬럼만» 반환(옛·신 스키마 공통).
   const q = () => supabase.from(TABLE).select('*').eq('email', em);
 
@@ -124,10 +142,6 @@ export async function fetchMyAclInviteSummaries(): Promise<{ rows: AclInviteSumm
       ((r as { workspace_source_user_id?: string | null }).workspace_source_user_id as string | null) ?? null,
     is_owner: !!(r as { is_owner?: boolean }).is_owner
   }));
-
-  if (import.meta.env.DEV) {
-    console.info('[fetchMyAclInviteSummaries] found rows:', rows);
-  }
 
   return { rows: rows.filter((x) => x.project_id) };
 }
@@ -231,34 +245,40 @@ export async function autoLoadInvitedProjects(
 ): Promise<{
   loaded: number;
   skipped: number;
+  /** 이미 로컬 목록에 있는 project_id (자동 가져오기 불필요) */
+  skippedAlreadyLocal: number;
+  /** ACL에 workspace_source_user_id 없음 — 소유자가 멤버 행 복구·☁ 동기 필요할 수 있음 */
+  skippedNoWorkspaceSource: number;
   errors: Array<{ projectId: string; message: string }>;
 }> {
-  if (!isAclEnforced()) return { loaded: 0, skipped: 0, errors: [] };
+  const empty = { loaded: 0, skipped: 0, skippedAlreadyLocal: 0, skippedNoWorkspaceSource: 0, errors: [] as Array<{ projectId: string; message: string }> };
+  if (!isAclEnforced()) return empty;
 
   const { rows: acl, error: aclErr } = await fetchMyAclInviteSummaries();
-  if (aclErr || !acl.length) return { loaded: 0, skipped: 0, errors: [] };
+  if (aclErr || !acl.length) return empty;
 
   const localIds = new Set(localProjectIds || []);
 
   let loaded = 0;
-  let skipped = 0;
+  let skippedAlreadyLocal = 0;
+  let skippedNoWorkspaceSource = 0;
   const errors: Array<{ projectId: string; message: string }> = [];
 
   for (const inv of acl) {
     // 로컬에 이미 있으면 스킵
     if (localIds.has(inv.project_id)) {
-      skipped++;
+      skippedAlreadyLocal++;
       continue;
     }
 
     if (!inv.workspace_source_user_id) {
       if (import.meta.env.DEV) {
-        console.warn('[autoLoadInvitedProjects] skipping - no workspace_source_user_id:', {
+        console.warn('[autoLoadInvitedProjects] skipping — no workspace_source_user_id:', {
           projectId: inv.project_id,
           isOwner: inv.is_owner
         });
       }
-      skipped++;
+      skippedNoWorkspaceSource++;
       continue;
     }
 
@@ -281,7 +301,9 @@ export async function autoLoadInvitedProjects(
     }
   }
 
-  return { loaded, skipped, errors };
+  const skipped = skippedAlreadyLocal + skippedNoWorkspaceSource;
+
+  return { loaded, skipped, skippedAlreadyLocal, skippedNoWorkspaceSource, errors };
 }
 
 export async function fetchProjectAcl(projectId: string): Promise<{ rows: AclRow[]; error?: string }> {
@@ -622,7 +644,15 @@ export async function addAllowedEmail(
   if (!email || !email.includes('@')) return { ok: false, message: '올바른 이메일을 입력해줘.' };
   const uid = getAuthUserId();
   if (!uid) return { ok: false, message: '로그인이 필요해.' };
-  
+
+  const memberCount = await countMemberAclRows(projectId);
+  if (memberCount >= 0 && memberCount >= MAX_SHARED_COLLABORATORS) {
+    return {
+      ok: false,
+      message: `공유 멤버는 최대 ${MAX_SHARED_COLLABORATORS}명까지 등록할 수 있어. 불필요한 이메일을 제거한 뒤 다시 초대해줘.`
+    };
+  }
+
   /** 멤버 행의 워크스페이스 소스: 소유자가 추가할 때는 본인 uid(트리거가 소유자 행의 null을 복사하는 경우 방지). */
   let workspaceSourceUserId: string | undefined;
   if (await isPlatformMaster()) {
@@ -652,6 +682,13 @@ export async function addAllowedEmail(
   }
   if (error) {
     if (error.code === '23505') return { ok: false, message: '이미 등록된 이메일이야.' };
+    const em = String(error.message ?? '');
+    if (error.code === '23514' && /최대 5명|공유 멤버/.test(em)) {
+      return {
+        ok: false,
+        message: `공유 멤버는 최대 ${MAX_SHARED_COLLABORATORS}명까지 등록할 수 있어. 불필요한 이메일을 제거한 뒤 다시 초대해줘.`
+      };
+    }
     return { ok: false, message: userFacingAclErrorFromSupabase(error) };
   }
 

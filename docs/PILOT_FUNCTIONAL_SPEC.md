@@ -288,6 +288,7 @@ flowchart TD
 - [ ] `Shift/Ctrl+휠` 줌, 일반 휠 패닝, 빈 영역 드래그 패닝이 파일럿과 동일한가?
 - [ ] `addChild` 직후 편집 모달 자동 오픈 여부(제품 요구사항에 맞출지 결정)
 - [ ] PRD/Spec/AI 탭이 `nodes`·`curP` 변경 시 동기 갱신되는가?
+- [ ] 협업 경량 **버전 히스토리** 스냅샷 캡처(Presence·클라우드 반영 직전 등) 후에도 **루트 노드 1개**·**트리↔탭 동기**가 유지되는가? (`nodeSnapshotHistory`·`mergeWorkspaceBundleFromCloudRemote`)
 
 ---
 

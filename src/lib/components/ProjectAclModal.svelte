@@ -11,6 +11,7 @@
     repairProjectAclWorkspaceSources,
     type AclRow
   } from '$lib/supabase/projectAcl';
+  import { MAX_SHARED_COLLABORATORS } from '$lib/plannodeCollabLimits';
   import { getAuthUserId } from '$lib/stores/authSession';
   import { isAclReloadHelpMessage } from '$lib/supabase/aclErrors';
 
@@ -22,6 +23,9 @@
   let newEmail = '';
   let busy = false;
   let canManage = false;
+
+  $: memberCount = rows.filter((r) => !r.is_owner).length;
+  $: shareCapReached = memberCount >= MAX_SHARED_COLLABORATORS;
 
   async function refresh() {
     loadErr = '';
@@ -128,10 +132,14 @@
     {#if canManage && (rows.length > 0 || project.owner_user_id)}
       <div class="add">
         <span class="lb">이메일 등록</span>
+        <p class="cap-hint">멤버(소유자 제외)는 최대 {MAX_SHARED_COLLABORATORS}명까지 등록할 수 있어. 동시에 작업으로 표시되는 다른 계정도 이 범위 안에서만 보여.</p>
         <div class="row">
-          <input class="in" type="email" placeholder="동료@example.com" bind:value={newEmail} />
-          <button type="button" class="bcr sm" disabled={busy || !newEmail.trim()} on:click={() => void onAdd()}>추가</button>
+          <input class="in" type="email" placeholder="동료@example.com" bind:value={newEmail} disabled={shareCapReached} />
+          <button type="button" class="bcr sm" disabled={busy || !newEmail.trim() || shareCapReached} on:click={() => void onAdd()}>추가</button>
         </div>
+        {#if shareCapReached}
+          <p class="cap-warn">멤버 상한({MAX_SHARED_COLLABORATORS}명)에 도달했어. 새로 초대하려면 기존 멤버를 제거해줘.</p>
+        {/if}
       </div>
     {/if}
 
@@ -269,6 +277,18 @@
     font-size: 12px;
     font-weight: 600;
     margin-bottom: 6px;
+  }
+  .cap-hint {
+    margin: 0 0 8px;
+    font-size: 11px;
+    color: #666;
+    line-height: 1.45;
+  }
+  .cap-warn {
+    margin: 8px 0 0;
+    font-size: 11px;
+    color: #b45309;
+    line-height: 1.45;
   }
   .row {
     display: flex;

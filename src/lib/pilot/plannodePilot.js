@@ -16,6 +16,7 @@ import { getEffectiveBadgePool } from '$lib/ai/badgePoolConfig';
 import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
+import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
 import {
   unionNodeBoundsAndViewport,
   computeMinimapViewBox,
@@ -2031,8 +2032,10 @@ function cDel(id) {
         RD,
         () => {
           pushUndoSnapshot();
+          if (curP?.id) registerRecentlyDeletedNodeIdsForCloudMerge(curP.id, ids);
           nodes = nodes.filter((x) => !ids.includes(x.id));
           render();
+          flushPersistNow();
           toast('삭제됨(이 기기) · 클라우드 자동 반영');
         }
       ]

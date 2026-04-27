@@ -24,6 +24,12 @@ import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { isWorkspaceMissingOrCacheError, WORKSPACE_SETUP_MSG } from '$lib/supabase/aclErrors';
 import { markCloudWorkspaceSynced, markCloudWorkspaceFailed } from '$lib/stores/workspaceDirty';
 import { getAuthUserId } from '$lib/stores/authSession';
+import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
+import {
+  CLOUD_MERGE_SLICE_LOCK_TTL_SECONDS,
+  CLOUD_MERGE_SLICE_MAX_ATTEMPTS,
+  CLOUD_MERGE_SLICE_RETRY_BACKOFF_MS
+} from '$lib/plannodeCollabLimits';
 
 export { isSupabaseCloudConfigured };
 
@@ -95,30 +101,264 @@ function isWorkspaceUpsertRpcMissing(err: { message?: string; code?: string; det
   );
 }
 
+/** revision/락 RPC 미배포 시 조용히 생략 (docs/supabase/plannode_project_collab_revision_lock.sql) */
+function isCollabRevisionRpcMissing(err: { message?: string; code?: string; details?: string } | null): boolean {
+  if (!err) return false;
+  const m = (String(err.message ?? '') + ' ' + String(err.details ?? '')).toLowerCase();
+  const c = String(err.code ?? '');
+  return (
+    c === 'PGRST202' ||
+    c === 'PGRST301' ||
+    /\b404\b/.test(m) ||
+    m.includes('not found') ||
+    m.includes('could not find') ||
+    /plannode_project_collab_get_revision/i.test(String(err.message ?? '')) ||
+    /plannode_project_collab_try_acquire_lock/i.test(String(err.message ?? '')) ||
+    /plannode_project_collab_release_lock/i.test(String(err.message ?? ''))
+  );
+}
+
+function rpcBigintToNumber(data: unknown): number | null {
+  if (data == null) return null;
+  if (typeof data === 'number' && Number.isFinite(data)) return data;
+  if (typeof data === 'string') {
+    const n = Number(data);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 type UpsertBundleRpcResult = {
   ok?: boolean;
   reason?: string;
   server_updated_at?: string | null;
 };
 
+/** merge RPC와 동일한 키로 ACL 행이 SELECT RLS에 걸러져 보이는지 — 없으면 RPC 403만 반복되므로 호출 생략 */
+async function canPushMergeSliceForProject(projectId: string, workspaceUserId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('plannode_project_acl')
+    .select('id')
+    .eq('project_id', projectId)
+    .eq('workspace_source_user_id', workspaceUserId)
+    .limit(1);
+  if (error || !data?.length) return false;
+  return true;
+}
+
+const mergeSliceWarnAt = new Map<string, number>();
+const mergeSliceUserToastAt = new Map<string, number>();
+const mergeLockUserToastAt = new Map<string, number>();
+const mergeRevisionStaleToastAt = new Map<string, number>();
+const MERGE_SLICE_WARN_COOLDOWN_MS = 120_000;
+
+function collabErrorBlob(err: { message?: string; details?: string; code?: string } | null): string {
+  if (!err) return '';
+  return `${String(err.message ?? '')} ${String(err.details ?? '')} ${String(err.code ?? '')}`.toLowerCase();
+}
+
+function isMergeLockOrBusyError(err: { message?: string; details?: string } | null): boolean {
+  const s = collabErrorBlob(err);
+  return s.includes('merge_locked') || s.includes('locked_by_other');
+}
+
+function isRevisionStaleError(err: { message?: string; details?: string } | null): boolean {
+  return collabErrorBlob(err).includes('revision_stale');
+}
+
+function isForbiddenMergeError(err: { message?: string; details?: string; code?: string } | null): boolean {
+  const s = collabErrorBlob(err);
+  return s.includes('forbidden') || s.includes('42501') || s.includes('pgrst301');
+}
+
+function notifyMergeLockBusyToastThrottled(projectId: string, projectName: string | undefined): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  const prev = mergeLockUserToastAt.get(projectId) ?? 0;
+  if (now - prev < MERGE_SLICE_WARN_COOLDOWN_MS) return;
+  mergeLockUserToastAt.set(projectId, now);
+  const nm = projectName?.trim() ?? '';
+  const label = nm ? `「${nm.length > 40 ? `${nm.slice(0, 40)}…` : nm}」` : '이 공유 프로젝트';
+  try {
+    window.dispatchEvent(
+      new CustomEvent('plannode-pilot-toast', {
+        detail: {
+          message: `${label}: 다른 멤버가 동시에 올리는 중이야. 잠시 후 자동으로 다시 시도할게.`
+        }
+      })
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function notifyRevisionStaleSyncedToastThrottled(projectId: string, projectName: string | undefined): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  const prev = mergeRevisionStaleToastAt.get(projectId) ?? 0;
+  if (now - prev < MERGE_SLICE_WARN_COOLDOWN_MS) return;
+  mergeRevisionStaleToastAt.set(projectId, now);
+  const nm = projectName?.trim() ?? '';
+  const label = nm ? `「${nm.length > 40 ? `${nm.slice(0, 40)}…` : nm}」` : '공유 프로젝트';
+  try {
+    window.dispatchEvent(
+      new CustomEvent('plannode-pilot-toast', {
+        detail: {
+          message: `${label}: 소유자 쪽이 더 최신이어서 먼저 가져왔어. 화면 확인 후 필요하면 한 번 더 저장해줘.`
+        }
+      })
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function notifyMergeSliceFailureToastThrottled(
+  projectId: string,
+  projectName: string | undefined,
+  err: { message?: string; details?: string; code?: string } | null
+): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  const prev = mergeSliceUserToastAt.get(projectId) ?? 0;
+  if (now - prev < MERGE_SLICE_WARN_COOLDOWN_MS) return;
+  mergeSliceUserToastAt.set(projectId, now);
+  const nm = projectName?.trim() ?? '';
+  const label = nm ? `「${nm.length > 40 ? `${nm.slice(0, 40)}…` : nm}」` : '공유 프로젝트';
+  let message = `${label}: 클라우드에 반영하지 못했어. 연결을 확인하거나 잠시 후 다시 저장해줘.`;
+  if (isForbiddenMergeError(err)) {
+    message = `${label}: 편집 권한이 없거나 로그인이 만료됐을 수 있어. 다시 로그인한 뒤 시도해줘.`;
+  } else if (isRevisionStaleError(err)) {
+    message = `${label}: 서버 쪽이 더 앞서 있어. 잠시 후 다시 저장하거나, 목록에서 새로고침해줘.`;
+  } else {
+    const blob = collabErrorBlob(err);
+    if (blob.includes('pgrst202') || blob.includes('could not find') || blob.includes('function public.plannode_workspace_merge')) {
+      message = `${label}: 서버 함수가 아직 맞지 않아. docs/supabase/plannode_project_collab_revision_lock.sql 를 실행했는지 확인해줘.`;
+    }
+  }
+  try {
+    window.dispatchEvent(
+      new CustomEvent('plannode-pilot-toast', {
+        detail: { message }
+      })
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function warnMergeSliceThrottled(projectId: string, message: string): void {
+  if (!import.meta.env.DEV) return;
+  const now = Date.now();
+  const prev = mergeSliceWarnAt.get(projectId) ?? 0;
+  if (now - prev < MERGE_SLICE_WARN_COOLDOWN_MS) return;
+  mergeSliceWarnAt.set(projectId, now);
+  console.warn(
+    '[uploadWorkspaceToCloud] 소유자 워크스페이스에 공유 프로젝트 반영 실패(merge RPC·ACL):',
+    projectId,
+    message,
+    '→ Supabase에서 docs/supabase/plannode_project_collab_revision_lock.sql(또는 acl_jwt_fix) 실행·ACL workspace_source_user_id 확인.'
+  );
+}
+
 async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string): Promise<void> {
   for (const p of bundle.projects) {
     const src = p.cloud_workspace_source_user_id;
     if (!src || src === userId) continue;
-    const nodes = bundle.nodesByProject[p.id] ?? [];
-    const { cloud_workspace_source_user_id: _cw, ...meta } = p;
-    const { error: mErr } = await supabase.rpc('plannode_workspace_merge_project_slice', {
-      p_workspace_user_id: src,
-      p_project_id: p.id,
-      p_project: meta,
-      p_nodes: nodes
-    });
-    if (mErr && import.meta.env.DEV) {
-      console.warn(
-        '[uploadWorkspaceToCloud] 소유자 워크스페이스에 공유 프로젝트 반영 실패(merge RPC 미설치·RLS 등):',
-        p.id,
-        mErr.message
-      );
+    const can = await canPushMergeSliceForProject(p.id, src);
+    if (!can) continue;
+
+    let lastErr: { message?: string; details?: string; code?: string } | null = null;
+    let revisionStaleNotifiedThisPush = false;
+    for (let attempt = 0; attempt < CLOUD_MERGE_SLICE_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        const delay =
+          CLOUD_MERGE_SLICE_RETRY_BACKOFF_MS * attempt + Math.floor(Math.random() * 220);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+
+      const fresh = gatherWorkspaceBundle();
+      const proj = fresh.projects.find((x) => x.id === p.id);
+      if (!proj) break;
+      const nodes = fresh.nodesByProject[p.id] ?? [];
+      const { cloud_workspace_source_user_id: _cw, ...meta } = proj;
+
+      let baseRevision: number | null = null;
+      const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
+        p_workspace_user_id: src,
+        p_project_id: p.id
+      });
+      if (!revErr) {
+        const rn = rpcBigintToNumber(revData);
+        if (rn !== null) baseRevision = rn;
+      } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
+        console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
+      }
+
+      let lockHeld = false;
+      const { data: lockData, error: lockErr } = await supabase.rpc('plannode_project_collab_try_acquire_lock', {
+        p_workspace_user_id: src,
+        p_project_id: p.id,
+        p_ttl_seconds: CLOUD_MERGE_SLICE_LOCK_TTL_SECONDS
+      });
+      if (!lockErr && lockData && typeof lockData === 'object' && 'ok' in lockData) {
+        const ok = (lockData as { ok?: boolean }).ok === true;
+        const reason = String((lockData as { reason?: string }).reason ?? '');
+        if (ok) {
+          lockHeld = true;
+        } else if (reason === 'locked_by_other') {
+          notifyMergeLockBusyToastThrottled(p.id, proj.name);
+          lastErr = { message: 'merge_locked' };
+          continue;
+        }
+      } else if (lockErr && !isCollabRevisionRpcMissing(lockErr) && import.meta.env.DEV) {
+        console.warn('[pushProjectSlicesToOwners] plannode_project_collab_try_acquire_lock', lockErr.message);
+      }
+
+      try {
+        const { error: mErr } = await supabase.rpc('plannode_workspace_merge_project_slice', {
+          p_workspace_user_id: src,
+          p_project_id: p.id,
+          p_project: meta,
+          p_nodes: nodes,
+          p_base_revision: baseRevision
+        });
+        if (!mErr) {
+          lastErr = null;
+          break;
+        }
+        lastErr = mErr;
+        const msg = String(mErr.message ?? '');
+        const det = String((mErr as { details?: string }).details ?? '');
+        if (msg.includes('revision_stale') || det.includes('revision_stale')) {
+          await pullSharedProjectSlicesIfNewer();
+          if (!revisionStaleNotifiedThisPush) {
+            revisionStaleNotifiedThisPush = true;
+            notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
+          }
+          continue;
+        }
+        if (msg.includes('merge_locked') || det.includes('merge_locked')) {
+          notifyMergeLockBusyToastThrottled(p.id, proj.name);
+          continue;
+        }
+      } finally {
+        if (lockHeld) {
+          const { error: relErr } = await supabase.rpc('plannode_project_collab_release_lock', {
+            p_workspace_user_id: src,
+            p_project_id: p.id
+          });
+          if (relErr && !isCollabRevisionRpcMissing(relErr) && import.meta.env.DEV) {
+            console.warn('[pushProjectSlicesToOwners] plannode_project_collab_release_lock', relErr.message);
+          }
+        }
+      }
+    }
+    if (lastErr) {
+      warnMergeSliceThrottled(p.id, lastErr.message ?? '');
+      if (!isMergeLockOrBusyError(lastErr)) {
+        notifyMergeSliceFailureToastThrottled(p.id, p.name, lastErr);
+      }
     }
   }
 }
@@ -368,9 +608,12 @@ export async function pullSharedProjectSlicesIfNewer(): Promise<number> {
 
     const rTime = parseTs(slice.project.updated_at);
     const lTime = parseTs(local.updated_at);
+    /** 엄격히 초과할 때만 원격 슬라이스를 노드 LWW에 반영 — 같거나 로컬이 더 새면 로컬만 유지(소유자 merge 실패·옛 슬라이스) */
     const remoteMetaNewer = rTime > lTime;
     const localNodes = loadProjectNodesFromLocalStorage(local.id);
-    const mergedNodes = mergeNodeListsForCloud(localNodes, slice.nodes, remoteMetaNewer);
+    const mergedNodes = remoteMetaNewer
+      ? mergeNodeListsForCloud(localNodes, slice.nodes, true, local.id)
+      : localNodes;
     const mergedProject = remoteMetaNewer
       ? { ...slice.project, cloud_workspace_source_user_id: src }
       : { ...local, cloud_workspace_source_user_id: src };
@@ -389,6 +632,7 @@ export async function pullSharedProjectSlicesIfNewer(): Promise<number> {
 
     if (!nodesChanged && !metaChanged && !projectTsChanged) continue;
 
+    captureNodeSnapshot(local.id, localNodes, 'pre_pull');
     upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
       openAfter: false,
       markDirty: false,

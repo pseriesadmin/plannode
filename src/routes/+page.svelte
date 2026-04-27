@@ -4,6 +4,7 @@
   import {
     projects,
     currentProject,
+    nodes,
     activeView,
     showProjectModal,
     createProject,
@@ -13,6 +14,12 @@
     deleteProject,
     registerPendingWorkspaceDeletion
   } from '$lib/stores/projects';
+  import {
+    captureNodeSnapshot,
+    listNodeSnapshots,
+    summarizeNodeDiff,
+    type StoredNodeSnapshot
+  } from '$lib/stores/nodeSnapshotHistory';
   import { parsePlannodeTreeV1ImportText } from '$lib/plannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
   import { isSupabaseCloudConfigured } from '$lib/supabase/sync';
@@ -39,6 +46,7 @@
     subscribeProjectPresence,
     unsubscribeProjectPresence,
     projectPresencePeers,
+    projectPresencePeersOverflow,
     projectPresenceSelectedEmail,
     toggleProjectPresencePeerEmail
   } from '$lib/supabase/projectPresence';
@@ -72,6 +80,42 @@
 
   /** 프로젝트 관리 모달 안 — 표준 배지 풀(localStorage) */
   let showBadgePoolModal = false;
+
+  /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
+  let showSnapshotHistoryModal = false;
+  let snapshotListVersion = 0;
+  $: snapshotRows = (() => {
+    snapshotListVersion;
+    return $currentProject ? [...listNodeSnapshots($currentProject.id)].reverse() : [];
+  })();
+
+  function refreshSnapshotList() {
+    snapshotListVersion++;
+  }
+
+  function onManualNodeSnapshot() {
+    if (!$currentProject) return;
+    const ok = captureNodeSnapshot($currentProject.id, get(nodes), 'manual');
+    if (ok) {
+      refreshSnapshotList();
+      showPilotToast('지금 트리 상태를 히스토리에 남겼어.');
+    } else {
+      showPilotToast('히스토리 저장에 실패했어. 노드 수·용량을 줄이거나 잠시 후 다시 시도해줘.');
+    }
+  }
+
+  function snapshotDiffLine(s: StoredNodeSnapshot): string {
+    if (!$currentProject) return '—';
+    const cur = get(nodes);
+    const d = summarizeNodeDiff(s.nodes, cur);
+    return `추가 ${d.added} · 삭제 ${d.removed} · 변경 ${d.changed} (스냅샷 시점 대비 현재)`;
+  }
+
+  function formatSnapshotReason(r: StoredNodeSnapshot['reason']): string {
+    if (r === 'presence_peer') return '동시 접속';
+    if (r === 'pre_pull') return '클라우드 반영 직전';
+    return '수동';
+  }
 
   /** 프로젝트 모달: 다음 생성 시 적용할 배치만(파일럿 즉시 변경 안 함) */
   let nodeMapLayoutDefaultForCreate: 'right' | 'topdown' = 'right';
@@ -776,14 +820,19 @@
     lastAutoLoadTime = now;
 
     const localProjectIds = $projects.map((p) => p.id);
-    if (import.meta.env.DEV) {
-      console.info('[tryAutoLoadInvitedProjects] local projects:', localProjectIds, 'auth user:', $authUser?.email);
-    }
 
     const result = await autoLoadInvitedProjects(localProjectIds);
 
     if (import.meta.env.DEV) {
-      console.info('[tryAutoLoadInvitedProjects] result:', result);
+      console.info('[tryAutoLoadInvitedProjects]', {
+        localCount: localProjectIds.length,
+        email: $authUser?.email,
+        loaded: result.loaded,
+        skipped: result.skipped,
+        skippedAlreadyLocal: result.skippedAlreadyLocal,
+        skippedNoWorkspaceSource: result.skippedNoWorkspaceSource,
+        errors: result.errors.length
+      });
     }
 
     if (result.loaded > 0) {
@@ -795,9 +844,6 @@
         console.warn('[autoLoadInvitedProjects] errors:', errMsg);
       }
       showPilotToast(`프로젝트 불러오기 실패: ${errMsg}`);
-    }
-    if (result.skipped > 0) {
-      if (import.meta.env.DEV) console.info(`[autoLoadInvitedProjects] ${result.skipped}개는 로컬에 있거나 cloud source가 비어 있어 스킵됨.`);
     }
   }
 
@@ -850,7 +896,11 @@
           const { rows } = await fetchProjectAcl(atSubscribe);
           if (presenceProjectId !== atSubscribe) return;
           const emails = rows.map((r) => r.email).filter(Boolean);
-          await subscribeProjectPresence(atSubscribe, uid, email, emails);
+          const proj = get(currentProject);
+          const wsSrc = proj?.cloud_workspace_source_user_id ?? null;
+          /** 멤버 ACL 조회에 소유자 이메일이 없을 때도 Presence에 소유자 uid 표시 */
+          const presenceAlwaysShow = wsSrc && wsSrc !== uid ? [wsSrc] : [];
+          await subscribeProjectPresence(atSubscribe, uid, email, emails, presenceAlwaysShow);
         })();
       }
     } else if (presenceProjectId !== '') {
@@ -905,6 +955,18 @@
     };
     window.addEventListener('plannode-auto-cloud-sync', onExportSync);
 
+    const onPresencePeersJoined = (ev: Event) => {
+      const d = (ev as CustomEvent<{ projectId?: string }>).detail;
+      if (!d?.projectId) return;
+      const cp = get(currentProject);
+      if (!cp || cp.id !== d.projectId) return;
+      if (captureNodeSnapshot(cp.id, get(nodes), 'presence_peer')) {
+        refreshSnapshotList();
+        showPilotToast('다른 편집자가 접속했어. 지금 트리 상태를 버전 히스토리에 남겼어.');
+      }
+    };
+    window.addEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
+
     const onPilotToast = (ev: Event) => {
       const msg = (ev as CustomEvent<{ message?: string }>).detail?.message;
       if (msg) showPilotToast(msg);
@@ -941,6 +1003,7 @@
       window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
+      window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
       window.removeEventListener('plannode-pilot-toast', onPilotToast);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
@@ -1286,8 +1349,25 @@
                   >상위바꿈: 노드 1.5초 드래그 / + 1.5초 하위만</span
                 >
               </div>
+              {#if $currentProject}
+                <button
+                  type="button"
+                  class="cw-snapshot-hist-btn"
+                  title="로컬에 남긴 노드 트리 스냅샷 보기(비교 수치는 스냅샷 대비 현재)"
+                  on:click={() => {
+                    refreshSnapshotList();
+                    showSnapshotHistoryModal = true;
+                  }}
+                >
+                  히스토리
+                </button>
+              {/if}
               {#if cloudSyncAvailable && $currentProject}
-                <div class="cw-presence" role="group" aria-label="이 프로젝트에 동시 접속 중인 허용 계정">
+                <div
+                  class="cw-presence"
+                  role="group"
+                  aria-label="이 프로젝트에 동시 접속 중인 허용 계정(표시 최대 5명)"
+                >
                   {#each $projectPresencePeers as peer (peer.user_id)}
                     <button
                       type="button"
@@ -1300,6 +1380,11 @@
                       <span class="cw-presence-letter">{presenceAvatarLetter(peer.email)}</span>
                     </button>
                   {/each}
+                  {#if $projectPresencePeersOverflow > 0}
+                    <span class="cw-presence-overflow" title="동시 접속 표시 상한(5명)을 넘은 계정"
+                      >+{$projectPresencePeersOverflow}</span
+                    >
+                  {/if}
                   {#if $projectPresenceSelectedEmail}
                     <span class="cw-presence-email" title={$projectPresenceSelectedEmail}>{$projectPresenceSelectedEmail}</span>
                   {/if}
@@ -1557,6 +1642,36 @@
         on:close={() => (showBadgePoolModal = false)}
         on:saved={() => showPilotToast('표준 배지 풀을 저장했어. 노드 편집·가져오기에 바로 반영돼.')}
       />
+    {/if}
+
+    {#if showSnapshotHistoryModal && $currentProject}
+      <div class="mbg" role="presentation" on:click|self={() => (showSnapshotHistoryModal = false)}>
+        <div class="mo mo-wide snap-hist-modal" role="dialog" aria-modal="true" aria-labelledby="snap-hist-title">
+          <div class="pm-proj-head">
+            <h3 id="snap-hist-title" style="margin:0">버전 히스토리 (로컬)</h3>
+            <button type="button" class="mcl" on:click={() => (showSnapshotHistoryModal = false)}>✕</button>
+          </div>
+          <p class="snap-hist-hint">
+            공유 프로젝트에서 <strong>상대 작업</strong>이 클라우드로 반영되기 직전·또는 다른 편집자가 접속한 시점의 트리
+            복제입니다. 아래 수치는 <strong>그 스냅샷 대비 지금 화면</strong>의 차이(노드 id 기준)입니다.
+          </p>
+          <div class="snap-hist-actions">
+            <button type="button" class="bcr" on:click={onManualNodeSnapshot}>지금 상태 스냅샷 남기기</button>
+          </div>
+          <ul class="snap-hist-list">
+            {#each snapshotRows as s (s.id)}
+              <li class="snap-hist-item">
+                <div class="snap-hist-row-top">
+                  {new Date(s.at).toLocaleString()} · {formatSnapshotReason(s.reason)}
+                </div>
+                <div class="snap-hist-row-sub">{snapshotDiffLine(s)}</div>
+              </li>
+            {:else}
+              <li class="snap-hist-empty">아직 히스토리가 없어. 다른 편집자 접속이 감지되거나 위 버튼으로 남겨줘.</li>
+            {/each}
+          </ul>
+        </div>
+      </div>
     {/if}
 
     {#if $showProjectModal}
@@ -3475,6 +3590,67 @@
     border-radius: 6px;
     background: #fff;
     border: 1px solid #e8e4de;
+  }
+  .cw-presence-overflow {
+    font-size: 10px;
+    font-weight: 700;
+    color: #92400e;
+    padding: 2px 5px;
+    border-radius: 6px;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    flex-shrink: 0;
+  }
+  .cw-snapshot-hist-btn {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid #d5cfe8;
+    background: #faf9ff;
+    color: #4f3da8;
+    cursor: pointer;
+    line-height: 1.2;
+  }
+  .cw-snapshot-hist-btn:hover {
+    border-color: #9b8fd8;
+    background: #f0ecff;
+  }
+  .snap-hist-modal .snap-hist-hint {
+    font-size: 12px;
+    line-height: 1.45;
+    color: #555;
+    margin: 0 0 10px;
+  }
+  .snap-hist-actions {
+    margin-bottom: 12px;
+  }
+  .snap-hist-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: min(52vh, 420px);
+    overflow: auto;
+  }
+  .snap-hist-item {
+    padding: 10px 0;
+    border-bottom: 1px solid #ece8e2;
+  }
+  .snap-hist-row-top {
+    font-size: 12px;
+    font-weight: 600;
+    color: #333;
+  }
+  .snap-hist-row-sub {
+    font-size: 11px;
+    color: #666;
+    margin-top: 4px;
+  }
+  .snap-hist-empty {
+    font-size: 12px;
+    color: #888;
+    padding: 8px 0;
   }
   .zb {
     width: 20px;
