@@ -8,12 +8,11 @@ import {
   flattenBadgeSet,
   BADGE_COLORS,
   BADGE_LABELS,
-  DEV_BADGE_KEYS,
-  UX_BADGE_KEYS,
-  PRJ_BADGE_KEYS,
   getBadgeSetFromNodeInput,
-  formatBadgeTracksForDisplay
+  formatBadgeTracksForDisplay,
+  sanitizeNodeBadgesForTreeV1
 } from '$lib/ai/badgePromptInjector';
+import { getEffectiveBadgePool } from '$lib/ai/badgePoolConfig';
 import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
@@ -39,9 +38,10 @@ function baseChipBtn() {
 }
 function badgeClassForNode(b) {
   const k = String(b).toLowerCase();
-  if (['tdd', 'crud', 'api', 'auth', 'realtime', 'payment'].includes(k)) return 'bdev';
-  if (['navi', 'head', 'list', 'card', 'form', 'butt', 'modal', 'feed', 'dash', 'media'].includes(k)) return 'bux';
-  if (['usp', 'mvp', 'ai', 'i18n', 'mobile'].includes(k)) return 'bprj';
+  const pool = getEffectiveBadgePool();
+  if (pool.dev.some((x) => String(x).toLowerCase() === k)) return 'bdev';
+  if (pool.ux.some((x) => String(x).toLowerCase() === k)) return 'bux';
+  if (pool.prj.some((x) => String(x).toLowerCase() === k)) return 'bprj';
   return 'bggen';
 }
 function cloneBadgeSet(s) {
@@ -1291,20 +1291,25 @@ function buildPlannodeExportV1() {
         ...(curP.owner_user_id ? { owner_user_id: curP.owner_user_id } : {})
       }
     : null;
-  const nodeRows = nodes.map((n) => ({
-    id: n.id,
-    parent_id: n.parent_id ?? null,
-    name: n.name,
-    description: n.description ?? '',
-    num: n.num ?? '',
-    badges: Array.isArray(n.badges) ? [...n.badges] : [],
-    ...(n.metadata && typeof n.metadata === 'object'
-      ? { metadata: JSON.parse(JSON.stringify(n.metadata)) }
-      : {}),
-    node_type: n.node_type || 'detail',
-    mx: n.mx == null ? null : n.mx,
-    my: n.my == null ? null : n.my
-  }));
+  const nodeRows = nodes.map((n) => {
+    const s = sanitizeNodeBadgesForTreeV1(n);
+    const meta =
+      s.metadata && Object.keys(s.metadata).length > 0
+        ? JSON.parse(JSON.stringify(s.metadata))
+        : undefined;
+    return {
+      id: n.id,
+      parent_id: n.parent_id ?? null,
+      name: n.name,
+      description: n.description ?? '',
+      num: n.num ?? '',
+      badges: s.badges,
+      ...(meta ? { metadata: meta } : {}),
+      node_type: n.node_type || 'detail',
+      mx: n.mx == null ? null : n.mx,
+      my: n.my == null ? null : n.my
+    };
+  });
   return {
     format: 'plannode.tree',
     version: 1,
@@ -1734,16 +1739,18 @@ function cDel(id) {
 
 function showEdit(n) {
   const working = cloneBadgeSet(getBadgeSetFromNode(n));
+  const pool = getEffectiveBadgePool();
+  const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
   const bh = [
-    buildTrackChipsHtml('dev', '🟣 개발 (DEV)', [...DEV_BADGE_KEYS], working),
-    buildTrackChipsHtml('ux', '🔵 화면 (UX)', [...UX_BADGE_KEYS], working),
-    buildTrackChipsHtml('prj', '🟢 기획 (PRJ)', [...PRJ_BADGE_KEYS], working)
+    buildTrackChipsHtml('dev', '🟣 개발 (DEV)', [...pool.dev], working),
+    buildTrackChipsHtml('ux', '🔵 화면 (UX)', [...pool.ux], working),
+    buildTrackChipsHtml('prj', '🟢 기획 (PRJ)', [...pool.prj], working)
   ].join('');
   showIM(
     `<input class="fi ein" type="text" value="${esc(n.name)}" placeholder="${esc('노드 이름 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off">
     <textarea class="fi eid" rows="2" placeholder="${esc('노드 설명 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;resize:vertical;margin-bottom:10px" autocomplete="off">${esc(n.description || '')}</textarea>
     <input class="fi einum" type="text" value="${esc(String(n.num ?? '').slice(0, 10))}" placeholder="${esc('분류 기호 및 번호 입력')}" maxlength="10" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off" title="최대 10자(영·숫자·한글)">
-    <label class="fl">배지 (21 · 3트랙)</label><div style="max-height:min(52vh,420px);overflow-y:auto;padding-right:4px;margin-top:4px">${bh}</div>`,
+    <label class="fl">배지 (${nPool} · 3트랙)</label><div style="max-height:min(52vh,420px);overflow-y:auto;padding-right:4px;margin-top:4px">${bh}</div>`,
     [
       ['취소', GY, null],
       [
@@ -1875,6 +1882,7 @@ function showIM(html, btns, extra, onClose) {
 function showCtx(e, n) {
   if (!CTX) return;
   const bset = getBadgeSetFromNode(n);
+  const pool = getEffectiveBadgePool();
   const ctxTrack = (track, title, keys) =>
     `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">${title}</div>` +
     keys
@@ -1885,13 +1893,14 @@ function showCtx(e, n) {
           }  ${k}</div>`
       )
       .join('');
+  const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
   CTX.innerHTML = `
     <div class="cx" data-a="edit" data-id="${n.id}">✎  이름·설명 편집</div>
     <div class="cx" data-a="add" data-id="${n.id}">+  하위 노드 추가</div>
-    <div class="cxsp"></div><div class="cxsc">배지 (3트랙 · 21)</div>
-    ${ctxTrack('dev', 'DEV', [...DEV_BADGE_KEYS])}
-    ${ctxTrack('ux', 'UX', [...UX_BADGE_KEYS])}
-    ${ctxTrack('prj', 'PRJ', [...PRJ_BADGE_KEYS])}
+    <div class="cxsp"></div><div class="cxsc">배지 (3트랙 · ${nPool})</div>
+    ${ctxTrack('dev', 'DEV', [...pool.dev])}
+    ${ctxTrack('ux', 'UX', [...pool.ux])}
+    ${ctxTrack('prj', 'PRJ', [...pool.prj])}
     <div class="cxsp"></div>
     <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>
     ${n.parent_id ? `<div class="cxsp"></div><div class="cx dng" data-a="del" data-id="${n.id}">✕  삭제</div>` : ''}`;

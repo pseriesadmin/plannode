@@ -11,7 +11,7 @@
     updateProjectMeta,
     deleteProject
   } from '$lib/stores/projects';
-  import { parsePlannodeTreeV1Json } from '$lib/plannodeTreeV1';
+  import { parsePlannodeTreeV1ImportText } from '$lib/plannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
   import { isSupabaseCloudConfigured } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
@@ -42,6 +42,7 @@
   } from '$lib/supabase/projectPresence';
   import { getAuthUserId, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
+  import StandardBadgePoolModal from '$lib/components/StandardBadgePoolModal.svelte';
   import IAExportMenu from '$lib/components/IAExportMenu.svelte';
   import IAGridSheet from '$lib/components/IAGridSheet.svelte';
   import {
@@ -65,6 +66,9 @@
   let projectStart = '';
   let projectEnd = '';
   let projectDesc = '';
+
+  /** 프로젝트 관리 모달 안 — 표준 배지 풀(localStorage) */
+  let showBadgePoolModal = false;
 
   let pilotReady = false;
   let jsonImportInput: HTMLInputElement;
@@ -269,7 +273,7 @@
     input.value = '';
     if (!file) return;
     const text = await file.text();
-    const parsed = parsePlannodeTreeV1Json(text);
+    const parsed = parsePlannodeTreeV1ImportText(text);
     if (!parsed.ok) {
       showPilotToast(parsed.message);
       return;
@@ -1290,6 +1294,13 @@
       </div>
     {/if}
 
+    {#if showBadgePoolModal}
+      <StandardBadgePoolModal
+        on:close={() => (showBadgePoolModal = false)}
+        on:saved={() => showPilotToast('표준 배지 풀을 저장했어. 노드 편집·가져오기에 바로 반영돼.')}
+      />
+    {/if}
+
     {#if $showProjectModal}
       <div class="mbg" role="presentation" on:click|self={closeModal}>
         <div class="mo mo-wide pm-scroll pm-proj-shell">
@@ -1339,12 +1350,20 @@
               placeholder="설명"
               aria-label="설명"
             ></textarea>
+            <button
+              type="button"
+              class="bcr bcr-outline"
+              id="BBS"
+              on:click={() => (showBadgePoolModal = true)}
+            >
+              표준 배지 설정
+            </button>
             <button type="button" class="bcr" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
             <div class="proj-json-import">
               <input
                 bind:this={jsonImportInput}
                 type="file"
-                accept="application/json,.json"
+                accept="application/json,.json,text/markdown,.md"
                 class="json-import-input"
                 aria-hidden="true"
                 tabindex="-1"
@@ -1354,7 +1373,7 @@
                 type="button"
                 id="BJI"
                 class="proj-json-import-btn"
-                title="plannode.tree v1 JSON 파일 가져오기"
+                title="plannode.tree v1 — .json 전체 또는 .md(펜스된 json 블록)"
                 on:click={triggerJsonImport}
               >
                 가져오기
@@ -3891,6 +3910,17 @@
     font-weight: 700;
     cursor: pointer;
     outline: none;
+  }
+
+  .bcr-outline {
+    margin-bottom: 8px;
+    background: #f8f7ff;
+    color: #4c1d95;
+    border: 1.5px solid #c4b5fd;
+  }
+
+  .bcr-outline:hover {
+    background: #ede9fe;
   }
 
   .bcr:focus,

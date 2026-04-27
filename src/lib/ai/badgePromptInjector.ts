@@ -4,7 +4,20 @@
  * - 배지별 문서 출력 조건 정의
  */
 
-import type { BadgeSet, DevBadge, UxBadge, PrjBadge, NodeMetadata } from './types';
+import type { BadgeSet, NodeMetadata } from './types';
+import {
+  DEFAULT_DEV_KEYS,
+  DEFAULT_UX_KEYS,
+  DEFAULT_PRJ_KEYS,
+  getEffectiveBadgePool,
+  poolToSets,
+  resolveLegacyTokenToTrack,
+} from './badgePoolConfig';
+
+/** UI·문서 순회용 기본 키(고정 순서). 런타임 허용 풀은 `getEffectiveBadgePool()`. */
+export const DEV_BADGE_KEYS = DEFAULT_DEV_KEYS;
+export const UX_BADGE_KEYS = DEFAULT_UX_KEYS;
+export const PRJ_BADGE_KEYS = DEFAULT_PRJ_KEYS;
 
 /**
  * 배지별 프롬프트 조각 정의
@@ -161,29 +174,6 @@ PRD에 반드시 포함:
 - 가상 키보드 올라올 때 레이아웃 처리`,
 };
 
-/** UI·파일럿에서 트랙별 21개 배지 키 순회용 (총 6+10+5) */
-export const DEV_BADGE_KEYS = [
-  'TDD',
-  'CRUD',
-  'API',
-  'AUTH',
-  'REALTIME',
-  'PAYMENT',
-] as const;
-export const UX_BADGE_KEYS = [
-  'NAVI',
-  'HEAD',
-  'LIST',
-  'CARD',
-  'FORM',
-  'BUTT',
-  'MODAL',
-  'FEED',
-  'DASH',
-  'MEDIA',
-] as const;
-export const PRJ_BADGE_KEYS = ['USP', 'MVP', 'AI', 'I18N', 'MOBILE'] as const;
-
 /**
  * 배지별 라벨 (UI 표시용)
  */
@@ -286,46 +276,14 @@ export function migrateLegacyBadgesToSet(legacyBadges: string[]): BadgeSet {
     return badgeSet;
   }
 
-  const devBadgesMap: Record<string, DevBadge> = {
-    tdd: 'TDD',
-    crud: 'CRUD',
-    api: 'API',
-    auth: 'AUTH',
-    realtime: 'REALTIME',
-    payment: 'PAYMENT',
-  };
-
-  const uxBadgesMap: Record<string, UxBadge> = {
-    navi: 'NAVI',
-    head: 'HEAD',
-    list: 'LIST',
-    card: 'CARD',
-    form: 'FORM',
-    butt: 'BUTT',
-    modal: 'MODAL',
-    feed: 'FEED',
-    dash: 'DASH',
-    media: 'MEDIA',
-  };
-
-  const prjBadgesMap: Record<string, PrjBadge> = {
-    usp: 'USP',
-    mvp: 'MVP',
-    ai: 'AI',
-    i18n: 'I18N',
-    mobile: 'MOBILE',
-  };
+  const pool = getEffectiveBadgePool();
 
   for (const badge of legacyBadges) {
-    const lower = badge.toLowerCase();
-
-    if (lower in devBadgesMap) {
-      badgeSet.dev.push(devBadgesMap[lower]);
-    } else if (lower in uxBadgesMap) {
-      badgeSet.ux.push(uxBadgesMap[lower]);
-    } else if (lower in prjBadgesMap) {
-      badgeSet.prj.push(prjBadgesMap[lower]);
-    }
+    const lower = String(badge).toLowerCase();
+    const hit = resolveLegacyTokenToTrack(pool, lower);
+    if (!hit) continue;
+    const arr = badgeSet[hit.track];
+    if (!arr.includes(hit.upper)) arr.push(hit.upper);
   }
 
   return badgeSet;
@@ -356,6 +314,54 @@ export function getBadgeSetFromNodeInput(n: {
     return { dev: [...mb.dev], ux: [...mb.ux], prj: [...mb.prj] };
   }
   return migrateLegacyBadgesToSet(n.badges || []);
+}
+
+function uniqUpperStrings(arr: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of arr) {
+    const u = String(x).trim().toUpperCase();
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+}
+
+/**
+ * 3트랙 배지를 **현재 표준 풀**(기본 21개 + 사용자 설정)만 남기고 중복·대소문자 변형 제거.
+ * 외부 JSON·CRAZYSHOT류 임의 토큰은 제거(다른 metadata 키는 건드리지 않음).
+ */
+export function filterBadgeSetToCanonicalPool(set: BadgeSet): BadgeSet {
+  const { dev: devS, ux: uxS, prj: prjS } = poolToSets(getEffectiveBadgePool());
+  const dev = uniqUpperStrings(set.dev.map((k) => String(k).trim().toUpperCase()).filter((k) => devS.has(k)));
+  const ux = uniqUpperStrings(set.ux.map((k) => String(k).trim().toUpperCase()).filter((k) => uxS.has(k)));
+  const prj = uniqUpperStrings(set.prj.map((k) => String(k).trim().toUpperCase()).filter((k) => prjS.has(k)));
+  return { dev, ux, prj };
+}
+
+/**
+ * `plannode.tree` v1 입·출력용: 노드의 배지를 **현재 표준 풀**로 정리하고 `badges`(소문자 평면)와 `metadata.badges`를 맞춤.
+ * `functionalSpec`·`iaGrid`·`tech` 등 나머지 metadata는 유지.
+ */
+export function sanitizeNodeBadgesForTreeV1(n: {
+  badges?: string[];
+  metadata?: NodeMetadata | null;
+}): { badges: string[]; metadata?: NodeMetadata } {
+  const set = filterBadgeSetToCanonicalPool(getBadgeSetFromNodeInput(n));
+  const badges = flattenBadgeSet(set);
+  const base: NodeMetadata =
+    n.metadata && typeof n.metadata === 'object' && !Array.isArray(n.metadata)
+      ? { ...(n.metadata as NodeMetadata) }
+      : {};
+  delete base.badges;
+  if (set.dev.length + set.ux.length + set.prj.length > 0) {
+    base.badges = set;
+  }
+  return {
+    badges,
+    metadata: Object.keys(base).length > 0 ? base : undefined
+  };
 }
 
 /** PRD·트리 한 줄에 쓰는 DEV | UX | PRJ 표기 */

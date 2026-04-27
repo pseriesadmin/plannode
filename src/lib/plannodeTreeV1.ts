@@ -1,4 +1,6 @@
 import type { Node, Project } from '$lib/supabase/client';
+import type { NodeMetadata } from '$lib/ai/types';
+import { sanitizeNodeBadgesForTreeV1 } from '$lib/ai/badgePromptInjector';
 
 type RawNodeRow = {
   id?: unknown;
@@ -28,6 +30,56 @@ function computeDepth(
 export type ParsePlannodeTreeV1Result =
   | { ok: true; project: Project; nodes: Node[] }
   | { ok: false; message: string };
+
+/**
+ * Markdown 이식 스펙 (가져오기):
+ * - 파일 전체가 plannode.tree v1 JSON이면 그대로 파싱.
+ * - 아니면 ``` 로 감싼 펜스 블록을 위에서부터 스캔해, 본문을 `parsePlannodeTreeV1Json`에 넘겨
+ *   첫 성공 결과를 사용. `lang`이 `json` / `JSON` 인 블록을 먼저 시도한 뒤 나머지 순서.
+ */
+function collectMarkdownFenceBodies(md: string): { lang: string; body: string }[] {
+  const out: { lang: string; body: string }[] = [];
+  const re = /```([^\r\n]*)\r?\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) {
+    const lang = String(m[1] ?? '').trim();
+    const body = String(m[2] ?? '').trim();
+    if (body) out.push({ lang, body });
+  }
+  return out;
+}
+
+function parsePlannodeTreeV1FromFenceBodies(
+  blocks: { lang: string; body: string }[]
+): ParsePlannodeTreeV1Result {
+  const langKey = (s: string) => s.trim().toLowerCase();
+  const jsonish = new Set(['json', 'javascript', 'js']);
+  const primary = blocks.filter((b) => jsonish.has(langKey(b.lang)));
+  const secondary = blocks.filter((b) => !jsonish.has(langKey(b.lang)));
+  const lastErrors: string[] = [];
+  for (const b of [...primary, ...secondary]) {
+    const r = parsePlannodeTreeV1Json(b.body);
+    if (r.ok) return r;
+    lastErrors.push(r.message);
+  }
+  if (!blocks.length) {
+    return {
+      ok: false,
+      message:
+        '마크다운 안에 ```json … ``` 펜스 블록으로 plannode.tree v1 JSON을 넣어줘. (또는 .json처럼 파일 전체를 JSON만으로 저장)'
+    };
+  }
+  const tail = lastErrors.length ? ` 마지막 오류: ${lastErrors[lastErrors.length - 1]}` : '';
+  return { ok: false, message: `펜스 블록에서 유효한 plannode.tree v1을 찾지 못했어.${tail}` };
+}
+
+/** .json 전체 또는 .md(펜스 내 JSON) 가져오기 공통 진입점 */
+export function parsePlannodeTreeV1ImportText(text: string): ParsePlannodeTreeV1Result {
+  const trimmed = text.trim();
+  const direct = parsePlannodeTreeV1Json(trimmed);
+  if (direct.ok) return direct;
+  return parsePlannodeTreeV1FromFenceBodies(collectMarkdownFenceBodies(text));
+}
 
 /** NEXT-2 `buildPlannodeExportV1` 산출물 역방향 검증·정규화 */
 export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result {
@@ -102,8 +154,12 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
     const parentRaw =
       p === null || p === undefined || p === '' ? null : String(p).trim() || null;
     const parent_id = parentRaw ?? undefined;
-    const badges = Array.isArray(row.badges) ? (row.badges as string[]).map(String) : [];
-    const metadata = row.metadata != null && typeof row.metadata === 'object' ? (row.metadata as unknown) : undefined;
+    const rawBadges = Array.isArray(row.badges) ? (row.badges as string[]).map(String) : [];
+    const rawMeta =
+      row.metadata != null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+        ? (row.metadata as NodeMetadata)
+        : undefined;
+    const san = sanitizeNodeBadgesForTreeV1({ badges: rawBadges, metadata: rawMeta });
     const mxRaw = row.mx;
     const myRaw = row.my;
     const mx =
@@ -120,8 +176,8 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
       name: String(row.name ?? '').trim() || '—',
       description: row.description != null ? String(row.description) : '',
       num: row.num != null ? String(row.num) : '',
-      badges,
-      metadata,
+      badges: san.badges,
+      metadata: san.metadata,
       node_type: row.node_type != null ? String(row.node_type) : 'detail',
       mx: Number.isFinite(mx) ? mx : undefined,
       my: Number.isFinite(my) ? my : undefined,

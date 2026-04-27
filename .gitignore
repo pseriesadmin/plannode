@@ -1,4 +1,8 @@
 node_modules/
+# SvelteKit 빌드·생성 산출물(로컬 전용, 커밋하지 않음)
+.svelte-kit/
+# Cursor 에디터·에이전트용(규칙·플랜·하네스 로그 등, 앱 빌드와 무관)
+.cursor/
 # 환경 변수(비밀·로컬 전용) — 예시만 커밋: .env.example
 .env
 .env.*
