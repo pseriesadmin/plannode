@@ -185,6 +185,11 @@ let scale = 0.85,
   ps = { x: 0, y: 0 },
   /** #CW 배경 팬·Shift 범위 선택 중인 포인터 (터치/펜과 마우스 구분) */
   activeCwPointerId = null,
+  /** 빈 캔버스(#CW/#CV/#EG)에서 추적 중인 포인터 — 터치 핀치 줌·좌표 갱신 */
+  cwGesturePointers = new Map(),
+  pinchActive = false,
+  pinchStartDist = 1,
+  pinchStartScale = 1,
   selId = null,
   /** Shift+클릭으로 묶인 다중 선택(그룹 이동). 영속 필드 아님. */
   multiSel = new Set(),
@@ -1726,7 +1731,8 @@ function render() {
       }
     }
     nd.addEventListener('pointerdown', (e) => {
-      if (!e.isPrimary || e.button !== 0) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (!e.isPrimary) return;
       if (e.target.closest('button')) return;
       if (e.pointerType === 'touch') touchCtxMaybeStart(e, n);
       else touchCtxClearAll();
@@ -2744,30 +2750,83 @@ export function initPlannode(opts = {}) {
   });
 
   const onCwDown = (e) => {
-    if (!e.isPrimary || e.button !== 0) return;
-    if (e.target === CW || e.target === CV || e.target === EG) {
-      activeCwPointerId = e.pointerId;
-      try {
-        e.preventDefault();
-      } catch (_) {}
-      // Shift 누름 상태: 범위 선택 모드 시작
-      if (e.shiftKey && e.button === 0) {
-        const g = cwClientToGraph(e.clientX, e.clientY);
-        selectionBox = { x0: g.gx, y0: g.gy, x: g.gx, y: g.gy };
-        return;
-      }
+    const bg = e.target === CW || e.target === CV || e.target === EG;
+    if (!bg) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    // 두 번째 손가락(멀티터치): isPrimary가 false — 첫 손가락이 이미 캔버스에 있을 때만 허용
+    if (!e.isPrimary && cwGesturePointers.size === 0) return;
 
-      // Shift 없음: 팬 활성화 + 그룹 선택 해제 (§4.0.1 재연결 모드는 Esc·드롭으로만 종료)
-      if (e.button === 0) {
-        multiSel.clear();
-        render();
-      }
-      panning = true;
-      ps = { x: e.clientX, y: e.clientY };
-      CW.style.cursor = 'grabbing';
+    try {
+      e.preventDefault();
+    } catch (_) {}
+
+    cwGesturePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (cwGesturePointers.size >= 2) {
+      const pts = [...cwGesturePointers.values()];
+      pinchStartDist = Math.max(
+        24,
+        Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
+      );
+      pinchStartScale = scale;
+      pinchActive = true;
+      panning = false;
+      activeCwPointerId = null;
+      selectionBox = null;
+      CW.style.cursor = 'default';
+      try {
+        CW.setPointerCapture(e.pointerId);
+      } catch (_) {}
+      return;
     }
+
+    if (!e.isPrimary) return;
+
+    activeCwPointerId = e.pointerId;
+    try {
+      CW.setPointerCapture(e.pointerId);
+    } catch (_) {}
+
+    // Shift 누름 상태: 범위 선택 모드 시작
+    if (e.shiftKey && (e.pointerType !== 'mouse' || e.button === 0)) {
+      const g = cwClientToGraph(e.clientX, e.clientY);
+      selectionBox = { x0: g.gx, y0: g.gy, x: g.gx, y: g.gy };
+      return;
+    }
+
+    // Shift 없음: 팬 활성화 + 그룹 선택 해제 (§4.0.1 재연결 모드는 Esc·드롭으로만 종료)
+    if (e.pointerType !== 'mouse' || e.button === 0) {
+      multiSel.clear();
+      render();
+    }
+    panning = true;
+    ps = { x: e.clientX, y: e.clientY };
+    CW.style.cursor = 'grabbing';
   };
   const onPanMove = (e) => {
+    if (cwGesturePointers.has(e.pointerId)) {
+      cwGesturePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    if (pinchActive && cwGesturePointers.size >= 2) {
+      const ids = [...cwGesturePointers.keys()];
+      const p0 = cwGesturePointers.get(ids[0]);
+      const p1 = cwGesturePointers.get(ids[1]);
+      if (p0 && p1) {
+        const dist = Math.max(24, Math.hypot(p0.x - p1.x, p0.y - p1.y));
+        const next = Math.min(Math.max(pinchStartScale * (dist / pinchStartDist), 0.12), 3);
+        const r = CW.getBoundingClientRect();
+        const mx = (p0.x + p1.x) / 2 - r.left;
+        const my = (p0.y + p1.y) / 2 - r.top;
+        const z = next / scale;
+        panX = mx - (mx - panX) * z;
+        panY = my - (my - panY) * z;
+        scale = next;
+        applyTx();
+      }
+      return;
+    }
+
     if (activeCwPointerId != null && e.pointerId !== activeCwPointerId) return;
     if (selectionBox) {
       // Shift+드래그: 선택 박스 업데이트
@@ -2784,6 +2843,28 @@ export function initPlannode(opts = {}) {
     applyTx();
   };
   const onPanUp = (e) => {
+    const pid = e.pointerId;
+
+    if (cwGesturePointers.has(pid)) {
+      cwGesturePointers.delete(pid);
+      try {
+        if (typeof CW.hasPointerCapture !== 'function' || CW.hasPointerCapture(pid)) {
+          CW.releasePointerCapture(pid);
+        }
+      } catch (_) {}
+    }
+
+    if (pinchActive && cwGesturePointers.size < 2) {
+      pinchActive = false;
+      if (cwGesturePointers.size === 1) {
+        const rem = [...cwGesturePointers.entries()][0];
+        activeCwPointerId = rem[0];
+        panning = true;
+        ps = { x: rem[1].x, y: rem[1].y };
+      }
+      return;
+    }
+
     if (activeCwPointerId == null) return;
     if (e && 'pointerId' in e && e.pointerId !== activeCwPointerId) return;
     if (selectionBox) {
@@ -2836,6 +2917,10 @@ export function initPlannode(opts = {}) {
 
   CW.addEventListener('pointerdown', onCwDown);
   disposers.push(() => CW.removeEventListener('pointerdown', onCwDown));
+  disposers.push(() => {
+    cwGesturePointers.clear();
+    pinchActive = false;
+  });
   document.addEventListener('pointermove', onPanMove);
   disposers.push(() => document.removeEventListener('pointermove', onPanMove));
   document.addEventListener('pointerup', onPanUp);
@@ -2850,7 +2935,8 @@ export function initPlannode(opts = {}) {
     mmc.title = '클릭: 해당 위치를 캔버스 중앙으로 이동';
     mmc.style.cursor = 'pointer';
     const onMiniMapClick = (e) => {
-      if (!nodes.length || e.button !== 0) return;
+      if (!nodes.length) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
       const g = graphFromMiniMapClient(e.clientX, e.clientY);
       if (!g) return;
       e.preventDefault();

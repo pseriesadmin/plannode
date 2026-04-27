@@ -1699,16 +1699,16 @@
               placeholder="작성자 *"
               aria-label="작성자"
             />
-            <div class="fg">
+            <div class="fg fg-dates">
               <input
-                class="fi"
+                class="fi proj-date-input"
                 type="date"
                 bind:value={projectStart}
                 placeholder="시작일"
                 aria-label="시작일"
               />
               <input
-                class="fi"
+                class="fi proj-date-input"
                 type="date"
                 bind:value={projectEnd}
                 placeholder="종료일"
@@ -4484,6 +4484,20 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 10px;
+  }
+
+  /** 모바일: 한 줄 전체 폭 · 터치 타깃 ≥44px · iOS 입력 포커스 시 줌 방지(font≥16px) */
+  @media (max-width: 560px) {
+    .fg-dates {
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    :global(.proj-form-col input.proj-date-input[type='date']) {
+      min-height: 44px;
+      font-size: 16px;
+      box-sizing: border-box;
+    }
   }
 
   .bcr {
