@@ -4,14 +4,23 @@
   import {
     projects,
     currentProject,
+    nodes,
     activeView,
     showProjectModal,
     createProject,
     upsertImportedPlannodeTreeV1,
     updateProjectMeta,
-    deleteProject
+    updateProjectFields,
+    deleteProject,
+    registerPendingWorkspaceDeletion
   } from '$lib/stores/projects';
-  import { parsePlannodeTreeV1Json } from '$lib/plannodeTreeV1';
+  import {
+    captureNodeSnapshot,
+    listNodeSnapshots,
+    summarizeNodeDiff,
+    type StoredNodeSnapshot
+  } from '$lib/stores/nodeSnapshotHistory';
+  import { parsePlannodeTreeV1ImportText } from '$lib/plannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
   import { isSupabaseCloudConfigured } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
@@ -37,11 +46,13 @@
     subscribeProjectPresence,
     unsubscribeProjectPresence,
     projectPresencePeers,
+    projectPresencePeersOverflow,
     projectPresenceSelectedEmail,
     toggleProjectPresencePeerEmail
   } from '$lib/supabase/projectPresence';
   import { getAuthUserId, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
+  import StandardBadgePoolModal from '$lib/components/StandardBadgePoolModal.svelte';
   import IAExportMenu from '$lib/components/IAExportMenu.svelte';
   import IAGridSheet from '$lib/components/IAGridSheet.svelte';
   import {
@@ -50,7 +61,8 @@
     pilotExportSpecSheetCsv,
     pilotFlushPersistNow,
     pilotHasPendingGridPersist,
-    dismissPilotRelinkGuide
+    dismissPilotRelinkGuide,
+    pilotSetNodeMapLayout
   } from '$lib/pilot/pilotBridge';
   import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
   import type { IAExportIntent } from '$lib/ai/iaExportRunner';
@@ -66,13 +78,87 @@
   let projectEnd = '';
   let projectDesc = '';
 
+  /** 프로젝트 관리 모달 안 — 표준 배지 풀(localStorage) */
+  let showBadgePoolModal = false;
+
+  /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
+  let showSnapshotHistoryModal = false;
+  let snapshotListVersion = 0;
+  $: snapshotRows = (() => {
+    snapshotListVersion;
+    return $currentProject ? [...listNodeSnapshots($currentProject.id)].reverse() : [];
+  })();
+
+  function refreshSnapshotList() {
+    snapshotListVersion++;
+  }
+
+  function onManualNodeSnapshot() {
+    if (!$currentProject) return;
+    const ok = captureNodeSnapshot($currentProject.id, get(nodes), 'manual');
+    if (ok) {
+      refreshSnapshotList();
+      showPilotToast('지금 트리 상태를 히스토리에 남겼어.');
+    } else {
+      showPilotToast('히스토리 저장에 실패했어. 노드 수·용량을 줄이거나 잠시 후 다시 시도해줘.');
+    }
+  }
+
+  function snapshotDiffLine(s: StoredNodeSnapshot): string {
+    if (!$currentProject) return '—';
+    const cur = get(nodes);
+    const d = summarizeNodeDiff(s.nodes, cur);
+    return `추가 ${d.added} · 삭제 ${d.removed} · 변경 ${d.changed} (스냅샷 시점 대비 현재)`;
+  }
+
+  function formatSnapshotReason(r: StoredNodeSnapshot['reason']): string {
+    if (r === 'presence_peer') return '동시 접속';
+    if (r === 'pre_pull') return '클라우드 반영 직전';
+    return '수동';
+  }
+
+  /** 프로젝트 모달: 다음 생성 시 적용할 배치만(파일럿 즉시 변경 안 함) */
+  let nodeMapLayoutDefaultForCreate: 'right' | 'topdown' = 'right';
+
   let pilotReady = false;
   let jsonImportInput: HTMLInputElement;
 
   const cloudSyncAvailable = isSupabaseCloudConfigured();
 
+  /** 새 프로젝트 생성 시에만 캔버스에 적용할 노드맵 배치(캔버스 열린 프로젝트와 무관) */
+  const LS_NODE_MAP_NEW_PROJECT = 'plannode.nodeMapLayoutNewProjectDefault';
+  function readNodeMapLayoutCreateDefault(): 'right' | 'topdown' {
+    if (typeof localStorage === 'undefined') return 'right';
+    try {
+      const v = localStorage.getItem(LS_NODE_MAP_NEW_PROJECT);
+      if (v === 'topdown' || v === 'right') return v;
+    } catch (_) {}
+    return 'right';
+  }
+  function writeNodeMapLayoutCreateDefault(m: 'right' | 'topdown') {
+    try {
+      localStorage.setItem(LS_NODE_MAP_NEW_PROJECT, m);
+    } catch (_) {}
+  }
+
   /** max-width:900px 툴바 레이아웃 — 모바일에서 프로젝트명으로 공유 모달 진입 */
   let toolbarCompact = false;
+
+  /** 프로젝트 제목: 1.5초 롱프레스 후 인라인 수정 — 외부 터치·blur 시 저장 */
+  const TITLE_LONG_PRESS_MS = 1500;
+  let toolbarProjectTitleEditing = false;
+  let toolbarTitleDraft = '';
+  let toolbarTitleInputEl: HTMLInputElement | undefined;
+  let toolbarTitleLpTimer: ReturnType<typeof setTimeout> | null = null;
+  let toolbarTitleLpStart: { x: number; y: number } | null = null;
+  let suppressNextToolbarTitleClick = false;
+
+  let modalEditingProjectId: string | null = null;
+  let modalEditingDraft = '';
+  let modalCardTitleInputEl: HTMLInputElement | undefined;
+  let modalTitleLpTimer: ReturnType<typeof setTimeout> | null = null;
+  let modalTitleLpStart: { x: number; y: number } | null = null;
+  let modalSuppressNextPcClick = false;
 
   /** 뷰(#VIEWS) 터치 시 공통 툴바를 위로 접었다가, 상단 아이콘으로 다시 펼침(모바일·PC 공통) */
   let toolbarSheetHidden = false;
@@ -95,6 +181,10 @@
   let accountPw2 = '';
   let accountPwBusy = false;
   let accountPwMsg = '';
+
+  $: if ($showProjectModal) {
+    nodeMapLayoutDefaultForCreate = readNodeMapLayoutCreateDefault();
+  }
 
   $: accountEmailDisplay = String($authUser?.email ?? '').trim() || '—';
 
@@ -158,7 +248,7 @@
     jsonImportInput?.click();
   }
 
-  /** pilot이 `#BMD` `#BPR` `#BJN` `#BFT` `#BAR`에 연결 — UI는 드롭다운에서 동일 요소에 click 위임 */
+  /** pilot이 `#BMD` `#BPR` `#BJN` `#BFT` `#BAR` `#BUN`(sink)에 연결 — UI는 드롭다운·툴바에서 동일 요소에 click 위임 */
   let showOutputMenu = false;
   let outputMenuWrapEl: HTMLDivElement | undefined;
 
@@ -190,6 +280,16 @@
     document.getElementById(id)?.click();
   }
 
+  /** 되돌리기 — 파일럿은 `#BUN` sink에만 연결(다른 출력 버튼과 동일 패턴) */
+  function triggerPilotUndo() {
+    const el = document.getElementById('BUN');
+    if (!(el instanceof HTMLElement)) {
+      showPilotToast('되돌리기가 아직 연결 안 됐어. 새로고침 후 다시 시도해줘.');
+      return;
+    }
+    el.click();
+  }
+
   let showViewMenu = false;
   let viewMenuWrapEl: HTMLDivElement | undefined;
 
@@ -219,9 +319,165 @@
     pickView('ia');
   }
 
-  function onToolbarMenusOutside(ev: MouseEvent) {
+  function maybeCommitProjectTitleEdits(t: Node) {
+    if (!(t instanceof Element)) return;
+    const tbZone = document.getElementById('TB-PROJ-TITLE');
+    if (toolbarProjectTitleEditing && tbZone && !tbZone.contains(t)) {
+      commitToolbarProjectTitle();
+    }
+    if (modalEditingProjectId) {
+      const zone = document.querySelector(`[data-pm-title-pid="${modalEditingProjectId}"]`);
+      if (zone && !zone.contains(t)) {
+        commitModalProjectTitle();
+      }
+    }
+  }
+
+  function clearToolbarTitleLongPressUi() {
+    if (toolbarTitleLpTimer) {
+      clearTimeout(toolbarTitleLpTimer);
+      toolbarTitleLpTimer = null;
+    }
+    toolbarTitleLpStart = null;
+  }
+
+  function onToolbarTitleZonePointerDown(e: PointerEvent) {
+    if (!$currentProject || toolbarProjectTitleEditing) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    clearToolbarTitleLongPressUi();
+    toolbarTitleLpStart = { x: e.clientX, y: e.clientY };
+
+    const onMove = (ev: PointerEvent) => {
+      if (!toolbarTitleLpStart || !toolbarTitleLpTimer) return;
+      const dx = ev.clientX - toolbarTitleLpStart.x;
+      const dy = ev.clientY - toolbarTitleLpStart.y;
+      if (dx * dx + dy * dy > 100) {
+        clearToolbarTitleLongPressUi();
+        detach();
+      }
+    };
+    const detach = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
+    };
+    const onEnd = () => {
+      detach();
+      clearToolbarTitleLongPressUi();
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+
+    toolbarTitleLpTimer = setTimeout(() => {
+      toolbarTitleLpTimer = null;
+      toolbarTitleLpStart = null;
+      detach();
+      toolbarTitleDraft = get(currentProject)?.name ?? '';
+      toolbarProjectTitleEditing = true;
+      suppressNextToolbarTitleClick = true;
+      void tick().then(() => {
+        toolbarTitleInputEl?.focus();
+        toolbarTitleInputEl?.select?.();
+      });
+    }, TITLE_LONG_PRESS_MS);
+  }
+
+  function commitToolbarProjectTitle() {
+    if (!toolbarProjectTitleEditing) return;
+    const p = get(currentProject);
+    if (!p) {
+      toolbarProjectTitleEditing = false;
+      toolbarTitleDraft = '';
+      return;
+    }
+    const draft = toolbarTitleDraft.trim();
+    toolbarProjectTitleEditing = false;
+    toolbarTitleDraft = '';
+    if (!draft || draft === p.name) return;
+    updateProjectFields(p.id, { name: draft });
+    showPilotToast('프로젝트 이름을 저장했어.');
+  }
+
+  function cancelToolbarProjectTitleEdit() {
+    toolbarProjectTitleEditing = false;
+    toolbarTitleDraft = '';
+  }
+
+  function clearModalTitleLongPressUi() {
+    if (modalTitleLpTimer) {
+      clearTimeout(modalTitleLpTimer);
+      modalTitleLpTimer = null;
+    }
+    modalTitleLpStart = null;
+  }
+
+  function onModalCardTitlePointerDown(e: PointerEvent, proj: Project) {
+    if (modalEditingProjectId) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    clearModalTitleLongPressUi();
+    modalTitleLpStart = { x: e.clientX, y: e.clientY };
+
+    const onMove = (ev: PointerEvent) => {
+      if (!modalTitleLpStart || !modalTitleLpTimer) return;
+      const dx = ev.clientX - modalTitleLpStart.x;
+      const dy = ev.clientY - modalTitleLpStart.y;
+      if (dx * dx + dy * dy > 100) {
+        clearModalTitleLongPressUi();
+        detach();
+      }
+    };
+    const detach = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
+    };
+    const onEnd = () => {
+      detach();
+      clearModalTitleLongPressUi();
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+
+    modalTitleLpTimer = setTimeout(() => {
+      modalTitleLpTimer = null;
+      modalTitleLpStart = null;
+      detach();
+      modalEditingProjectId = proj.id;
+      modalEditingDraft = proj.name;
+      modalSuppressNextPcClick = true;
+      void tick().then(() => {
+        modalCardTitleInputEl?.focus();
+        modalCardTitleInputEl?.select?.();
+      });
+    }, TITLE_LONG_PRESS_MS);
+  }
+
+  function commitModalProjectTitle() {
+    if (!modalEditingProjectId) return;
+    const pid = modalEditingProjectId;
+    const draft = modalEditingDraft.trim();
+    modalEditingProjectId = null;
+    modalEditingDraft = '';
+    const p = get(projects).find((x) => x.id === pid);
+    if (!p) return;
+    if (!draft || draft === p.name) return;
+    updateProjectFields(pid, { name: draft });
+    showPilotToast('프로젝트 이름을 저장했어.');
+  }
+
+  function cancelModalProjectTitleEdit() {
+    modalEditingProjectId = null;
+    modalEditingDraft = '';
+  }
+
+  function onToolbarMenusOutside(ev: Event) {
     const t = ev.target;
     if (!(t instanceof Node)) return;
+    maybeCommitProjectTitleEdits(t);
     if (showOutputMenu && outputMenuWrapEl && !outputMenuWrapEl.contains(t)) closeOutputMenu();
     if (showViewMenu && viewMenuWrapEl && !viewMenuWrapEl.contains(t)) closeViewMenu();
     if (showViewportMenu && viewportMenuWrapEl && !viewportMenuWrapEl.contains(t)) closeViewportMenu();
@@ -269,7 +525,7 @@
     input.value = '';
     if (!file) return;
     const text = await file.text();
-    const parsed = parsePlannodeTreeV1Json(text);
+    const parsed = parsePlannodeTreeV1ImportText(text);
     if (!parsed.ok) {
       showPilotToast(parsed.message);
       return;
@@ -342,6 +598,9 @@
         alert(r.message ?? '프로젝트를 열 수 없습니다');
         return;
       }
+
+      pilotSetNodeMapLayout(nodeMapLayoutDefaultForCreate);
+      writeNodeMapLayoutCreateDefault(nodeMapLayoutDefaultForCreate);
 
       projectName = '';
       projectAuthor = '';
@@ -475,12 +734,15 @@
       if (get(aclModalProject)?.id === proj.id) {
         closeAclModal();
       }
+      if (cloudSyncAvailable) {
+        registerPendingWorkspaceDeletion(proj.id);
+      }
       deleteProject(proj.id);
       if (cloudSyncAvailable) {
         scheduleCloudFlush('delete-project', 100);
       }
       showPilotToast('프로젝트를 삭제했어.');
-      await loadAclInvitesForModal();
+      void loadAclInvitesForModal();
     } finally {
       deletingProjectId = '';
     }
@@ -526,6 +788,16 @@
     openAclForCurrentProject();
   }
 
+  function onProjectNameToolbarClickGuarded(ev: MouseEvent) {
+    if (suppressNextToolbarTitleClick) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      suppressNextToolbarTitleClick = false;
+      return;
+    }
+    onProjectNameToolbarClick();
+  }
+
   function openAclForProject(proj: Project) {
     openAclModal(proj);
   }
@@ -548,14 +820,19 @@
     lastAutoLoadTime = now;
 
     const localProjectIds = $projects.map((p) => p.id);
-    if (import.meta.env.DEV) {
-      console.info('[tryAutoLoadInvitedProjects] local projects:', localProjectIds, 'auth user:', $authUser?.email);
-    }
 
     const result = await autoLoadInvitedProjects(localProjectIds);
 
     if (import.meta.env.DEV) {
-      console.info('[tryAutoLoadInvitedProjects] result:', result);
+      console.info('[tryAutoLoadInvitedProjects]', {
+        localCount: localProjectIds.length,
+        email: $authUser?.email,
+        loaded: result.loaded,
+        skipped: result.skipped,
+        skippedAlreadyLocal: result.skippedAlreadyLocal,
+        skippedNoWorkspaceSource: result.skippedNoWorkspaceSource,
+        errors: result.errors.length
+      });
     }
 
     if (result.loaded > 0) {
@@ -563,11 +840,10 @@
     }
     if (result.errors.length > 0) {
       const errMsg = result.errors.map((e) => `${e.projectId}: ${e.message}`).join('; ');
-      console.warn('[autoLoadInvitedProjects] errors:', errMsg);
+      if (import.meta.env.DEV) {
+        console.warn('[autoLoadInvitedProjects] errors:', errMsg);
+      }
       showPilotToast(`프로젝트 불러오기 실패: ${errMsg}`);
-    }
-    if (result.skipped > 0) {
-      if (import.meta.env.DEV) console.info(`[autoLoadInvitedProjects] ${result.skipped}개는 로컬에 있거나 cloud source가 비어 있어 스킵됨.`);
     }
   }
 
@@ -620,7 +896,11 @@
           const { rows } = await fetchProjectAcl(atSubscribe);
           if (presenceProjectId !== atSubscribe) return;
           const emails = rows.map((r) => r.email).filter(Boolean);
-          await subscribeProjectPresence(atSubscribe, uid, email, emails);
+          const proj = get(currentProject);
+          const wsSrc = proj?.cloud_workspace_source_user_id ?? null;
+          /** 멤버 ACL 조회에 소유자 이메일이 없을 때도 Presence에 소유자 uid 표시 */
+          const presenceAlwaysShow = wsSrc && wsSrc !== uid ? [wsSrc] : [];
+          await subscribeProjectPresence(atSubscribe, uid, email, emails, presenceAlwaysShow);
         })();
       }
     } else if (presenceProjectId !== '') {
@@ -646,6 +926,7 @@
     const { destroy } = mountPilotBridge();
     pilotReady = true;
     pilotSetActiveView($activeView);
+    nodeMapLayoutDefaultForCreate = readNodeMapLayoutCreateDefault();
 
     const mqToolbar = window.matchMedia('(max-width: 900px)');
     toolbarCompact = mqToolbar.matches;
@@ -673,6 +954,18 @@
       scheduleCloudFlush(reason, delayMs);
     };
     window.addEventListener('plannode-auto-cloud-sync', onExportSync);
+
+    const onPresencePeersJoined = (ev: Event) => {
+      const d = (ev as CustomEvent<{ projectId?: string }>).detail;
+      if (!d?.projectId) return;
+      const cp = get(currentProject);
+      if (!cp || cp.id !== d.projectId) return;
+      if (captureNodeSnapshot(cp.id, get(nodes), 'presence_peer')) {
+        refreshSnapshotList();
+        showPilotToast('다른 편집자가 접속했어. 지금 트리 상태를 버전 히스토리에 남겼어.');
+      }
+    };
+    window.addEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
 
     const onPilotToast = (ev: Event) => {
       const msg = (ev as CustomEvent<{ message?: string }>).detail?.message;
@@ -710,6 +1003,7 @@
       window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
+      window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
       window.removeEventListener('plannode-pilot-toast', onPilotToast);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
@@ -727,6 +1021,7 @@
 </script>
 
 <svelte:window
+  on:pointerdown={onToolbarMenusOutside}
   on:keydown={(e) => {
     if (showAccountModal && e.key === 'Escape') closeAccountModal();
     if (showOutputMenu && e.key === 'Escape') {
@@ -762,21 +1057,49 @@
           <div class="dv"></div>
         </div>
         <div class="tb-row-project">
-          <span class="tb-proj-label">프로젝트:</span>
-          <button
-            type="button"
-            id="PNT"
-            class="pntag"
-            class:pntag--share-entry={cloudSyncAvailable && !!$currentProject && toolbarCompact}
-            disabled={!$currentProject}
-            tabindex={cloudSyncAvailable && $currentProject && !toolbarCompact ? -1 : undefined}
-            title={cloudSyncAvailable && $currentProject && toolbarCompact
-              ? '프로젝트 공유 · 접근 허용 이메일 관리'
-              : undefined}
-            on:click={onProjectNameToolbarClick}
+          <!-- 제목 롱프레스(1.5초)로 수정 모드 — 영역 밖 터치 시 저장 -->
+          <div
+            id="TB-PROJ-TITLE"
+            class="tb-proj-title-zone"
+            on:pointerdown={onToolbarTitleZonePointerDown}
           >
-            {$currentProject?.name || '—'}
-          </button>
+            <span class="tb-proj-label">프로젝트:</span>
+            {#if toolbarProjectTitleEditing && $currentProject}
+              <input
+                bind:this={toolbarTitleInputEl}
+                id="PNT"
+                class="pntag pntag-input"
+                bind:value={toolbarTitleDraft}
+                aria-label="프로젝트 이름 편집"
+                maxlength={200}
+                on:blur={commitToolbarProjectTitle}
+                on:keydown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelToolbarProjectTitleEdit();
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    toolbarTitleInputEl?.blur();
+                  }
+                }}
+              />
+            {:else}
+              <button
+                type="button"
+                id="PNT"
+                class="pntag"
+                class:pntag--share-entry={cloudSyncAvailable && !!$currentProject && toolbarCompact}
+                disabled={!$currentProject}
+                tabindex={cloudSyncAvailable && $currentProject && !toolbarCompact ? -1 : undefined}
+                title={cloudSyncAvailable && $currentProject && toolbarCompact
+                  ? '프로젝트 공유 · 접근 허용 이메일 관리'
+                  : '길게 누르면 이름 수정'}
+                on:click={onProjectNameToolbarClickGuarded}
+              >
+                {$currentProject?.name || '—'}
+              </button>
+            {/if}
+          </div>
           {#if $currentProject && cloudSyncAvailable}
             <button type="button" id="BAC" title="프로젝트 공유 · 접근 허용 이메일 관리" on:click={openAclForCurrentProject}>
               공유
@@ -878,7 +1201,8 @@
               </div>
             {/if}
           </div>
-        <button type="button" id="BUN" title="실행 취소 (Ctrl+Z / ⌘Z)">↩</button>
+        <button type="button" class="tb-undo-btn" title="실행 취소 (Ctrl+Z / ⌘Z)" on:click={() => triggerPilotUndo()}
+          >↩</button>
         <div class="tb-output-wrap" bind:this={outputMenuWrapEl}>
           <button
             type="button"
@@ -930,6 +1254,7 @@
         <div class="pilot-wire-sinks" aria-hidden="true">
           <button type="button" id="BFT" class="pilot-wire-sink" tabindex="-1">모두보기</button>
           <button type="button" id="BAR" class="pilot-wire-sink" tabindex="-1">자동정렬</button>
+          <button type="button" id="BUN" class="pilot-wire-sink" tabindex="-1">↩ 되돌리기</button>
           <button type="button" id="BMD" class="pilot-wire-sink" tabindex="-1">MD</button>
           <button type="button" id="BPR" class="pilot-wire-sink" tabindex="-1">PRD</button>
           <button type="button" id="BJN" class="pilot-wire-sink" tabindex="-1">JSON</button>
@@ -1024,8 +1349,25 @@
                   >상위바꿈: 노드 1.5초 드래그 / + 1.5초 하위만</span
                 >
               </div>
+              {#if $currentProject}
+                <button
+                  type="button"
+                  class="cw-snapshot-hist-btn"
+                  title="로컬에 남긴 노드 트리 스냅샷 보기(비교 수치는 스냅샷 대비 현재)"
+                  on:click={() => {
+                    refreshSnapshotList();
+                    showSnapshotHistoryModal = true;
+                  }}
+                >
+                  히스토리
+                </button>
+              {/if}
               {#if cloudSyncAvailable && $currentProject}
-                <div class="cw-presence" role="group" aria-label="이 프로젝트에 동시 접속 중인 허용 계정">
+                <div
+                  class="cw-presence"
+                  role="group"
+                  aria-label="이 프로젝트에 동시 접속 중인 허용 계정(표시 최대 5명)"
+                >
                   {#each $projectPresencePeers as peer (peer.user_id)}
                     <button
                       type="button"
@@ -1038,6 +1380,11 @@
                       <span class="cw-presence-letter">{presenceAvatarLetter(peer.email)}</span>
                     </button>
                   {/each}
+                  {#if $projectPresencePeersOverflow > 0}
+                    <span class="cw-presence-overflow" title="동시 접속 표시 상한(5명)을 넘은 계정"
+                      >+{$projectPresencePeersOverflow}</span
+                    >
+                  {/if}
                   {#if $projectPresenceSelectedEmail}
                     <span class="cw-presence-email" title={$projectPresenceSelectedEmail}>{$projectPresenceSelectedEmail}</span>
                   {/if}
@@ -1290,6 +1637,43 @@
       </div>
     {/if}
 
+    {#if showBadgePoolModal}
+      <StandardBadgePoolModal
+        on:close={() => (showBadgePoolModal = false)}
+        on:saved={() => showPilotToast('표준 배지 풀을 저장했어. 노드 편집·가져오기에 바로 반영돼.')}
+      />
+    {/if}
+
+    {#if showSnapshotHistoryModal && $currentProject}
+      <div class="mbg" role="presentation" on:click|self={() => (showSnapshotHistoryModal = false)}>
+        <div class="mo mo-wide snap-hist-modal" role="dialog" aria-modal="true" aria-labelledby="snap-hist-title">
+          <div class="pm-proj-head">
+            <h3 id="snap-hist-title" style="margin:0">버전 히스토리 (로컬)</h3>
+            <button type="button" class="mcl" on:click={() => (showSnapshotHistoryModal = false)}>✕</button>
+          </div>
+          <p class="snap-hist-hint">
+            공유 프로젝트에서 <strong>상대 작업</strong>이 클라우드로 반영되기 직전·또는 다른 편집자가 접속한 시점의 트리
+            복제입니다. 아래 수치는 <strong>그 스냅샷 대비 지금 화면</strong>의 차이(노드 id 기준)입니다.
+          </p>
+          <div class="snap-hist-actions">
+            <button type="button" class="bcr" on:click={onManualNodeSnapshot}>지금 상태 스냅샷 남기기</button>
+          </div>
+          <ul class="snap-hist-list">
+            {#each snapshotRows as s (s.id)}
+              <li class="snap-hist-item">
+                <div class="snap-hist-row-top">
+                  {new Date(s.at).toLocaleString()} · {formatSnapshotReason(s.reason)}
+                </div>
+                <div class="snap-hist-row-sub">{snapshotDiffLine(s)}</div>
+              </li>
+            {:else}
+              <li class="snap-hist-empty">아직 히스토리가 없어. 다른 편집자 접속이 감지되거나 위 버튼으로 남겨줘.</li>
+            {/each}
+          </ul>
+        </div>
+      </div>
+    {/if}
+
     {#if $showProjectModal}
       <div class="mbg" role="presentation" on:click|self={closeModal}>
         <div class="mo mo-wide pm-scroll pm-proj-shell">
@@ -1339,12 +1723,44 @@
               placeholder="설명"
               aria-label="설명"
             ></textarea>
-            <button type="button" class="bcr" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
+            <div class="proj-layout-row" role="group" aria-label="새 프로젝트 노드맵 배치">
+              <button
+                type="button"
+                class="nm-create-opt"
+                class:nm-create-opt--on={nodeMapLayoutDefaultForCreate === 'right'}
+                on:click={() => {
+                  nodeMapLayoutDefaultForCreate = 'right';
+                  writeNodeMapLayoutCreateDefault('right');
+                }}
+              >
+                우측분포 보기
+              </button>
+              <button
+                type="button"
+                class="nm-create-opt"
+                class:nm-create-opt--on={nodeMapLayoutDefaultForCreate === 'topdown'}
+                on:click={() => {
+                  nodeMapLayoutDefaultForCreate = 'topdown';
+                  writeNodeMapLayoutCreateDefault('topdown');
+                }}
+              >
+                하위분포 보기
+              </button>
+            </div>
+            <button
+              type="button"
+              class="bcr bcr-badge-settings"
+              id="BBS"
+              on:click={() => (showBadgePoolModal = true)}
+            >
+              표준 배지 설정
+            </button>
+            <button type="button" class="bcr bcr-create-project" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
             <div class="proj-json-import">
               <input
                 bind:this={jsonImportInput}
                 type="file"
-                accept="application/json,.json"
+                accept="application/json,.json,text/markdown,.md"
                 class="json-import-input"
                 aria-hidden="true"
                 tabindex="-1"
@@ -1354,7 +1770,7 @@
                 type="button"
                 id="BJI"
                 class="proj-json-import-btn"
-                title="plannode.tree v1 JSON 파일 가져오기"
+                title="plannode.tree v1 — .json 전체 또는 .md(펜스된 json 블록)"
                 on:click={triggerJsonImport}
               >
                 가져오기
@@ -1403,20 +1819,69 @@
                         </svg>
                       </button>
                     {/if}
-                    <button
-                      type="button"
+                    <div
                       class="pc"
-                      on:click={() => void handleProjectSelect(proj)}
+                      role="button"
+                      tabindex="0"
+                      aria-label={`프로젝트 「${proj.name}」 열기`}
+                      on:click={(e) => {
+                        if (modalSuppressNextPcClick) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          modalSuppressNextPcClick = false;
+                          return;
+                        }
+                        void handleProjectSelect(proj);
+                      }}
+                      on:keydown={(e) => {
+                        if (e.key !== 'Enter' && e.key !== ' ') return;
+                        e.preventDefault();
+                        if (modalSuppressNextPcClick) {
+                          modalSuppressNextPcClick = false;
+                          return;
+                        }
+                        void handleProjectSelect(proj);
+                      }}
                     >
                       <div class="pi" style:background={$currentProject?.id === proj.id ? '#6b4ef6' : '#ede9fe'}>📁</div>
                       <div class="pif">
-                        <div class="pn2">{proj.name}</div>
+                        <div class="pm-title-wrap" data-pm-title-pid={proj.id}>
+                          {#if modalEditingProjectId === proj.id}
+                            <input
+                              bind:this={modalCardTitleInputEl}
+                              class="pn2 pn-edit-input"
+                              bind:value={modalEditingDraft}
+                              aria-label={`「${proj.name}」 이름 편집`}
+                              maxlength={200}
+                              on:blur={commitModalProjectTitle}
+                              on:pointerdown|stopPropagation
+                              on:click|stopPropagation
+                              on:keydown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  cancelModalProjectTitleEdit();
+                                } else if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  modalCardTitleInputEl?.blur();
+                                }
+                              }}
+                            />
+                          {:else}
+                            <div
+                              class="pn2 pm-card-title-hit"
+                              title="길게 누르면 이름 수정"
+                              on:pointerdown={(ev) => onModalCardTitlePointerDown(ev, proj)}
+                            >
+                              {proj.name}
+                            </div>
+                          {/if}
+                        </div>
                         <div class="pm2">{proj.author}{aclProjectIdSet.has(proj.id) ? ' · 접근 허용됨' : ''}</div>
                       </div>
                       {#if $currentProject?.id === proj.id}
                         <span class="ct">현재</span>
                       {/if}
-                    </button>
+                    </div>
                     {#if cloudSyncAvailable}
                       <button
                         type="button"
@@ -1753,6 +2218,15 @@
     flex-shrink: 0;
   }
 
+  .tb-proj-title-zone {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    touch-action: manipulation;
+  }
+
   .pntag {
     font-size: 12px;
     font-weight: 600;
@@ -1761,6 +2235,27 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  input.pntag.pntag-input {
+    appearance: none;
+    margin: 0;
+    padding: 2px 6px;
+    border: 1px solid #c4b8f8;
+    border-radius: 8px;
+    background: #fff;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1a1a1a;
+    max-width: min(220px, 46vw);
+    min-width: 96px;
+    box-sizing: border-box;
+  }
+
+  input.pntag.pntag-input:focus {
+    outline: 2px solid #6b61f6;
+    outline-offset: 1px;
   }
 
   button#PNT.pntag {
@@ -1883,8 +2378,8 @@
   }
 
   #BAC,
-  #BUN,
-  #BPN {
+  #BPN,
+  .tb-undo-btn {
     padding: 6px 12px;
     font-size: 12px;
     border-radius: 7px;
@@ -2235,7 +2730,8 @@
 
   .proj-json-import {
     position: relative;
-    margin-top: 2px;
+    /* 프로젝트 생성↔가져오기: `.proj-form-col` gap(15px)의 50% 추가 분리 */
+    margin-top: calc(15px * 0.5);
   }
 
   #BJI.proj-json-import-btn {
@@ -2494,6 +2990,7 @@
     position: relative;
     overflow: hidden;
     user-select: none;
+    background: #eeecff;
     /* 터치 드래그·팬 시 브라우저 스크롤/제스처에 포인터를 빼앗기지 않음 */
     touch-action: none;
   }
@@ -2585,6 +3082,50 @@
     border: 1px solid #f0ecff;
   }
 
+  /* 하위분포: 좌측 뎁스 스트립 — 짧은 라벨·큰 글자·최소 폭, 세로 글자 깨짐 방지 */
+  :global(.cp-depth-strip) {
+    pointer-events: none;
+  }
+  :global(.cp-depth-strip .cp-depth-cell) {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    line-height: 1.1;
+    padding: 2px 0;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+    border-radius: 4px;
+    border-width: 0 !important;
+    box-shadow: none !important;
+  }
+  :global(.cp-depth-strip .cp-depth-cell.cp0) {
+    background: rgba(107, 78, 246, 0.92);
+    color: #fff;
+  }
+  :global(.cp-depth-strip .cp-depth-cell.cp1) {
+    background: rgba(240, 236, 255, 0.92);
+    color: #6b4ef6;
+  }
+  :global(.cp-depth-strip .cp-depth-cell.cp2) {
+    background: rgba(243, 240, 255, 0.85);
+    color: #7c6fd4;
+  }
+  :global(.cp-depth-strip .cp-depth-cell.cp3) {
+    background: rgba(247, 245, 255, 0.82);
+    color: #9d8fe0;
+  }
+  :global(.cp-depth-strip .cp-depth-cell.cp4) {
+    background: rgba(250, 248, 255, 0.78);
+    color: #b4a8e8;
+  }
+
   :global(.nw) {
     position: absolute;
     z-index: 5;
@@ -2593,31 +3134,30 @@
     position: relative;
     z-index: 0;
     background: #fff;
-    border: 1px solid #e0dbd4;
-    border-radius: 10px;
-    width: 188px;
+    border: none;
+    border-radius: 12px;
+    width: 226px;
+    box-sizing: border-box;
+    padding: 15px 13px 17px;
     cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
-    transition:
-      border-color 0.15s,
-      box-shadow 0.15s;
+    box-shadow: none;
+    outline: 1px solid transparent;
+    outline-offset: 0;
+    transition: outline-color 0.15s ease;
   }
   :global(.nd:hover) {
     z-index: 30;
-    border-color: #b8aff0;
-    box-shadow: 0 2px 10px rgba(107, 78, 246, 0.12);
+    outline-color: rgba(107, 78, 246, 0.38);
   }
   :global(.nd.sel) {
-    border-color: #6b4ef6;
-    box-shadow: 0 0 0 3px rgba(107, 78, 246, 0.15);
+    outline: 2px solid rgba(107, 78, 246, 0.65);
   }
   :global(.nd.msel) {
-    box-shadow: 0 0 0 2px rgba(225, 29, 72, 0.35);
+    outline: 2px solid rgba(225, 29, 72, 0.55);
   }
   /* §4.0.1 재연결 모드 — 옮길 노드·트리 강조 */
   :global(.nd.relink-pick) {
-    box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.45);
-    border-color: #0ea5e9;
+    outline: 2px solid rgba(14, 165, 233, 0.65);
   }
   :global(.nd.relink-source-dim) {
     opacity: 0.36;
@@ -2646,14 +3186,13 @@
     white-space: nowrap;
   }
   :global(.nd.rnd) {
-    width: 168px;
-    border-color: #d4caff;
+    width: 202px;
   }
   :global(.ndt) {
     display: flex;
     align-items: flex-start;
-    padding: 9px 9px 4px;
-    gap: 6px;
+    padding: 2px 4px 10px;
+    gap: 8px;
   }
   :global(.nb) {
     width: 3px;
@@ -2745,7 +3284,7 @@
     overflow: hidden;
     font-size: 10px;
     color: #999;
-    margin: 1px 9px 0;
+    margin: 8px 4px 0;
     line-height: 1.4;
     word-break: break-word;
   }
@@ -2793,7 +3332,7 @@
   }
   /* 배지: 2행까지만(넘는 행은 clip). 포인터는 부모 .nd에 그대로 — 드래그·제목·선택 로직 보존 */
   :global(.nm) {
-    padding: 4px 9px 3px;
+    padding: 8px 4px 12px;
     min-height: 0;
     box-sizing: border-box;
   }
@@ -2869,7 +3408,7 @@
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
-    padding: 2px 7px 8px;
+    padding: 8px 4px 2px;
     gap: 6px;
   }
   :global(.pb2) {
@@ -2924,7 +3463,7 @@
     flex: 0 0 auto;
     display: flex;
     flex-direction: row;
-    align-items: flex-end;
+    align-items: center;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px;
@@ -2941,7 +3480,9 @@
     font-size: 11px;
     padding: 5px 9px;
   }
+  /* 미니맵: 엔진·canvas·updMM 유지, UI 만 비표시 */
   .mm {
+    display: none;
     position: relative;
     flex-shrink: 0;
     width: 120px;
@@ -3049,6 +3590,67 @@
     border-radius: 6px;
     background: #fff;
     border: 1px solid #e8e4de;
+  }
+  .cw-presence-overflow {
+    font-size: 10px;
+    font-weight: 700;
+    color: #92400e;
+    padding: 2px 5px;
+    border-radius: 6px;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    flex-shrink: 0;
+  }
+  .cw-snapshot-hist-btn {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid #d5cfe8;
+    background: #faf9ff;
+    color: #4f3da8;
+    cursor: pointer;
+    line-height: 1.2;
+  }
+  .cw-snapshot-hist-btn:hover {
+    border-color: #9b8fd8;
+    background: #f0ecff;
+  }
+  .snap-hist-modal .snap-hist-hint {
+    font-size: 12px;
+    line-height: 1.45;
+    color: #555;
+    margin: 0 0 10px;
+  }
+  .snap-hist-actions {
+    margin-bottom: 12px;
+  }
+  .snap-hist-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: min(52vh, 420px);
+    overflow: auto;
+  }
+  .snap-hist-item {
+    padding: 10px 0;
+    border-bottom: 1px solid #ece8e2;
+  }
+  .snap-hist-row-top {
+    font-size: 12px;
+    font-weight: 600;
+    color: #333;
+  }
+  .snap-hist-row-sub {
+    font-size: 11px;
+    color: #666;
+    margin-top: 4px;
+  }
+  .snap-hist-empty {
+    font-size: 12px;
+    color: #888;
+    padding: 8px 0;
   }
   .zb {
     width: 20px;
@@ -3649,8 +4251,12 @@
     border-radius: 10px;
     padding: 3px 0;
     min-width: 158px;
+    max-width: min(288px, calc(100vw - 16px));
     z-index: 5000;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+    box-sizing: border-box;
+    touch-action: manipulation;
+    -webkit-overflow-scrolling: touch;
   }
   :global(.cx) {
     padding: 6px 12px;
@@ -3891,6 +4497,81 @@
     font-weight: 700;
     cursor: pointer;
     outline: none;
+  }
+
+  /** 표준 배지 — 보더 없이 면색만 (프로젝트 모달) */
+  .bcr-badge-settings {
+    margin-bottom: 8px;
+    border: none;
+    background: #f3f1ff;
+    color: #5b21b6;
+  }
+
+  .bcr-badge-settings:hover {
+    background: #e8e4ff;
+  }
+
+  /** 프로젝트 생성 — 주요 CTA: 세로 +20%(누적)·폰트 +30% */
+  .bcr-create-project {
+    padding-top: 14px;
+    padding-bottom: 14px;
+    font-size: 17px;
+    line-height: 1.25;
+  }
+
+  .proj-layout-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .nm-create-opt {
+    flex: 1;
+    min-width: min(100%, 132px);
+    padding: 10px 12px;
+    border: none;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    background: #e6e4ff;
+    color: #5b21b6;
+    transition:
+      background 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .nm-create-opt:hover:not(.nm-create-opt--on) {
+    background: #dad6ff;
+  }
+
+  .nm-create-opt--on {
+    background: #aaa3ff;
+    color: #fff;
+  }
+
+  .nm-create-opt--on:hover {
+    background: #9890f5;
+    color: #fff;
+  }
+
+  .nm-create-opt:focus-visible {
+    outline: 2px solid #6b4ef6;
+    outline-offset: 2px;
+  }
+
+  @media (max-width: 560px) {
+    .proj-layout-row {
+      flex-direction: column;
+      gap: 10px;
+    }
+    .nm-create-opt {
+      flex: none;
+      width: 100%;
+      min-height: 44px;
+      box-sizing: border-box;
+    }
   }
 
   .bcr:focus,
@@ -4203,6 +4884,35 @@
   .pif {
     flex: 1;
     min-width: 0;
+  }
+
+  .pm-title-wrap {
+    min-width: 0;
+  }
+
+  .pm-card-title-hit {
+    touch-action: manipulation;
+    cursor: text;
+    user-select: none;
+  }
+
+  .pn-edit-input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0 0 1px;
+    padding: 4px 8px;
+    border: 1px solid #c4b8f8;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: #1a1a1a;
+    background: #fff;
+  }
+
+  .pn-edit-input:focus {
+    outline: 2px solid #6b61f6;
+    outline-offset: 1px;
   }
 
   .pn2 {

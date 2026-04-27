@@ -11,10 +11,11 @@ export type PrjBadge = 'USP' | 'MVP' | 'AI' | 'I18N' | 'MOBILE';
 
 export type Badge = DevBadge | UxBadge | PrjBadge;
 
+/** 트랙 값은 표준 21개 외 커스텀 토큰(대문자) 허용 — 풀은 `badgePoolConfig`·sanitize로 제한 */
 export interface BadgeSet {
-  dev: DevBadge[];
-  ux: UxBadge[];
-  prj: PrjBadge[];
+  dev: string[];
+  ux: string[];
+  prj: string[];
 }
 
 /** 기능명세 뷰(그리드) — v3 FUNCTIONAL_SPEC 열 확장, 노드 `metadata.functionalSpec` */

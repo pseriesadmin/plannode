@@ -1,6 +1,7 @@
 import { writable, get } from 'svelte/store';
 import type { Project, Node } from '$lib/supabase/client';
 import { markCloudWorkspaceDirty, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
+import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
 
 // 프로젝트 상태
 export const projects = writable<Project[]>([]);
@@ -23,6 +24,153 @@ export const showProjectModal = writable(false);
 const PROJECTS_KEY = 'plannode_projects_v3';
 const NODES_KEY_PREFIX = 'plannode_nodes_v3_';
 const CURRENT_PROJECT_KEY = 'plannode_current_project_v3';
+
+/** 클라우드 LWW 병합이 로컬 삭제 직후 서버 스냅샷으로 프로젝트를 되살리지 않도록 유지 */
+const WORKSPACE_PENDING_DELETE_IDS_KEY = 'plannode_workspace_pending_delete_ids_v1';
+
+/** 삭제 직후 옛 원격 스냅샷이 같은 노드 id를 다시 넣는 것만 잠시 막음(프로젝트 시각 비교로 신규 노드를 막지 않음) */
+const CLOUD_MERGE_RECENT_DELETE_TTL_MS = 240_000;
+/** 새로고침·재접속 후에도 잠시 유지 — 만료 후 자동 정리 */
+const CLOUD_MERGE_SUPPRESSED_DELETES_KEY = 'plannode_cloud_merge_suppressed_deletes_v1';
+const CLOUD_MERGE_DISK_TTL_MS = 48 * 60 * 60 * 1000;
+const CLOUD_MERGE_DISK_MAX_IDS_PER_PROJECT = 120;
+
+type RecentDelMergeBucket = { ids: Set<string>; until: number };
+const recentlyDeletedNodeIdsForCloudMerge = new Map<string, RecentDelMergeBucket>();
+
+type DiskSuppressedDeletes = Record<string, Record<string, number>>;
+
+function readDiskSuppressedDeletes(): DiskSuppressedDeletes {
+  if (typeof window === 'undefined') return {};
+  try {
+    const s = localStorage.getItem(CLOUD_MERGE_SUPPRESSED_DELETES_KEY);
+    if (!s) return {};
+    const o = JSON.parse(s) as unknown;
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as DiskSuppressedDeletes) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDiskSuppressedDeletes(map: DiskSuppressedDeletes): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(CLOUD_MERGE_SUPPRESSED_DELETES_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+function pruneDiskSuppressedDeletes(map: DiskSuppressedDeletes, now: number): DiskSuppressedDeletes {
+  const out: DiskSuppressedDeletes = {};
+  for (const [pid, ids] of Object.entries(map)) {
+    if (!ids || typeof ids !== 'object') continue;
+    const next: Record<string, number> = {};
+    for (const [nid, t] of Object.entries(ids)) {
+      if (typeof t === 'number' && now - t < CLOUD_MERGE_DISK_TTL_MS) {
+        next[nid] = t;
+      }
+    }
+    if (Object.keys(next).length) out[pid] = next;
+  }
+  return out;
+}
+
+function appendDiskSuppressedDeletes(projectId: string, nodeIds: string[]): void {
+  if (typeof window === 'undefined' || !projectId || !nodeIds.length) return;
+  const now = Date.now();
+  let map = pruneDiskSuppressedDeletes(readDiskSuppressedDeletes(), now);
+  const cur = { ...(map[projectId] ?? {}) };
+  for (const id of nodeIds) {
+    cur[id] = now;
+  }
+  let entries = Object.entries(cur).sort((a, b) => a[1] - b[1]);
+  while (entries.length > CLOUD_MERGE_DISK_MAX_IDS_PER_PROJECT) {
+    entries = entries.slice(1);
+  }
+  map[projectId] = Object.fromEntries(entries);
+  map = pruneDiskSuppressedDeletes(map, now);
+  writeDiskSuppressedDeletes(map);
+}
+
+function diskSuppressedDeleteIdsForProject(projectId: string): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  const now = Date.now();
+  const raw = readDiskSuppressedDeletes();
+  const pruned = pruneDiskSuppressedDeletes(raw, now);
+  if (Object.keys(pruned).length !== Object.keys(raw).length || JSON.stringify(pruned) !== JSON.stringify(raw)) {
+    writeDiskSuppressedDeletes(pruned);
+  }
+  const row = pruned[projectId];
+  return new Set(row ? Object.keys(row) : []);
+}
+
+function pruneExpiredRecentDeletesForMerge(now: number): void {
+  for (const [pid, b] of recentlyDeletedNodeIdsForCloudMerge) {
+    if (now > b.until) recentlyDeletedNodeIdsForCloudMerge.delete(pid);
+  }
+}
+
+/** 파일럿 삭제·`persistNodesFromPilot` 등에서 호출 — 병합 시 해당 id를 잠시 원격에서 되살리지 않음(메모리 + localStorage) */
+export function registerRecentlyDeletedNodeIdsForCloudMerge(projectId: string, nodeIds: string[]): void {
+  if (typeof window === 'undefined' || !projectId || !nodeIds.length) return;
+  const now = Date.now();
+  pruneExpiredRecentDeletesForMerge(now);
+  const until = now + CLOUD_MERGE_RECENT_DELETE_TTL_MS;
+  const prev = recentlyDeletedNodeIdsForCloudMerge.get(projectId);
+  const ids = new Set<string>([...(prev?.ids ?? []), ...nodeIds]);
+  recentlyDeletedNodeIdsForCloudMerge.set(projectId, { ids, until });
+  appendDiskSuppressedDeletes(projectId, nodeIds);
+}
+
+function recentDeleteIdsForCloudMerge(projectId: string | null | undefined): Set<string> {
+  if (!projectId) return new Set();
+  const now = Date.now();
+  pruneExpiredRecentDeletesForMerge(now);
+  let mem = new Set<string>();
+  const b = recentlyDeletedNodeIdsForCloudMerge.get(projectId);
+  if (b && now <= b.until) {
+    mem = b.ids;
+  } else {
+    recentlyDeletedNodeIdsForCloudMerge.delete(projectId);
+  }
+  const disk = diskSuppressedDeleteIdsForProject(projectId);
+  return new Set<string>([...mem, ...disk]);
+}
+
+export function registerPendingWorkspaceDeletion(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  try {
+    const s = localStorage.getItem(WORKSPACE_PENDING_DELETE_IDS_KEY);
+    const parsed: unknown = s ? JSON.parse(s) : [];
+    const arr = Array.isArray(parsed) ? [...parsed] : [];
+    if (!arr.includes(projectId)) arr.push(projectId);
+    localStorage.setItem(WORKSPACE_PENDING_DELETE_IDS_KEY, JSON.stringify(arr));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearPendingWorkspaceDeletions(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(WORKSPACE_PENDING_DELETE_IDS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function readPendingWorkspaceDeletionSet(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const s = localStorage.getItem(WORKSPACE_PENDING_DELETE_IDS_KEY);
+    const parsed: unknown = s ? JSON.parse(s) : [];
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((x): x is string => typeof x === 'string' && x.length > 0));
+  } catch {
+    return new Set();
+  }
+}
 
 function makeRootNode(project: Project): Node {
   const now = new Date().toISOString();
@@ -219,11 +367,87 @@ export function updateProjectMeta(
   markCloudWorkspaceDirty();
 }
 
+/** 제목·메타 수정. 이름 변경 시 루트 노드(`…-r`) 표시명도 맞춤 — 트리·파일럿 일치 */
+export function updateProjectFields(
+  projectId: string,
+  patch: Partial<Pick<Project, 'name' | 'author' | 'description' | 'start_date' | 'end_date'>>
+): void {
+  if (typeof window === 'undefined') return;
+  const keys = Object.keys(patch);
+  if (!keys.length) return;
+  const now = new Date().toISOString();
+  projects.update((plist) => {
+    const next = plist.map((p) => (p.id === projectId ? { ...p, ...patch, updated_at: now } : p));
+    try {
+      localStorage.setItem(PROJECTS_KEY, JSON.stringify(next));
+    } catch (e) {
+      console.error('Failed to persist project fields:', e);
+    }
+    return next;
+  });
+  const cur = get(currentProject);
+  if (cur?.id === projectId) {
+    const merged = { ...cur, ...patch, updated_at: now };
+    currentProject.set(merged);
+    try {
+      localStorage.setItem(CURRENT_PROJECT_KEY, JSON.stringify(merged));
+    } catch {
+      /* ignore */
+    }
+  }
+  if (patch.name !== undefined && String(patch.name).trim() !== '') {
+    syncProjectRootNodeTitle(projectId, String(patch.name).trim(), now);
+  }
+  markCloudWorkspaceDirty();
+  try {
+    window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'project-meta' } }));
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProjectRootNodeTitle(projectId: string, name: string, now: string): void {
+  const rid = `${projectId}-r`;
+  const touch = (list: Node[]): Node[] =>
+    list.map((n) => (n.id === rid ? { ...n, name, updated_at: now } : n));
+
+  const curProj = get(currentProject);
+  if (curProj?.id === projectId) {
+    nodes.update((list) => {
+      const updated = touch(list);
+      try {
+        localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(updated));
+      } catch (e) {
+        console.error('Failed to persist root title:', e);
+      }
+      return updated;
+    });
+    return;
+  }
+  try {
+    const raw = localStorage.getItem(NODES_KEY_PREFIX + projectId);
+    const list: Node[] = raw ? JSON.parse(raw) : [];
+    const updated = touch(Array.isArray(list) ? list : []);
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(updated));
+  } catch (e) {
+    console.error('syncProjectRootNodeTitle:', e);
+  }
+}
+
 /** 파일럿 캔버스에서 전체 노드 스냅샷 저장 (현재 프로젝트와 id 일치 시만) */
 export function persistNodesFromPilot(projectId: string, list: Node[]) {
   if (typeof window === 'undefined') return;
   const cur = get(currentProject);
   if (!cur || cur.id !== projectId) return;
+  const prevSnap = get(nodes);
+  const prevSameProject =
+    prevSnap.length === 0 || prevSnap.every((n) => (n.project_id ?? projectId) === projectId);
+  const prevIds = new Set(prevSnap.map((n) => n.id));
+  const nextIds = new Set(list.map((n) => n.id));
+  const removed = prevSameProject ? [...prevIds].filter((id) => !nextIds.has(id)) : [];
+  if (removed.length) {
+    registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
+  }
   try {
     localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
   } catch (e) {
@@ -300,6 +524,17 @@ export function deleteNode(nodeId: string, projectId: string) {
 export function deleteProject(projectId: string) {
   if (typeof window === 'undefined') return;
 
+  recentlyDeletedNodeIdsForCloudMerge.delete(projectId);
+  try {
+    const map = readDiskSuppressedDeletes();
+    if (map[projectId]) {
+      delete map[projectId];
+      writeDiskSuppressedDeletes(pruneDiskSuppressedDeletes(map, Date.now()));
+    }
+  } catch {
+    /* ignore */
+  }
+
   projects.update((p) => {
     const updated = p.filter((x) => x.id !== projectId);
     try {
@@ -374,6 +609,7 @@ export function replaceWorkspaceFromBundle(bundle: WorkspaceBundle): void {
   projects.set(plist);
   currentProject.set(null);
   nodes.set([]);
+  clearPendingWorkspaceDeletions();
   markCloudWorkspaceSynced();
 }
 
@@ -453,31 +689,43 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
  * 동접·다기기: 원격 워크스페이스 스냅샷과 로컬 노드를 id 단위로 합침.
  * - remoteProjectMetaNewer: 프로젝트 메타가 원격이 더 최신 → 원격 목록에 없는 id는 삭제로 간주, 동일 id는 updated_at이 같거나 더 새로운 쪽(원격 동률 시 원격 우선).
  * - 그렇지 않음: 로컬 메타가 같거나 더 최신 → 원격에서 더 새로운 updated_at인 노드만 흡수(로컬 전용 id·삭제 유지).
+ * `suppressRecentDeletesProjectId`가 있으면 `registerRecentlyDeletedNodeIdsForCloudMerge`로 등록된 id는
+ * **원격 메타가 더 최신이어도** 로컬에 없을 때는 넣지 않음(소유자 슬라이스가 merge 실패 등으로 옛 목록을 유지할 때 되살림 방지).
  */
 export function mergeNodeListsForCloud(
   localNodes: Node[],
   remoteNodes: Node[],
-  remoteProjectMetaNewer: boolean
+  remoteProjectMetaNewer: boolean,
+  /** 최근 삭제 억제를 적용할 프로젝트 id(선택) */
+  suppressRecentDeletesProjectId?: string | null
 ): Node[] {
   const byId = new Map<string, Node>();
   for (const n of localNodes) {
     byId.set(n.id, n);
   }
   if (remoteProjectMetaNewer) {
+    const suppress = recentDeleteIdsForCloudMerge(suppressRecentDeletesProjectId ?? null);
     const remoteIds = new Set(remoteNodes.map((x) => x.id));
     for (const id of [...byId.keys()]) {
       if (!remoteIds.has(id)) byId.delete(id);
     }
     for (const rn of remoteNodes) {
       const cur = byId.get(rn.id);
+      if (!cur && suppress.has(rn.id)) continue;
       if (!cur || parseTs(rn.updated_at) >= parseTs(cur.updated_at)) {
         byId.set(rn.id, rn);
       }
     }
   } else {
+    const suppress = recentDeleteIdsForCloudMerge(suppressRecentDeletesProjectId ?? null);
     for (const rn of remoteNodes) {
       const cur = byId.get(rn.id);
-      if (!cur || parseTs(rn.updated_at) > parseTs(cur.updated_at)) {
+      if (!cur) {
+        if (suppress.has(rn.id)) continue;
+        byId.set(rn.id, rn);
+        continue;
+      }
+      if (parseTs(rn.updated_at) > parseTs(cur.updated_at)) {
         byId.set(rn.id, rn);
       }
     }
@@ -500,14 +748,19 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
  * 내 plannode_workspace 행 기준: 원격 번들과 로컬을 합침.
  * 프로젝트 updated_at 비교에 더해, 동일 프로젝트라도 노드별 updated_at으로 수정·추가를 흡수하고,
  * 원격 메타가 더 최신일 때만 원격 목록에 없는 노드를 삭제로 반영.
+ *
+ * **로컬 프로젝트가 더 새면** 노드 배열은 `mergeNodeListsForCloud`를 쓰지 않고 **로컬 스토리지 그대로** 둔다.
+ * (업로드 직전 `mergeRemoteWorkspaceBeforeUpload`가 옛 `nodes_by_project_json`을 합치면서 삭제가 되살아나던 문제 방지)
  */
 export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): number {
   if (typeof window === 'undefined') return 0;
   let n = 0;
   const rp = Array.isArray(remote.projects) ? remote.projects : [];
+  const skipIds = readPendingWorkspaceDeletionSet();
   const map =
     remote.nodesByProject && typeof remote.nodesByProject === 'object' ? remote.nodesByProject : {};
   for (const project of rp) {
+    if (skipIds.has(project.id)) continue;
     const plist = get(projects);
     const local = plist.find((p) => p.id === project.id);
     const remoteList = Array.isArray(map[project.id]) ? (map[project.id] as Node[]) : [];
@@ -515,7 +768,10 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
     const lTime = local ? parseTs(local.updated_at) : -1;
     const remoteProjectMetaNewer = !local || rTime > lTime;
     const localNodes = local ? loadProjectNodesFromLocalStorage(project.id) : [];
-    const mergedNodes = mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer);
+    const mergedNodes =
+      local && !remoteProjectMetaNewer
+        ? localNodes
+        : mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer, project.id);
     const keepSrc = local?.cloud_workspace_source_user_id ?? project.cloud_workspace_source_user_id;
 
     const mergedProject: Project = remoteProjectMetaNewer
@@ -541,6 +797,7 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
       String(mergedProject.updated_at || '') !== String(local.updated_at || '');
 
     if (nodesChanged || metaChanged || projectTsChanged) {
+      captureNodeSnapshot(project.id, localNodes, 'pre_pull');
       upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
         openAfter: false,
         markDirty: false,

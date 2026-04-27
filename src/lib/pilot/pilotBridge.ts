@@ -117,10 +117,20 @@ export function mountPilotBridge(): { destroy: () => void } {
     return { destroy: () => {} };
   }
 
+  /** 같은 프로젝트에서 `updated_at` 등 메타만 바뀔 때마다 hydrate → clearUndo 가 반복되던 문제 방지 */
+  let lastCurrentProjectId: string | null = null;
+
   const unsub = currentProject.subscribe((p) => {
     if (!pilotApi) return;
     if (!p) {
+      lastCurrentProjectId = null;
       pilotApi.clearCanvas();
+      return;
+    }
+    const sameProject = lastCurrentProjectId === p.id;
+    lastCurrentProjectId = p.id;
+    if (sameProject) {
+      pilotApi.patchProjectMeta?.(p);
       return;
     }
     const list = get(nodesStore);
@@ -160,6 +170,15 @@ export function mountPilotBridge(): { destroy: () => void } {
 
 export function pilotSetActiveView(view: 'tree' | 'prd' | 'spec' | 'ia' | 'ai') {
   pilotApi?.setActiveView(view);
+}
+
+/** 노드맵 배치 — 우측분포(right) · 하위분포(topdown), localStorage와 동기 */
+export function pilotGetNodeMapLayoutMode(): 'right' | 'topdown' | null {
+  return pilotApi?.getNodeMapLayoutMode?.() ?? null;
+}
+
+export function pilotSetNodeMapLayout(mode: 'right' | 'topdown') {
+  pilotApi?.setNodeMapLayout?.(mode);
 }
 
 /** 기능명세 그리드와 동일 SSoT — UTF-8 BOM CSV(CRLF), 엑셀 더블클릭 열기용 */
