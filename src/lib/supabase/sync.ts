@@ -11,6 +11,7 @@ import {
   currentProject,
   selectProject,
   projectWorkspaceNodesJsonSnapshot,
+  clearPendingWorkspaceDeletions,
   type WorkspaceBundle
 } from '$lib/stores/projects';
 import {
@@ -191,6 +192,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
         } catch {
           /* ignore */
         }
+        clearPendingWorkspaceDeletions();
         markCloudWorkspaceSynced();
         return { ok: true, message: '클라우드에 올렸어 ✓' };
       }
@@ -215,6 +217,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
       } catch {
         /* ignore */
       }
+      clearPendingWorkspaceDeletions();
       markCloudWorkspaceSynced();
       if (import.meta.env.DEV) {
         console.info('[uploadWorkspaceToCloud] 서버 타임스탬프 충돌 반복 → 무조건 upsert로 마무리했어.');
@@ -237,6 +240,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
     } catch {
       /* ignore */
     }
+    clearPendingWorkspaceDeletions();
     markCloudWorkspaceSynced();
     if (lastConflict && import.meta.env.DEV) {
       console.info('[uploadWorkspaceToCloud] 충돌 후 재병합·재시도로 저장 완료.');

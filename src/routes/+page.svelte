@@ -9,7 +9,8 @@
     createProject,
     upsertImportedPlannodeTreeV1,
     updateProjectMeta,
-    deleteProject
+    deleteProject,
+    registerPendingWorkspaceDeletion
   } from '$lib/stores/projects';
   import { parsePlannodeTreeV1ImportText } from '$lib/plannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
@@ -479,12 +480,15 @@
       if (get(aclModalProject)?.id === proj.id) {
         closeAclModal();
       }
+      if (cloudSyncAvailable) {
+        registerPendingWorkspaceDeletion(proj.id);
+      }
       deleteProject(proj.id);
       if (cloudSyncAvailable) {
         scheduleCloudFlush('delete-project', 100);
       }
       showPilotToast('프로젝트를 삭제했어.');
-      await loadAclInvitesForModal();
+      void loadAclInvitesForModal();
     } finally {
       deletingProjectId = '';
     }

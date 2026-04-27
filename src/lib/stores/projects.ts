@@ -24,6 +24,43 @@ const PROJECTS_KEY = 'plannode_projects_v3';
 const NODES_KEY_PREFIX = 'plannode_nodes_v3_';
 const CURRENT_PROJECT_KEY = 'plannode_current_project_v3';
 
+/** 클라우드 LWW 병합이 로컬 삭제 직후 서버 스냅샷으로 프로젝트를 되살리지 않도록 유지 */
+const WORKSPACE_PENDING_DELETE_IDS_KEY = 'plannode_workspace_pending_delete_ids_v1';
+
+export function registerPendingWorkspaceDeletion(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  try {
+    const s = localStorage.getItem(WORKSPACE_PENDING_DELETE_IDS_KEY);
+    const parsed: unknown = s ? JSON.parse(s) : [];
+    const arr = Array.isArray(parsed) ? [...parsed] : [];
+    if (!arr.includes(projectId)) arr.push(projectId);
+    localStorage.setItem(WORKSPACE_PENDING_DELETE_IDS_KEY, JSON.stringify(arr));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearPendingWorkspaceDeletions(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(WORKSPACE_PENDING_DELETE_IDS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function readPendingWorkspaceDeletionSet(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const s = localStorage.getItem(WORKSPACE_PENDING_DELETE_IDS_KEY);
+    const parsed: unknown = s ? JSON.parse(s) : [];
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((x): x is string => typeof x === 'string' && x.length > 0));
+  } catch {
+    return new Set();
+  }
+}
+
 function makeRootNode(project: Project): Node {
   const now = new Date().toISOString();
   return {
@@ -374,6 +411,7 @@ export function replaceWorkspaceFromBundle(bundle: WorkspaceBundle): void {
   projects.set(plist);
   currentProject.set(null);
   nodes.set([]);
+  clearPendingWorkspaceDeletions();
   markCloudWorkspaceSynced();
 }
 
@@ -505,9 +543,11 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   if (typeof window === 'undefined') return 0;
   let n = 0;
   const rp = Array.isArray(remote.projects) ? remote.projects : [];
+  const skipIds = readPendingWorkspaceDeletionSet();
   const map =
     remote.nodesByProject && typeof remote.nodesByProject === 'object' ? remote.nodesByProject : {};
   for (const project of rp) {
+    if (skipIds.has(project.id)) continue;
     const plist = get(projects);
     const local = plist.find((p) => p.id === project.id);
     const remoteList = Array.isArray(map[project.id]) ? (map[project.id] as Node[]) : [];
