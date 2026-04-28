@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import type { Project, Node } from '$lib/supabase/client';
+import type { PrdSectionKey } from '$lib/prdStandardV20';
 import { markCloudWorkspaceDirty, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
 import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
 
@@ -401,6 +402,58 @@ export function updateProjectFields(
   markCloudWorkspaceDirty();
   try {
     window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'project-meta' } }));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** PRD 탭 섹션 초안 — 로컬·워크스페이스에 저장, `null`이면 해당 키 제거(노드 자동 초안으로 복귀) */
+export function updateProjectPrdSectionDraft(
+  projectId: string,
+  section: PrdSectionKey,
+  value: string | null
+): void {
+  if (typeof window === 'undefined') return;
+  const now = new Date().toISOString();
+  projects.update((plist) => {
+    const next = plist.map((p) => {
+      if (p.id !== projectId) return p;
+      const prev = p.prd_section_drafts ? { ...p.prd_section_drafts } : {};
+      if (value == null || String(value).trim() === '') {
+        delete prev[section];
+      } else {
+        prev[section] = value;
+      }
+      const cleaned = Object.keys(prev).length ? prev : undefined;
+      return { ...p, prd_section_drafts: cleaned, updated_at: now };
+    });
+    try {
+      localStorage.setItem(PROJECTS_KEY, JSON.stringify(next));
+    } catch (e) {
+      console.error('Failed to persist PRD section draft:', e);
+    }
+    return next;
+  });
+  const cur = get(currentProject);
+  if (cur?.id === projectId) {
+    const prev = cur.prd_section_drafts ? { ...cur.prd_section_drafts } : {};
+    if (value == null || String(value).trim() === '') {
+      delete prev[section];
+    } else {
+      prev[section] = value;
+    }
+    const cleaned = Object.keys(prev).length ? prev : undefined;
+    const merged = { ...cur, prd_section_drafts: cleaned, updated_at: now };
+    currentProject.set(merged);
+    try {
+      localStorage.setItem(CURRENT_PROJECT_KEY, JSON.stringify(merged));
+    } catch {
+      /* ignore */
+    }
+  }
+  markCloudWorkspaceDirty();
+  try {
+    window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'prd-draft' } }));
   } catch {
     /* ignore */
   }

@@ -172,6 +172,16 @@ export function pilotSetActiveView(view: 'tree' | 'prd' | 'spec' | 'ia' | 'ai') 
   pilotApi?.setActiveView(view);
 }
 
+/** PRD 뷰가 활성일 때만 `buildPRD` — 스토어 변경 반응용 (+page, PILOT §9) */
+export function pilotRefreshPrdView() {
+  pilotApi?.refreshPrdView?.();
+}
+
+/** L1 `serializeToPrompt` + `OutputIntent.PRD` + 핵심 PRD 요약 절(v2.0) 클립보드 */
+export function pilotCopyPrdL1CoreSummaryPrompt() {
+  pilotApi?.copyPrdL1CoreSummaryPrompt?.();
+}
+
 /** 노드맵 배치 — 우측분포(right) · 하위분포(topdown), localStorage와 동기 */
 export function pilotGetNodeMapLayoutMode(): 'right' | 'topdown' | null {
   return pilotApi?.getNodeMapLayoutMode?.() ?? null;

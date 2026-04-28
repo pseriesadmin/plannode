@@ -11,6 +11,7 @@
     upsertImportedPlannodeTreeV1,
     updateProjectMeta,
     updateProjectFields,
+    updateProjectPrdSectionDraft,
     deleteProject,
     registerPendingWorkspaceDeletion
   } from '$lib/stores/projects';
@@ -58,6 +59,8 @@
   import {
     mountPilotBridge,
     pilotSetActiveView,
+    pilotRefreshPrdView,
+    pilotCopyPrdL1CoreSummaryPrompt,
     pilotExportSpecSheetCsv,
     pilotFlushPersistNow,
     pilotHasPendingGridPersist,
@@ -67,6 +70,7 @@
   import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
   import type { IAExportIntent } from '$lib/ai/iaExportRunner';
   import type { PageData } from './$types';
+  import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
 
   /** SvelteKit이 주입 — 미선언 시 콘솔 "unknown prop" 경고 */
   export let data: PageData;
@@ -115,6 +119,97 @@
     if (r === 'presence_peer') return '동시 접속';
     if (r === 'pre_pull') return '클라우드 반영 직전';
     return '수동';
+  }
+
+  const PRD_BLOCKS: { key: PrdSectionKey; title: string; hint: string }[] = [
+    {
+      key: 's1',
+      title: '1. 핵심 PRD 요약 (표준 가이드 v2.0)',
+      hint: '개요·가치·시나리오·지표·속성. 마크다운을 직접 고치면 자동 저장되며, PRD 다운로드(BPR)에 반영돼요. 「노드 초안」은 해당 칸만 노드·프로젝트 메타에서 다시 뽑은 글로 되돌려요.'
+    },
+    {
+      key: 's2',
+      title: '2. 기능명세 (Feature Specification)',
+      hint: '가이드 v2.0 — 트리·배지·기능 블록 마크다운. 편집·되돌림은 위와 같아요.'
+    },
+    {
+      key: 's3',
+      title: '3. 아키텍처 & 기술 정책',
+      hint: '가이드 v2.0 §2'
+    },
+    {
+      key: 's4',
+      title: '4. 수용기준 & 비기능 요구사항',
+      hint: '가이드 v2.0 §3'
+    },
+    {
+      key: 's5',
+      title: '5. 로드맵·위험 (v2.0 §4·§5)',
+      hint: '로드맵 & 우선순위 + 위험 요소 & 완화 전략 (한 패널)'
+    }
+  ];
+
+  let prdText: Record<PrdSectionKey, string> = { s1: '', s2: '', s3: '', s4: '', s5: '' };
+  let lastPrdProjectId = '';
+
+  $: prdAuto = $currentProject ? getPrdAutoSections($currentProject, $nodes) : null;
+
+  $: if ($currentProject && prdAuto) {
+    const pid = $currentProject.id;
+    const drafts = $currentProject.prd_section_drafts;
+    if (pid !== lastPrdProjectId) {
+      lastPrdProjectId = pid;
+      prdText = {
+        s1: drafts?.s1?.trim() ? drafts.s1 : prdAuto.sections.s1,
+        s2: drafts?.s2?.trim() ? drafts.s2 : prdAuto.sections.s2,
+        s3: drafts?.s3?.trim() ? drafts.s3 : prdAuto.sections.s3,
+        s4: drafts?.s4?.trim() ? drafts.s4 : prdAuto.sections.s4,
+        s5: drafts?.s5?.trim() ? drafts.s5 : prdAuto.sections.s5
+      };
+    } else {
+      const next = { ...prdText };
+      let changed = false;
+      for (const k of PRD_SECTION_KEYS) {
+        const d = drafts?.[k];
+        if ((d == null || String(d).trim() === '') && next[k] !== prdAuto.sections[k]) {
+          next[k] = prdAuto.sections[k];
+          changed = true;
+        }
+      }
+      if (changed) prdText = next;
+    }
+  } else if (!$currentProject) {
+    lastPrdProjectId = '';
+    prdText = { s1: '', s2: '', s3: '', s4: '', s5: '' };
+  }
+
+  const prdDraftSaveTimers: Partial<Record<PrdSectionKey, ReturnType<typeof setTimeout>>> = {};
+
+  function schedulePrdDraftSave(sec: PrdSectionKey) {
+    const prev = prdDraftSaveTimers[sec];
+    if (prev != null) clearTimeout(prev);
+    prdDraftSaveTimers[sec] = setTimeout(() => {
+      prdDraftSaveTimers[sec] = undefined;
+      const p = get(currentProject);
+      if (!p) return;
+      const raw = prdText[sec];
+      updateProjectPrdSectionDraft(p.id, sec, raw.trim() === '' ? null : raw);
+    }, 450);
+  }
+
+  function revertPrdSectionDraft(sec: PrdSectionKey) {
+    const p = get(currentProject);
+    if (!p || !prdAuto) return;
+    updateProjectPrdSectionDraft(p.id, sec, null);
+    prdText = { ...prdText, [sec]: prdAuto.sections[sec] };
+  }
+
+  function disposePrdDraftTimers() {
+    for (const k of PRD_SECTION_KEYS) {
+      const t = prdDraftSaveTimers[k];
+      if (t != null) clearTimeout(t);
+      delete prdDraftSaveTimers[k];
+    }
   }
 
   /** 프로젝트 모달: 다음 생성 시 적용할 배치만(파일럿 즉시 변경 안 함) */
@@ -1014,10 +1109,18 @@
   });
 
   onDestroy(() => {
+    disposePrdDraftTimers();
     unsubscribeProjectPresence();
   });
 
   $: if (pilotReady) pilotSetActiveView($activeView);
+
+  /** NOW-44 / PILOT §9: PRD 탭에서 nodes·프로젝트 변경 시 본문 재생성(읽기 파생) */
+  $: if (pilotReady && $activeView === 'prd' && $currentProject) {
+    void $nodes;
+    void $currentProject;
+    pilotRefreshPrdView();
+  }
 </script>
 
 <svelte:window
@@ -1429,35 +1532,53 @@
 
       <div class="view" class:active={$activeView === 'prd'} id="V-PRD">
         <div class="prd-header">
-          <div class="prd-title" id="prd-title">PRD 문서</div>
+          <div class="prd-header-row">
+            <div class="prd-title" id="prd-title">PRD 문서</div>
+            <button
+              type="button"
+              class="prd-l1-copy-btn"
+              title="OutputIntent.PRD + L1 컨텍스트 + 핵심 PRD 요약 절(노드 추출) — AI 보완용 클립보드"
+              on:click={() => pilotCopyPrdL1CoreSummaryPrompt()}>L1·핵심요약 복사</button>
+          </div>
           <div class="prd-meta" id="prd-meta"></div>
           <p class="prd-version-line" id="prd-version-line"></p>
         </div>
-        <div class="prd-section">
-          <h2>1. 기능명세 (Feature Specification)</h2>
-          <p class="prd-section-hint">가이드 §2 섹션 1 — 프로젝트 메타·전체 트리·전 노드 PRD 블록·요약표·배지 (마크다운 원문)</p>
-          <div class="prd-body" id="prd-s1"></div>
-        </div>
-        <div class="prd-section">
-          <h2>2. 아키텍처 &amp; 기술 정책</h2>
-          <p class="prd-section-hint">가이드 §2 섹션 2</p>
-          <div class="prd-body" id="prd-s2"></div>
-        </div>
-        <div class="prd-section">
-          <h2>3. 수용기준 &amp; 비기능 요구사항</h2>
-          <p class="prd-section-hint">가이드 §2 섹션 3</p>
-          <div class="prd-body" id="prd-s3"></div>
-        </div>
-        <div class="prd-section">
-          <h2>4. 로드맵 &amp; 우선순위</h2>
-          <p class="prd-section-hint">가이드 §2 섹션 4</p>
-          <div class="prd-body" id="prd-s4"></div>
-        </div>
-        <div class="prd-section">
-          <h2>5. 위험 요소 &amp; 완화 전략</h2>
-          <p class="prd-section-hint">가이드 §2 섹션 5</p>
-          <div class="prd-body" id="prd-s5"></div>
-        </div>
+        {#each PRD_BLOCKS as b (b.key)}
+          <div class="prd-section">
+            <h2>{b.title}</h2>
+            <p class="prd-section-hint">{b.hint}</p>
+            {#if $currentProject}
+              {#if prdAuto}
+                <div class="prd-edit-toolbar">
+                  <button
+                    type="button"
+                    class="prd-sec-reset"
+                    on:click={() => revertPrdSectionDraft(b.key)}>노드 초안으로</button>
+                  <span class="prd-save-hint">편집 내용 자동 저장 · 다운로드 PRD에 반영</span>
+                </div>
+                <textarea
+                  class="prd-section-editor"
+                  rows="14"
+                  spellcheck="false"
+                  aria-label={`${b.title} 마크다운 편집`}
+                  value={prdText[b.key]}
+                  on:input={(e) => {
+                    prdText = { ...prdText, [b.key]: e.currentTarget.value };
+                    schedulePrdDraftSave(b.key);
+                  }}
+                />
+              {:else}
+                <div class="prd-body">
+                  <p class="prd-empty">PRD 본문을 나눌 수 없어요. 새로고침 후에도 같으면 알려 주세요.</p>
+                </div>
+              {/if}
+            {:else}
+              <div class="prd-body">
+                <p class="prd-empty">프로젝트를 먼저 열어줘.</p>
+              </div>
+            {/if}
+          </div>
+        {/each}
       </div>
 
       <div class="view" class:active={$activeView === 'spec'} id="V-SPEC">
@@ -3741,11 +3862,33 @@
     padding-bottom: 16px;
     border-bottom: 2px solid #6b4ef6;
   }
+  .prd-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .prd-l1-copy-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid #c4b8fc;
+    background: #f5f2ff;
+    color: #5b3fd9;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .prd-l1-copy-btn:hover {
+    background: #ebe4ff;
+  }
   .prd-title {
     font-size: 20px;
     font-weight: 700;
     color: #1a1a1a;
-    margin-bottom: 6px;
+    margin-bottom: 0;
   }
   .prd-meta {
     display: flex;
@@ -3780,6 +3923,49 @@
   }
   .prd-body {
     min-height: 36px;
+  }
+  .prd-edit-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    margin: 0 0 8px;
+  }
+  .prd-sec-reset {
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid #ddd;
+    background: #fff;
+    color: #444;
+    cursor: pointer;
+  }
+  .prd-sec-reset:hover {
+    border-color: #bbb;
+    background: #fafafa;
+  }
+  .prd-save-hint {
+    font-size: 11px;
+    color: #999;
+  }
+  .prd-section-editor {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 160px;
+    max-height: 38vh;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.55;
+    color: #333;
+    background: #faf9f7;
+    border: 1px solid #ece8e2;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   :global(.prd-pre-wrap) {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

@@ -1,21 +1,29 @@
 /**
- * PRD 표준 작성 가이드 v2.0 (통용) 구조에 맞춘 Plannode 자동 초안.
- * 참고: PRD_표준작성가이드_v2.0.md — 문서 내 큰 제목은 가이드의 5개 섹션(기능명세·아키텍처·수용기준·로드맵·위험)에 대응.
+ * PRD 표준 작성 가이드 v2.0 — 노드 기반 기획 정보에서 **현재 프로젝트**의 AI 코딩 개발용 핵심 PRD를 자동 추출한다.
+ * 뷰: s1 = 핵심 요약(개요·가치·시나리오·지표·속성) → s2 = 기능명세 → s3~s5 = 아키텍처·비기능·로드맵+위험.
+ *
+ * **구조 철학:** 업계에서 쓰는 PRD 흐름(Manyfast 등 **참고 서비스** 포함)에서 **영감**만 취하고,
+ * 절 제목·데이터 출처·배치는 Plannode **노드 타입·배지·프로젝트 메타**에 맞게 **재설계**한다. 외부 문서 그대로의 복붙·패러프레이즈는 지양.
+ * 제품 UI·내보내기 MD에는 타사 브랜드를 넣지 않는다(내부 `docs/` 매핑 문서만 예시 링크 허용).
  */
 import type { Node, Project } from '$lib/supabase/client';
-import { buildTreeText } from '$lib/ai/contextSerializer';
+import { buildContextFromNodes, buildTreeText, serializeToPrompt } from '$lib/ai/contextSerializer';
 import { buildBadgeContext, getBadgeSetFromNodeInput, formatBadgeTracksForDisplay } from '$lib/ai/badgePromptInjector';
 
 /** 파일럿 런타임 노드와 호환 (metadata.badges = 3트랙) */
 export type PrdNodeInput = Pick<Node, 'id' | 'name'> &
   Partial<Pick<Node, 'description' | 'num' | 'parent_id' | 'badges' | 'node_type' | 'depth' | 'mx' | 'my' | 'metadata'>>;
 
+export type PrdSectionKey = 's1' | 's2' | 's3' | 's4' | 's5';
+
+export const PRD_SECTION_KEYS: readonly PrdSectionKey[] = ['s1', 's2', 's3', 's4', 's5'] as const;
+
 export type PrdProjectInput = Pick<Project, 'id' | 'name' | 'author' | 'start_date' | 'end_date'> &
-  Partial<Pick<Project, 'description' | 'owner_user_id'>>;
+  Partial<Pick<Project, 'description' | 'owner_user_id' | 'prd_section_drafts'>>;
 
 export const PRD_STANDARD_GUIDE_ID = 'PRD_표준작성가이드_v2.0';
 export const PRD_STANDARD_GUIDE_NOTE =
-  '본 문서는 «PRD 표준 작성 가이드 (통용) v2.0»의 5개 섹션 골격을 따릅니다. **프로젝트의 모든 노드** 이름·번호·설명·배지·유형·상위관계·좌표를 PRD 기능명세 형태로 자동 편입했으며, SQL·수치·정책 등은 팀에서 보완하세요.';
+  '이 문서는 일반적인 PRD 작성 흐름에서 **영감**을 받아, Plannode **노드 트리·프로젝트 메타**에 맞게 «PRD_표준작성가이드_v2.0» 형태로 **합성**한 **AI 코딩용 핵심 초안**입니다. 타 제품 문서의 복제가 아닙니다. **PRD 탭**에서 섹션별로 직접 고치면 자동 저장되고, 노드·프로젝트 메타를 바꿔도 초안이 없는 곳은 곧바로 반영됩니다.';
 
 const DN = ['루트', '모듈', '기능', '상세기능', '서브기능', '세부항목', '하위항목', '기타'];
 
@@ -190,6 +198,138 @@ function nodeCatalogMarkdown(nodes: PrdNodeInput[]): string {
   return lines.join('\n');
 }
 
+/**
+ * 레거시 식별자 호환 — `prdCoreSummaryMarkdownV20`와 동일.
+ */
+export function manyfastGuideMarkdown(project: PrdProjectInput, nodes: PrdNodeInput[]): string {
+  return prdCoreSummaryMarkdownV20(project, nodes);
+}
+
+/** v2.0 상단 블록(개요·핵심 가치·타겟·시나리오·성공 지표·속성) — 노드·프로젝트에서 결정적으로 채움(LLM 없음). */
+export function prdCoreSummaryMarkdownV20(project: PrdProjectInput, nodes: PrdNodeInput[]): string {
+  const roots = [...nodes]
+    .filter((n) => n && (n.parent_id == null || n.parent_id === ''))
+    .sort((a, b) => (a.num || '').localeCompare(b.num || '', undefined, { numeric: true }));
+  const root = roots[0];
+  const overviewBody =
+    (root?.description || '').trim() ||
+    (project.description || '').trim() ||
+    '_(개요 본문 없음 — 루트 노드 설명 또는 프로젝트 설명을 채워 주세요.)_';
+
+  const nt = (n: PrdNodeInput) => String(n.node_type || '').toLowerCase();
+  const coreCandidates = nodes.filter((n) => {
+    const t = nt(n);
+    return t === 'module' || t === 'feature';
+  });
+  const coreNodes =
+    coreCandidates.length > 0
+      ? coreCandidates
+      : nodes.filter((n) => {
+          const d = getDepth(nodes, n.id);
+          return d === 1 || d === 2;
+        });
+  const coreSorted = [...coreNodes].sort((a, b) => (a.num || '').localeCompare(b.num || '', undefined, { numeric: true }));
+  const coreLines =
+    coreSorted.length > 0
+      ? coreSorted
+          .map((n) => {
+            const tr = formatBadgeTracksForDisplay(getBadgeSetFromNodeInput(n));
+            const badge = tr === '—' ? '' : ` · 배지 ${tr}`;
+            const desc = (n.description || '').trim();
+            return `- **[${n.num || '—'}] ${mdTableCell(n.name, 80)}**${badge}${desc ? `\n  - ${mdTableCell(desc, 400)}` : ''}`;
+          })
+          .join('\n')
+      : '_(module/feature 노드가 없습니다 — 노드 유형·뎁스를 조정해 주세요.)_';
+
+  const detailNodes = nodes.filter((n) => {
+    const t = nt(n);
+    if (t === 'detail') return true;
+    return getDepth(nodes, n.id) >= 3;
+  });
+  const detailSorted = [...detailNodes].sort((a, b) => (a.num || '').localeCompare(b.num || '', undefined, { numeric: true }));
+  const scenarioLines =
+    detailSorted.length > 0
+      ? detailSorted
+          .filter((n) => (n.description || '').trim())
+          .map((n) => `- **[${n.num || '—'}] ${mdTableCell(n.name, 64)}**: ${mdTableCell(n.description || '', 360)}`)
+          .join('\n') || '_(상세 노드에 시나리오 설명을 채워 주세요.)_'
+      : '_(시나리오용 상세 노드·설명이 없습니다.)_';
+  const treeSnippet = buildTreeText(nodes as Node[]);
+
+  const riskLike = nodes.filter((n) => {
+    const t = nt(n);
+    if (t === 'risk' || t === 'decision') return true;
+    const bs = getBadgeSetFromNodeInput(n);
+    const flat = [...bs.dev, ...bs.ux, ...bs.prj];
+    return flat.includes('tdd') || flat.includes('usp');
+  });
+  const riskSorted = [...riskLike].sort((a, b) => (a.num || '').localeCompare(b.num || '', undefined, { numeric: true }));
+  const kpiLines =
+    riskSorted.length > 0
+      ? riskSorted
+          .map((n) => {
+            const desc = (n.description || '').trim() || '_(설명 보완)_';
+            return `- **[${n.num || '—'}] ${mdTableCell(n.name, 64)}** (${nt(n) || '—'}): ${mdTableCell(desc, 280)}`;
+          })
+          .join('\n')
+      : '_(TDD·USP 배지 노드 또는 risk/decision 유형 노드를 추가하면 성공·리스크 초안이 채워집니다.)_';
+
+  const typeCounts = new Map<string, number>();
+  for (const n of nodes) {
+    const k = n.node_type && String(n.node_type).trim() ? String(n.node_type) : '(미지정)';
+    typeCounts.set(k, (typeCounts.get(k) || 0) + 1);
+  }
+  const typeRows = [...typeCounts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([k, v]) => `| ${mdTableCell(k, 24)} | ${v} |`)
+    .join('\n');
+
+  return `> **합성 방식**: 업계 PRD 절 관행을 참고해 Plannode 노드·메타에 맞게 **재배치**한 것입니다(외부 문서 복붙 아님).  
+> **편집**: 아래 내용은 노드 설명·유형·배지·프로젝트 메타에서 끌어옵니다. 수정은 **노드 뷰·프로젝트 모달**에서 하세요.
+
+### 1. 개요 (목표·배경)
+
+**한 줄 정의**: ${mdTableCell(project.name || '—', 200)}
+
+**제품 목표·배경**:
+${overviewBody}
+
+### 2. 핵심 가치 (문제·해결·차별 — module / feature 요약)
+
+${coreLines}
+
+### 3. 타겟 및 시나리오 (사용자·흐름)
+
+**작성자·내부 표기**: ${mdTableCell(project.author || '—', 120)}
+
+**상세 노드 기반 시나리오 문장**:
+${scenarioLines}
+
+**트리 흐름 (요약)**:
+\`\`\`text
+${treeSnippet || '_(노드 없음)_'}
+\`\`\`
+
+### 4. 성공 지표·리스크 (KPI·리스크·오픈 이슈 초안)
+
+${kpiLines}
+
+### 5. 속성 (일정·역할·환경)
+
+| 항목 | 값 |
+|------|-----|
+| 서비스 채널 | 웹 (Plannode 기본) |
+| 작성자 | ${mdTableCell(project.author || '—', 80)} |
+| 기간 | ${mdTableCell(`${project.start_date} ~ ${project.end_date}`, 80)} |
+| 프로젝트 id | \`${project.id}\` |
+
+**node_type 분포**:
+| node_type | 개수 |
+|-----------|------|
+${typeRows || '| — | 0 |'}
+`;
+}
+
 /** 기능명세: 프로젝트 메타 + 트리 + 전 노드 PRD 블록 + 요약표 + 배지 */
 function section1Markdown(project: PrdProjectInput, nodes: PrdNodeInput[]): string {
   const ordered = collectNodesDfsOrder(nodes);
@@ -293,6 +433,112 @@ ${chain}
 `;
 }
 
+/**
+ * `buildPrdMarkdownV20` 본문의 `##` 경계 문자열 — 섹션 본문에 `---`가 들어가도 안전하게 슬라이스한다.
+ * (제목 문자열은 아래 `buildPrdMarkdownV20` 템플릿과 반드시 동일할 것)
+ */
+/** `buildPrdMarkdownV20` 첫 본문 절 — 변경 시 동일 문자열로 템플릿·슬라이서 유지 */
+const PRD_CANON_H_CORE_SUMMARY = '\n## 핵심 PRD 요약 (표준 가이드 v2.0 — 개요·가치·시나리오·지표·속성)\n';
+const PRD_CANON_H_S1 = '\n## 1. 기능명세 (Feature Specification)\n';
+const PRD_CANON_H_S2 = '\n## 2. 아키텍처 & 기술 정책\n';
+const PRD_CANON_H_S3 = '\n## 3. 수용기준 & 비기능 요구사항\n';
+const PRD_CANON_H_S4 = '\n## 4. 로드맵 & 우선순위\n';
+const PRD_CANON_H_S5 = '\n## 5. 위험 요소 & 완화 전략\n';
+
+function sliceCanonicalPrdMarkdownForView(full: string): {
+  headerBlock: string;
+  s1: string;
+  s2: string;
+  s3: string;
+  s4: string;
+  s5: string;
+} | null {
+  const iM = full.indexOf(PRD_CANON_H_CORE_SUMMARY);
+  const i1 = full.indexOf(PRD_CANON_H_S1);
+  const i2 = full.indexOf(PRD_CANON_H_S2);
+  const i3 = full.indexOf(PRD_CANON_H_S3);
+  const i4 = full.indexOf(PRD_CANON_H_S4);
+  const i5 = full.indexOf(PRD_CANON_H_S5);
+  if (iM < 0 || i1 < 0 || i2 < 0 || i3 < 0 || i4 < 0 || i5 < 0 || i5 < i4) return null;
+  return {
+    headerBlock: full.slice(0, iM).trim(),
+    s1: full.slice(iM + 1, i1).trim(),
+    s2: full.slice(i1 + 1, i2).trim(),
+    s3: full.slice(i2 + 1, i3).trim(),
+    s4: full.slice(i3 + 1, i4).trim(),
+    /** §4·§5 한 패널 — 다운로드 MD와 동일 구간(`## 4`~파일 끝) */
+    s5: full.slice(i4 + 1).trim()
+  };
+}
+
+function joinPrdSectionsChunk(a: string, b: string): string {
+  const x = a.trimEnd();
+  const y = b.trimStart();
+  if (!y.length) return x;
+  if (!x.length) return y;
+  const xe = x.trimEnd();
+  if (/\n---\s*$/.test(xe) || xe.endsWith('---')) return `${x}\n\n${y}`;
+  return `${x}\n\n---\n\n${y}`;
+}
+
+function reconstructPrdFromParts(headerBlock: string, sections: Record<PrdSectionKey, string>): string {
+  let body = sections.s1.trim();
+  for (let i = 1; i < PRD_SECTION_KEYS.length; i++) {
+    body = joinPrdSectionsChunk(body, sections[PRD_SECTION_KEYS[i]]);
+  }
+  return `${headerBlock.trimEnd()}\n${body}\n`;
+}
+
+/** 노드·메타에서만 생성된 s1~s5(편집기 초기값·병합 기준) */
+export function getPrdAutoSections(
+  project: PrdProjectInput,
+  nodes: PrdNodeInput[]
+): { headerBlock: string; sections: Record<PrdSectionKey, string> } | null {
+  const full = buildPrdMarkdownV20(project, nodes);
+  const sl = sliceCanonicalPrdMarkdownForView(full);
+  if (!sl) return null;
+  return {
+    headerBlock: sl.headerBlock,
+    sections: {
+      s1: sl.s1.trim(),
+      s2: sl.s2.trim(),
+      s3: sl.s3.trim(),
+      s4: sl.s4.trim(),
+      s5: sl.s5.trim()
+    }
+  };
+}
+
+/** BPR·뷰 동기: 초안이 있는 섹션만 덮어쓴 단일 MD */
+export function buildPrdMarkdownMerged(
+  project: PrdProjectInput,
+  nodes: PrdNodeInput[],
+  drafts?: Partial<Record<PrdSectionKey, string>> | null
+): string {
+  const full = buildPrdMarkdownV20(project, nodes);
+  const sl = sliceCanonicalPrdMarkdownForView(full);
+  if (!sl) return full;
+  const sections: Record<PrdSectionKey, string> = {
+    s1: sl.s1.trim(),
+    s2: sl.s2.trim(),
+    s3: sl.s3.trim(),
+    s4: sl.s4.trim(),
+    s5: sl.s5.trim()
+  };
+  let touched = false;
+  if (drafts) {
+    for (const k of PRD_SECTION_KEYS) {
+      const v = drafts[k];
+      if (v != null && String(v).trim() !== '') {
+        sections[k] = String(v);
+        touched = true;
+      }
+    }
+  }
+  if (!touched) return full;
+  return reconstructPrdFromParts(sl.headerBlock, sections);
+}
+
 function section5Markdown(): string {
   return `### 5.1 기술 위험 (가이드 «섹션 5» 표)
 
@@ -318,6 +564,12 @@ export function buildPrdMarkdownV20(project: PrdProjectInput, nodes: PrdNodeInpu
 > **작성자**: ${esc(project.author)} · **기간**: ${esc(project.start_date)} ~ ${esc(project.end_date)}  
 > **설명**: ${esc(project.description || '—')}  
 > **자동 생성 시각**: ${new Date().toISOString()}
+
+---
+
+## 핵심 PRD 요약 (표준 가이드 v2.0 — 개요·가치·시나리오·지표·속성)
+
+${manyfastGuideMarkdown(project, nodes)}
 
 ---
 
@@ -351,7 +603,7 @@ ${section5Markdown()}
 `;
 }
 
-/** PRD 뷰(#V-PRD)용 HTML 조각 — 마크다운 원문을 이스케이프해 출력 파일과 동일 구조로 표시 */
+/** PRD 뷰(#V-PRD)용 HTML 조각 — `buildPrdMarkdownV20` 단일 문자열을 슬라이스해 BPR 다운로드와 동일 소스(F4-2) */
 export function buildPrdViewHtmlV20(project: PrdProjectInput, nodes: PrdNodeInput[]): {
   titleText: string;
   metaHtml: string;
@@ -363,15 +615,75 @@ export function buildPrdViewHtmlV20(project: PrdProjectInput, nodes: PrdNodeInpu
   s5: string;
 } {
   const pre = (md: string) => `<pre class="prd-pre-wrap" spellcheck="false">${escapeHtml(md)}</pre>`;
-
+  const full = buildPrdMarkdownV20(project, nodes);
+  const slices = sliceCanonicalPrdMarkdownForView(full);
+  if (slices) {
+    const titleLine = slices.headerBlock.match(/^#\s*(.+)$/m)?.[1]?.trim() ?? `${project.name} — PRD`;
+    const titleText =
+      titleLine
+        .replace(/\s*—\s*AI 개발용 PRD\s*$/i, '')
+        .replace(/\s*—\s*Product Requirements Document\s*$/i, '')
+        .trim() + ' — PRD';
+    return {
+      titleText,
+      metaHtml: `<span><strong>작성자:</strong> ${escapeHtml(project.author)}</span><span><strong>기간:</strong> ${escapeHtml(project.start_date)} ~ ${escapeHtml(project.end_date)}</span><span><strong>노드:</strong> ${nodes.length}개</span>`,
+      versionLineHtml: `${escapeHtml(PRD_STANDARD_GUIDE_NOTE)} <code>${escapeHtml(PRD_STANDARD_GUIDE_ID)}</code>`,
+      s1: pre(slices.s1),
+      s2: pre(slices.s2),
+      s3: pre(slices.s3),
+      s4: pre(slices.s4),
+      s5: pre(slices.s5)
+    };
+  }
+  const mf = prdCoreSummaryMarkdownV20(project, nodes);
   return {
     titleText: `${project.name} — PRD`,
     metaHtml: `<span><strong>작성자:</strong> ${escapeHtml(project.author)}</span><span><strong>기간:</strong> ${escapeHtml(project.start_date)} ~ ${escapeHtml(project.end_date)}</span><span><strong>노드:</strong> ${nodes.length}개</span>`,
     versionLineHtml: `${escapeHtml(PRD_STANDARD_GUIDE_NOTE)} <code>${escapeHtml(PRD_STANDARD_GUIDE_ID)}</code>`,
-    s1: pre(section1Markdown(project, nodes)),
-    s2: pre(section2Markdown(project)),
-    s3: pre(section3Markdown()),
-    s4: pre(section4Markdown(nodes)),
-    s5: pre(section5Markdown())
+    s1: pre(mf),
+    s2: pre(section1Markdown(project, nodes)),
+    s3: pre(section2Markdown(project)),
+    s4: pre(section3Markdown()),
+    s5: pre(`${section4Markdown(nodes)}\n\n---\n\n${section5Markdown()}`)
   };
 }
+
+/**
+ * L1 `serializeToPrompt` + `OutputIntent.PRD` + 캐논 MD **핵심 요약 절**(s1) — AI 보완용 단일 블록.
+ */
+export function buildPrdL1CoreSummaryPrompt(
+  project: PrdProjectInput,
+  nodes: PrdNodeInput[],
+  drafts?: Partial<Record<PrdSectionKey, string>> | null
+): string {
+  const asNodes = nodes as Node[];
+  const roots = asNodes.filter((n) => !n.parent_id);
+  const anchorId = roots[0]?.id ?? asNodes[0]?.id;
+  if (!anchorId) {
+    return '_(노드 없음 — 프롬프트를 만들 수 없음)_';
+  }
+  const ctx = buildContextFromNodes(anchorId, asNodes, {
+    name: project.name,
+    description: project.description,
+    domain: 'custom',
+    techStack: [],
+    outputIntents: ['PRD']
+  });
+  const layer1 = serializeToPrompt(ctx);
+  const full = buildPrdMarkdownMerged(project, nodes, drafts ?? project.prd_section_drafts);
+  const slices = sliceCanonicalPrdMarkdownForView(full);
+  const targetSection = slices?.s1?.trim() ?? prdCoreSummaryMarkdownV20(project, nodes);
+  return [
+    '<!-- Plannode — OutputIntent.PRD · L1 serializeToPrompt · 핵심 PRD 요약 절(v2.0) -->',
+    '',
+    layer1,
+    '',
+    '---',
+    '[TARGET_SECTION: 핵심 PRD 요약 — 노드·프로젝트에서 추출한 결정적 초안. 톤·누락 보완 시 헤딩·표 구조 유지.]',
+    '',
+    targetSection
+  ].join('\n');
+}
+
+/** @deprecated `buildPrdL1CoreSummaryPrompt` 사용 */
+export const buildPrdL1SingleSectionManyfastPrompt = buildPrdL1CoreSummaryPrompt;

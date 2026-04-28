@@ -2,7 +2,11 @@
  * Plannode 파일럿 캔버스 엔진 (Vanilla) — SvelteKit 임베드용.
  * DOM 계약: docs/PILOT_FUNCTIONAL_SPEC.md §1.1
  */
-import { buildPrdMarkdownV20, buildPrdViewHtmlV20 } from '$lib/prdStandardV20';
+import {
+  buildPrdL1CoreSummaryPrompt,
+  buildPrdMarkdownMerged,
+  buildPrdViewHtmlV20
+} from '$lib/prdStandardV20';
 import {
   migrateLegacyBadgesToSet,
   flattenBadgeSet,
@@ -1058,35 +1062,33 @@ function toMdLine(n, d = 0, lines = [], path = new Set()) {
   return lines;
 }
 
+function copyPrdL1CoreSummaryPrompt() {
+  if (!curP) {
+    toast('프로젝트를 먼저 선택해줘');
+    return;
+  }
+  const text = buildPrdL1CoreSummaryPrompt(curP, nodes, curP.prd_section_drafts);
+  navigator.clipboard
+    .writeText(text)
+    .then(() => toast('L1·핵심 PRD 요약 프롬프트 복사 ✓'))
+    .catch(() => toast('클립보드 복사에 실패했어'));
+}
+
 export function buildPRD() {
   const title = document.getElementById('prd-title');
   if (!title) return;
   const meta = document.getElementById('prd-meta');
   const versionLine = document.getElementById('prd-version-line');
-  const s1 = document.getElementById('prd-s1');
-  const s2 = document.getElementById('prd-s2');
-  const s3 = document.getElementById('prd-s3');
-  const s4 = document.getElementById('prd-s4');
-  const s5 = document.getElementById('prd-s5');
-  const emptyMsg = '<p class="prd-empty">프로젝트를 먼저 열어줘.</p>';
   if (!curP) {
     title.textContent = 'PRD 문서';
     if (meta) meta.innerHTML = '';
     if (versionLine) versionLine.innerHTML = '';
-    [s1, s2, s3, s4, s5].forEach((el) => {
-      if (el) el.innerHTML = emptyMsg;
-    });
     return;
   }
   const chunks = buildPrdViewHtmlV20(curP, nodes);
   title.textContent = chunks.titleText;
   if (meta) meta.innerHTML = chunks.metaHtml;
   if (versionLine) versionLine.innerHTML = chunks.versionLineHtml;
-  if (s1) s1.innerHTML = chunks.s1;
-  if (s2) s2.innerHTML = chunks.s2;
-  if (s3) s3.innerHTML = chunks.s3;
-  if (s4) s4.innerHTML = chunks.s4;
-  if (s5) s5.innerHTML = chunks.s5;
 }
 
 /** CSV(엑셀 호환) 셀 이스케이프 — 쉼표·따옴표·줄바꿈 포함 시 RFC4180 따옴표 규칙 */
@@ -2731,7 +2733,7 @@ export function initPlannode(opts = {}) {
       return;
     }
     const slug = slugExportName(curP.name);
-    const prd = buildPrdMarkdownV20(curP, nodes);
+    const prd = buildPrdMarkdownMerged(curP, nodes, curP.prd_section_drafts);
     dlFile(prd, 'text/markdown;charset=utf-8', `${slug}-prd-v20.md`);
     toast('PRD 다운로드 완료 ✓');
     emitAutoCloudSync('prd-export');
@@ -3041,6 +3043,7 @@ export function initPlannode(opts = {}) {
       curP = { ...curP, ...project };
       const pnt = document.getElementById('PNT');
       if (pnt) pnt.textContent = curP.name || '—';
+      if (curView === 'prd') buildPRD();
     },
     hydrateFromStore(project, pilotNodes) {
       syncing = true;
@@ -3073,6 +3076,7 @@ export function initPlannode(opts = {}) {
         if (pnt) pnt.textContent = project.name;
         if (ES) ES.style.display = 'none';
         render();
+        if (curView === 'prd') buildPRD();
       } finally {
         syncing = false;
       }
@@ -3087,6 +3091,7 @@ export function initPlannode(opts = {}) {
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';
         applyTx();
+        if (curView === 'prd') buildPRD();
       } finally {
         syncing = false;
       }
@@ -3111,6 +3116,12 @@ export function initPlannode(opts = {}) {
     },
     setNodeMapLayout(mode) {
       applyNodeMapLayout(mode);
-    }
+    },
+    /** PRD 탭에서 스토어·메타 동기 후 본문 재생성 (PILOT §9) */
+    refreshPrdView() {
+      if (curView === 'prd') buildPRD();
+    },
+    /** L1 + OutputIntent.PRD + 핵심 요약 절 클립보드 */
+    copyPrdL1CoreSummaryPrompt
   };
 }
