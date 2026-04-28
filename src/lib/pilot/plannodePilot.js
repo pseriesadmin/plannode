@@ -2,7 +2,11 @@
  * Plannode 파일럿 캔버스 엔진 (Vanilla) — SvelteKit 임베드용.
  * DOM 계약: docs/PILOT_FUNCTIONAL_SPEC.md §1.1
  */
-import { buildPrdMarkdownV20, buildPrdViewHtmlV20 } from '$lib/prdStandardV20';
+import {
+  buildPrdL1CoreSummaryPrompt,
+  buildPrdMarkdownMerged,
+  buildPrdViewHtmlV20
+} from '$lib/prdStandardV20';
 import {
   migrateLegacyBadgesToSet,
   flattenBadgeSet,
@@ -166,10 +170,16 @@ const COL_W = 244,
   /** 하위분포: 깊이(행) 간격 — ROW_H 대비 배수 · 이전 간격 대비 ×1.5 적용 시 2.25 (=1.5²) */
   TOPDOWN_ROW_GAP_MULT = 2.25,
   /** 하위분포 좌측 뎁스 스트립 폭 — 한 줄 라벨 기준 최소 */
-  TOPDOWN_DEPTH_STRIP_W = 26;
+  TOPDOWN_DEPTH_STRIP_W = 26,
+  /** 우측분포: 열·행(댑스)·그룹 간격 배수 — 기본 대비 1.5배(topdown 미적용) */
+  RIGHT_LAYOUT_GAP_MULT = 1.5;
 
+function layoutColW() {
+  return nodeMapLayoutMode === 'right' ? COL_W * RIGHT_LAYOUT_GAP_MULT : COL_W;
+}
 function layoutRowH() {
-  return nodeMapLayoutMode === 'topdown' ? ROW_H * TOPDOWN_ROW_GAP_MULT : ROW_H;
+  if (nodeMapLayoutMode === 'topdown') return ROW_H * TOPDOWN_ROW_GAP_MULT;
+  return ROW_H * RIGHT_LAYOUT_GAP_MULT;
 }
 function layoutOriginX() {
   return 28 + (nodeMapLayoutMode === 'topdown' ? TOPDOWN_DEPTH_STRIP_W : 0);
@@ -185,6 +195,11 @@ let scale = 0.85,
   ps = { x: 0, y: 0 },
   /** #CW 배경 팬·Shift 범위 선택 중인 포인터 (터치/펜과 마우스 구분) */
   activeCwPointerId = null,
+  /** 빈 캔버스(#CW/#CV/#EG)에서 추적 중인 포인터 — 터치 핀치 줌·좌표 갱신 */
+  cwGesturePointers = new Map(),
+  pinchActive = false,
+  pinchStartDist = 1,
+  pinchStartScale = 1,
   selId = null,
   /** Shift+클릭으로 묶인 다중 선택(그룹 이동). 영속 필드 아님. */
   multiSel = new Set(),
@@ -217,6 +232,8 @@ let projects = [],
   curView = 'tree';
 /** @type {'right' | 'topdown'} — 우측분포(기본) · 하위분포(탑다운) */
 let nodeMapLayoutMode = 'right';
+/** 프로젝트 전환 시 silent 맞춤이 #CW 미표시로 실패했을 때 트리 탭 전환 시 재시도 */
+let pendingSilentViewportFit = false;
 
 let syncing = false;
 let onPersist = null;
@@ -1053,35 +1070,33 @@ function toMdLine(n, d = 0, lines = [], path = new Set()) {
   return lines;
 }
 
+function copyPrdL1CoreSummaryPrompt() {
+  if (!curP) {
+    toast('프로젝트를 먼저 선택해줘');
+    return;
+  }
+  const text = buildPrdL1CoreSummaryPrompt(curP, nodes, curP.prd_section_drafts);
+  navigator.clipboard
+    .writeText(text)
+    .then(() => toast('L1·핵심 PRD 요약 프롬프트 복사 ✓'))
+    .catch(() => toast('클립보드 복사에 실패했어'));
+}
+
 export function buildPRD() {
   const title = document.getElementById('prd-title');
   if (!title) return;
   const meta = document.getElementById('prd-meta');
   const versionLine = document.getElementById('prd-version-line');
-  const s1 = document.getElementById('prd-s1');
-  const s2 = document.getElementById('prd-s2');
-  const s3 = document.getElementById('prd-s3');
-  const s4 = document.getElementById('prd-s4');
-  const s5 = document.getElementById('prd-s5');
-  const emptyMsg = '<p class="prd-empty">프로젝트를 먼저 열어줘.</p>';
   if (!curP) {
     title.textContent = 'PRD 문서';
     if (meta) meta.innerHTML = '';
     if (versionLine) versionLine.innerHTML = '';
-    [s1, s2, s3, s4, s5].forEach((el) => {
-      if (el) el.innerHTML = emptyMsg;
-    });
     return;
   }
   const chunks = buildPrdViewHtmlV20(curP, nodes);
   title.textContent = chunks.titleText;
   if (meta) meta.innerHTML = chunks.metaHtml;
   if (versionLine) versionLine.innerHTML = chunks.versionLineHtml;
-  if (s1) s1.innerHTML = chunks.s1;
-  if (s2) s2.innerHTML = chunks.s2;
-  if (s3) s3.innerHTML = chunks.s3;
-  if (s4) s4.innerHTML = chunks.s4;
-  if (s5) s5.innerHTML = chunks.s5;
 }
 
 /** CSV(엑셀 호환) 셀 이스케이프 — 쉼표·따옴표·줄바꿈 포함 시 RFC4180 따옴표 규칙 */
@@ -1336,11 +1351,18 @@ function mkNodeDeleteBtn(fn) {
   return b;
 }
 
-function fitToScreen() {
+/** @returns {boolean} 성공 시 true · 노드 없음·캔버스 폭 0이면 false */
+function fitViewportToContent(opts = {}) {
+  const silent = !!opts.silent;
   if (!nodes.length) {
-    toast('노드가 없어');
-    return;
+    if (!silent) toast('노드가 없어');
+    return false;
   }
+  if (!CW || CW.offsetWidth < 1) {
+    if (silent) pendingSilentViewportFit = true;
+    return false;
+  }
+  pendingSilentViewportFit = false;
   /** 미니맵(updMM)과 동일한 카드 AABB — 모두보기 후 시야·미니맵 전체 맵 중심이 맞도록 */
   let mnX = Infinity,
     mnY = Infinity,
@@ -1371,7 +1393,12 @@ function fitToScreen() {
   panY = H0 / 2 - cy * ns;
   scale = ns;
   applyTx();
-  toast('전체 노드 맞춤 완료 ⊡');
+  if (!silent) toast('전체 노드 맞춤 완료 ⊡');
+  return true;
+}
+
+function fitToScreen() {
+  fitViewportToContent({ silent: false });
 }
 
 /** NEXT-5: 드래그 수동 좌표 전부 제거 → bld/ap 자동 열 배치만 사용 */
@@ -1546,6 +1573,11 @@ function applyNodeMapLayout(mode) {
   saveNodeMapLayoutPreference();
   render();
   dispatchNodeMapLayoutEvent();
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      fitViewportToContent({ silent: true });
+    });
+  });
 }
 
 /** 탑다운: `row` = 깊이, `col` = 가로(부모는 자식 col 범위의 중심) */
@@ -1580,7 +1612,7 @@ function bldTopDown(nid, depth, colCursor) {
 
 const ap = (id) => {
   const l = lm[id];
-  return l ? { x: l.col * COL_W + layoutOriginX(), y: l.row * layoutRowH() + 30 } : { x: 0, y: 0 };
+  return l ? { x: l.col * layoutColW() + layoutOriginX(), y: l.row * layoutRowH() + 30 } : { x: 0, y: 0 };
 };
 const gp = (n) => (n.mx != null && n.my != null ? { x: n.mx, y: n.my } : ap(n.id));
 
@@ -1644,7 +1676,7 @@ function render() {
       const p = document.createElement('div');
       p.className = 'cp cp' + Math.min(i, 4);
       p.textContent = DN[i] ?? `Lv${i}`;
-      p.style.flex = `0 0 ${COL_W}px`;
+      p.style.flex = `0 0 ${layoutColW()}px`;
       p.style.minWidth = '0';
       p.style.boxSizing = 'border-box';
       cpRow.appendChild(p);
@@ -1726,7 +1758,8 @@ function render() {
       }
     }
     nd.addEventListener('pointerdown', (e) => {
-      if (!e.isPrimary || e.button !== 0) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (!e.isPrimary) return;
       if (e.target.closest('button')) return;
       if (e.pointerType === 'touch') touchCtxMaybeStart(e, n);
       else touchCtxClearAll();
@@ -2725,7 +2758,7 @@ export function initPlannode(opts = {}) {
       return;
     }
     const slug = slugExportName(curP.name);
-    const prd = buildPrdMarkdownV20(curP, nodes);
+    const prd = buildPrdMarkdownMerged(curP, nodes, curP.prd_section_drafts);
     dlFile(prd, 'text/markdown;charset=utf-8', `${slug}-prd-v20.md`);
     toast('PRD 다운로드 완료 ✓');
     emitAutoCloudSync('prd-export');
@@ -2744,30 +2777,83 @@ export function initPlannode(opts = {}) {
   });
 
   const onCwDown = (e) => {
-    if (!e.isPrimary || e.button !== 0) return;
-    if (e.target === CW || e.target === CV || e.target === EG) {
-      activeCwPointerId = e.pointerId;
-      try {
-        e.preventDefault();
-      } catch (_) {}
-      // Shift 누름 상태: 범위 선택 모드 시작
-      if (e.shiftKey && e.button === 0) {
-        const g = cwClientToGraph(e.clientX, e.clientY);
-        selectionBox = { x0: g.gx, y0: g.gy, x: g.gx, y: g.gy };
-        return;
-      }
+    const bg = e.target === CW || e.target === CV || e.target === EG;
+    if (!bg) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    // 두 번째 손가락(멀티터치): isPrimary가 false — 첫 손가락이 이미 캔버스에 있을 때만 허용
+    if (!e.isPrimary && cwGesturePointers.size === 0) return;
 
-      // Shift 없음: 팬 활성화 + 그룹 선택 해제 (§4.0.1 재연결 모드는 Esc·드롭으로만 종료)
-      if (e.button === 0) {
-        multiSel.clear();
-        render();
-      }
-      panning = true;
-      ps = { x: e.clientX, y: e.clientY };
-      CW.style.cursor = 'grabbing';
+    try {
+      e.preventDefault();
+    } catch (_) {}
+
+    cwGesturePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (cwGesturePointers.size >= 2) {
+      const pts = [...cwGesturePointers.values()];
+      pinchStartDist = Math.max(
+        24,
+        Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
+      );
+      pinchStartScale = scale;
+      pinchActive = true;
+      panning = false;
+      activeCwPointerId = null;
+      selectionBox = null;
+      CW.style.cursor = 'default';
+      try {
+        CW.setPointerCapture(e.pointerId);
+      } catch (_) {}
+      return;
     }
+
+    if (!e.isPrimary) return;
+
+    activeCwPointerId = e.pointerId;
+    try {
+      CW.setPointerCapture(e.pointerId);
+    } catch (_) {}
+
+    // Shift 누름 상태: 범위 선택 모드 시작
+    if (e.shiftKey && (e.pointerType !== 'mouse' || e.button === 0)) {
+      const g = cwClientToGraph(e.clientX, e.clientY);
+      selectionBox = { x0: g.gx, y0: g.gy, x: g.gx, y: g.gy };
+      return;
+    }
+
+    // Shift 없음: 팬 활성화 + 그룹 선택 해제 (§4.0.1 재연결 모드는 Esc·드롭으로만 종료)
+    if (e.pointerType !== 'mouse' || e.button === 0) {
+      multiSel.clear();
+      render();
+    }
+    panning = true;
+    ps = { x: e.clientX, y: e.clientY };
+    CW.style.cursor = 'grabbing';
   };
   const onPanMove = (e) => {
+    if (cwGesturePointers.has(e.pointerId)) {
+      cwGesturePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    if (pinchActive && cwGesturePointers.size >= 2) {
+      const ids = [...cwGesturePointers.keys()];
+      const p0 = cwGesturePointers.get(ids[0]);
+      const p1 = cwGesturePointers.get(ids[1]);
+      if (p0 && p1) {
+        const dist = Math.max(24, Math.hypot(p0.x - p1.x, p0.y - p1.y));
+        const next = Math.min(Math.max(pinchStartScale * (dist / pinchStartDist), 0.12), 3);
+        const r = CW.getBoundingClientRect();
+        const mx = (p0.x + p1.x) / 2 - r.left;
+        const my = (p0.y + p1.y) / 2 - r.top;
+        const z = next / scale;
+        panX = mx - (mx - panX) * z;
+        panY = my - (my - panY) * z;
+        scale = next;
+        applyTx();
+      }
+      return;
+    }
+
     if (activeCwPointerId != null && e.pointerId !== activeCwPointerId) return;
     if (selectionBox) {
       // Shift+드래그: 선택 박스 업데이트
@@ -2784,6 +2870,28 @@ export function initPlannode(opts = {}) {
     applyTx();
   };
   const onPanUp = (e) => {
+    const pid = e.pointerId;
+
+    if (cwGesturePointers.has(pid)) {
+      cwGesturePointers.delete(pid);
+      try {
+        if (typeof CW.hasPointerCapture !== 'function' || CW.hasPointerCapture(pid)) {
+          CW.releasePointerCapture(pid);
+        }
+      } catch (_) {}
+    }
+
+    if (pinchActive && cwGesturePointers.size < 2) {
+      pinchActive = false;
+      if (cwGesturePointers.size === 1) {
+        const rem = [...cwGesturePointers.entries()][0];
+        activeCwPointerId = rem[0];
+        panning = true;
+        ps = { x: rem[1].x, y: rem[1].y };
+      }
+      return;
+    }
+
     if (activeCwPointerId == null) return;
     if (e && 'pointerId' in e && e.pointerId !== activeCwPointerId) return;
     if (selectionBox) {
@@ -2836,6 +2944,10 @@ export function initPlannode(opts = {}) {
 
   CW.addEventListener('pointerdown', onCwDown);
   disposers.push(() => CW.removeEventListener('pointerdown', onCwDown));
+  disposers.push(() => {
+    cwGesturePointers.clear();
+    pinchActive = false;
+  });
   document.addEventListener('pointermove', onPanMove);
   disposers.push(() => document.removeEventListener('pointermove', onPanMove));
   document.addEventListener('pointerup', onPanUp);
@@ -2850,7 +2962,8 @@ export function initPlannode(opts = {}) {
     mmc.title = '클릭: 해당 위치를 캔버스 중앙으로 이동';
     mmc.style.cursor = 'pointer';
     const onMiniMapClick = (e) => {
-      if (!nodes.length || e.button !== 0) return;
+      if (!nodes.length) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
       const g = graphFromMiniMapClient(e.clientX, e.clientY);
       if (!g) return;
       e.preventDefault();
@@ -2955,6 +3068,7 @@ export function initPlannode(opts = {}) {
       curP = { ...curP, ...project };
       const pnt = document.getElementById('PNT');
       if (pnt) pnt.textContent = curP.name || '—';
+      if (curView === 'prd') buildPRD();
     },
     hydrateFromStore(project, pilotNodes) {
       syncing = true;
@@ -2987,6 +3101,7 @@ export function initPlannode(opts = {}) {
         if (pnt) pnt.textContent = project.name;
         if (ES) ES.style.display = 'none';
         render();
+        if (curView === 'prd') buildPRD();
       } finally {
         syncing = false;
       }
@@ -3000,7 +3115,9 @@ export function initPlannode(opts = {}) {
         if (ES) ES.style.display = 'flex';
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';
+        pendingSilentViewportFit = false;
         applyTx();
+        if (curView === 'prd') buildPRD();
       } finally {
         syncing = false;
       }
@@ -3010,6 +3127,10 @@ export function initPlannode(opts = {}) {
       curView = view;
       if (view === 'prd') buildPRD();
       if (view === 'spec') buildSpec();
+      if (view === 'tree' && pendingSilentViewportFit) fitViewportToContent({ silent: true });
+    },
+    trySilentViewportFit() {
+      return fitViewportToContent({ silent: true });
     },
     /** 기능명세 그리드 `schedulePersist`(지연) 대기 중 — 탭 닫기·이탈 전 플러시 판별용 */
     hasPendingGridPersist() {
@@ -3025,6 +3146,12 @@ export function initPlannode(opts = {}) {
     },
     setNodeMapLayout(mode) {
       applyNodeMapLayout(mode);
-    }
+    },
+    /** PRD 탭에서 스토어·메타 동기 후 본문 재생성 (PILOT §9) */
+    refreshPrdView() {
+      if (curView === 'prd') buildPRD();
+    },
+    /** L1 + OutputIntent.PRD + 핵심 요약 절 클립보드 */
+    copyPrdL1CoreSummaryPrompt
   };
 }

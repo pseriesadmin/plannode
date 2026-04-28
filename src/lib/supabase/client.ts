@@ -34,6 +34,8 @@ export type Project = {
    * 로컬 `proj_…` id와 별도
    */
   plan_project_id?: string | null;
+  /** PRD 탭 섹션별 사용자 초안(s1~s5) — 로컬·워크스페이스 JSON 동기 */
+  prd_section_drafts?: Partial<Record<'s1' | 's2' | 's3' | 's4' | 's5', string>>;
   created_at: string;
   updated_at: string;
 };
