@@ -137,6 +137,11 @@ export function mountPilotBridge(): { destroy: () => void } {
     syncingFromStore = true;
     try {
       pilotApi.hydrateFromStore(p, storeNodesToPilot(list));
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          pilotApi?.trySilentViewportFit?.();
+        });
+      });
     } finally {
       syncingFromStore = false;
     }

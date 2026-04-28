@@ -170,10 +170,16 @@ const COL_W = 244,
   /** 하위분포: 깊이(행) 간격 — ROW_H 대비 배수 · 이전 간격 대비 ×1.5 적용 시 2.25 (=1.5²) */
   TOPDOWN_ROW_GAP_MULT = 2.25,
   /** 하위분포 좌측 뎁스 스트립 폭 — 한 줄 라벨 기준 최소 */
-  TOPDOWN_DEPTH_STRIP_W = 26;
+  TOPDOWN_DEPTH_STRIP_W = 26,
+  /** 우측분포: 열·행(댑스)·그룹 간격 배수 — 기본 대비 1.5배(topdown 미적용) */
+  RIGHT_LAYOUT_GAP_MULT = 1.5;
 
+function layoutColW() {
+  return nodeMapLayoutMode === 'right' ? COL_W * RIGHT_LAYOUT_GAP_MULT : COL_W;
+}
 function layoutRowH() {
-  return nodeMapLayoutMode === 'topdown' ? ROW_H * TOPDOWN_ROW_GAP_MULT : ROW_H;
+  if (nodeMapLayoutMode === 'topdown') return ROW_H * TOPDOWN_ROW_GAP_MULT;
+  return ROW_H * RIGHT_LAYOUT_GAP_MULT;
 }
 function layoutOriginX() {
   return 28 + (nodeMapLayoutMode === 'topdown' ? TOPDOWN_DEPTH_STRIP_W : 0);
@@ -226,6 +232,8 @@ let projects = [],
   curView = 'tree';
 /** @type {'right' | 'topdown'} — 우측분포(기본) · 하위분포(탑다운) */
 let nodeMapLayoutMode = 'right';
+/** 프로젝트 전환 시 silent 맞춤이 #CW 미표시로 실패했을 때 트리 탭 전환 시 재시도 */
+let pendingSilentViewportFit = false;
 
 let syncing = false;
 let onPersist = null;
@@ -1343,11 +1351,18 @@ function mkNodeDeleteBtn(fn) {
   return b;
 }
 
-function fitToScreen() {
+/** @returns {boolean} 성공 시 true · 노드 없음·캔버스 폭 0이면 false */
+function fitViewportToContent(opts = {}) {
+  const silent = !!opts.silent;
   if (!nodes.length) {
-    toast('노드가 없어');
-    return;
+    if (!silent) toast('노드가 없어');
+    return false;
   }
+  if (!CW || CW.offsetWidth < 1) {
+    if (silent) pendingSilentViewportFit = true;
+    return false;
+  }
+  pendingSilentViewportFit = false;
   /** 미니맵(updMM)과 동일한 카드 AABB — 모두보기 후 시야·미니맵 전체 맵 중심이 맞도록 */
   let mnX = Infinity,
     mnY = Infinity,
@@ -1378,7 +1393,12 @@ function fitToScreen() {
   panY = H0 / 2 - cy * ns;
   scale = ns;
   applyTx();
-  toast('전체 노드 맞춤 완료 ⊡');
+  if (!silent) toast('전체 노드 맞춤 완료 ⊡');
+  return true;
+}
+
+function fitToScreen() {
+  fitViewportToContent({ silent: false });
 }
 
 /** NEXT-5: 드래그 수동 좌표 전부 제거 → bld/ap 자동 열 배치만 사용 */
@@ -1553,6 +1573,11 @@ function applyNodeMapLayout(mode) {
   saveNodeMapLayoutPreference();
   render();
   dispatchNodeMapLayoutEvent();
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      fitViewportToContent({ silent: true });
+    });
+  });
 }
 
 /** 탑다운: `row` = 깊이, `col` = 가로(부모는 자식 col 범위의 중심) */
@@ -1587,7 +1612,7 @@ function bldTopDown(nid, depth, colCursor) {
 
 const ap = (id) => {
   const l = lm[id];
-  return l ? { x: l.col * COL_W + layoutOriginX(), y: l.row * layoutRowH() + 30 } : { x: 0, y: 0 };
+  return l ? { x: l.col * layoutColW() + layoutOriginX(), y: l.row * layoutRowH() + 30 } : { x: 0, y: 0 };
 };
 const gp = (n) => (n.mx != null && n.my != null ? { x: n.mx, y: n.my } : ap(n.id));
 
@@ -1651,7 +1676,7 @@ function render() {
       const p = document.createElement('div');
       p.className = 'cp cp' + Math.min(i, 4);
       p.textContent = DN[i] ?? `Lv${i}`;
-      p.style.flex = `0 0 ${COL_W}px`;
+      p.style.flex = `0 0 ${layoutColW()}px`;
       p.style.minWidth = '0';
       p.style.boxSizing = 'border-box';
       cpRow.appendChild(p);
@@ -3090,6 +3115,7 @@ export function initPlannode(opts = {}) {
         if (ES) ES.style.display = 'flex';
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';
+        pendingSilentViewportFit = false;
         applyTx();
         if (curView === 'prd') buildPRD();
       } finally {
@@ -3101,6 +3127,10 @@ export function initPlannode(opts = {}) {
       curView = view;
       if (view === 'prd') buildPRD();
       if (view === 'spec') buildSpec();
+      if (view === 'tree' && pendingSilentViewportFit) fitViewportToContent({ silent: true });
+    },
+    trySilentViewportFit() {
+      return fitViewportToContent({ silent: true });
     },
     /** 기능명세 그리드 `schedulePersist`(지연) 대기 중 — 탭 닫기·이탈 전 플러시 판별용 */
     hasPendingGridPersist() {
