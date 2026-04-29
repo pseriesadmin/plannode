@@ -21,7 +21,17 @@
     summarizeNodeDiff,
     type StoredNodeSnapshot
   } from '$lib/stores/nodeSnapshotHistory';
-  import { parsePlannodeTreeV1ImportText } from '$lib/plannodeTreeV1';
+  import {
+    parsePlannodeTreeV1ImportText,
+    type ParsePlannodeTreeV1Result,
+    PLANNODE_TREE_IMPORT_BJI_ARIA_LABEL,
+    PLANNODE_TREE_IMPORT_BJI_TITLE
+  } from '$lib/plannodeTreeV1';
+  import { extractDocxPlainTextFromFile } from '$lib/docxPlainText';
+  import {
+    outlinePlainTextToPlannodeTreeV1,
+    parseMarkdownFileForProjectImport
+  } from '$lib/outlineToPlannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
   import { isSupabaseCloudConfigured } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
@@ -614,13 +624,69 @@
     void tick().then(() => syncViewsTbPad(showPad));
   }
 
+  /** GATE B 확정: 단일 가져오기 파일 상한 (바이트). docx·대형 md 공통. */
+  const PLANNODE_IMPORT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+  /** GATE B: docx→헤딩 휴리스틱 생성 노드 상한(루트 포함) */
+  const PLANNODE_IMPORT_MAX_NODES = 300;
+
+  function isPlannodeImportAllowedByName(name: string): boolean {
+    const n = name.trim().toLowerCase();
+    return (
+      n.endsWith('.json') ||
+      n.endsWith('.md') ||
+      n.endsWith('.markdown') ||
+      n.endsWith('.txt')
+    );
+  }
+
   async function handleJsonImportChange(ev: Event) {
     const input = ev.target as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
-    const text = await file.text();
-    const parsed = parsePlannodeTreeV1ImportText(text);
+    const name = file.name || '';
+    const lower = name.toLowerCase();
+
+    if (file.size > PLANNODE_IMPORT_MAX_FILE_BYTES) {
+      const mb = (PLANNODE_IMPORT_MAX_FILE_BYTES / (1024 * 1024)).toFixed(0);
+      showPilotToast(`파일이 너무 커 (${mb}MB 이하만). 나눠서 저장하거나 용량을 줄여줘.`);
+      return;
+    }
+
+    let parsed: ParsePlannodeTreeV1Result;
+    let importUsedOutlineFallback = false;
+    if (lower.endsWith('.docx')) {
+      const doc = await extractDocxPlainTextFromFile(file);
+      if (!doc.ok) {
+        showPilotToast(doc.message);
+        return;
+      }
+      const base = name.replace(/\.docx$/i, '').trim() || 'Word 문서';
+      parsed = outlinePlainTextToPlannodeTreeV1(doc.text, {
+        projectName: base,
+        maxNodes: PLANNODE_IMPORT_MAX_NODES
+      });
+    } else if (isPlannodeImportAllowedByName(name)) {
+      const text = await file.text();
+      if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
+        const base = name.replace(/\.(md|markdown)$/i, '').trim() || '마크다운 문서';
+        const md = parseMarkdownFileForProjectImport(text, {
+          baseName: base,
+          maxNodes: PLANNODE_IMPORT_MAX_NODES
+        });
+        parsed = md.result;
+        importUsedOutlineFallback = md.usedOutlineFallback;
+      } else {
+        parsed = parsePlannodeTreeV1ImportText(text);
+      }
+    } else {
+      showPilotToast(
+        '가져오기는 .docx, .json, .md, .markdown(또는 JSON 본문 .txt)만 지원해. docx·md( JSON 없을 때)는 본문에서 # 제목·번호 목차를 찾아 노드 초안을 만들어.'
+      );
+      return;
+    }
+
+    // .json / .md(펜스·제목 초안) 실패 메시지는 파서 단일 소스(토스트 동일).
     if (!parsed.ok) {
       showPilotToast(parsed.message);
       return;
@@ -652,7 +718,15 @@
     if (latest) {
       const r = await trySelectProject(latest);
       if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
-      else showPilotToast(`가져오기 완료: ${latest.name}`);
+      else {
+        showPilotToast(
+          importUsedOutlineFallback
+            ? `가져오기 완료(제목·목차 초안): ${latest.name}`
+            : `가져오기 완료: ${latest.name}`
+        );
+        await tick();
+        requestAnimationFrame(() => showProjectModal.set(false));
+      }
     }
   }
 
@@ -702,7 +776,8 @@
       projectStart = '';
       projectEnd = '';
       projectDesc = '';
-      showProjectModal.set(false);
+      await tick();
+      requestAnimationFrame(() => showProjectModal.set(false));
     } catch (e) {
       console.error('Project creation error:', e);
       alert('프로젝트 생성 중 오류가 발생했습니다: ' + (e instanceof Error ? e.message : String(e)));
@@ -857,7 +932,8 @@
       showPilotToast(r.message);
       if (r.ok) {
         await loadAclInvitesForModal();
-        showProjectModal.set(false);
+        await tick();
+        requestAnimationFrame(() => showProjectModal.set(false));
       }
     } finally {
       aclImportBusyKey = '';
@@ -870,7 +946,8 @@
       showPilotToast(r.message ?? '접근할 수 없어.');
       return;
     }
-    showProjectModal.set(false);
+    await tick();
+    requestAnimationFrame(() => showProjectModal.set(false));
   }
 
   function openAclForCurrentProject() {
@@ -1881,7 +1958,7 @@
               <input
                 bind:this={jsonImportInput}
                 type="file"
-                accept="application/json,.json,text/markdown,.md"
+                accept="application/json,.json,text/markdown,.md,.markdown,.txt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"
                 class="json-import-input"
                 aria-hidden="true"
                 tabindex="-1"
@@ -1891,7 +1968,8 @@
                 type="button"
                 id="BJI"
                 class="proj-json-import-btn"
-                title="plannode.tree v1 — .json 전체 또는 .md(펜스된 json 블록)"
+                title={PLANNODE_TREE_IMPORT_BJI_TITLE}
+                aria-label={PLANNODE_TREE_IMPORT_BJI_ARIA_LABEL}
                 on:click={triggerJsonImport}
               >
                 가져오기

@@ -5,8 +5,10 @@ import {
   migrateLegacyBadgesToSet,
   flattenBadgeSet,
   BADGE_PROMPT_FRAGMENTS,
+  applySanitizeImportedPlannodeNodeV1,
 } from './badgePromptInjector';
 import type { BadgeSet } from './types';
+import type { Node } from '$lib/supabase/client';
 
 describe('badgePromptInjector', () => {
   describe('buildBadgeContext', () => {
@@ -177,6 +179,23 @@ describe('badgePromptInjector', () => {
       expect(result.dev).toContain('CRUD');
       expect(result.ux).toContain('LIST');
     });
+
+    it('maps common external AI synonyms to canonical pool', () => {
+      const result = migrateLegacyBadgesToSet([
+        'navigation',
+        'REST_API',
+        'websocket',
+        'genai',
+        'billing',
+        'unknown_vendor',
+      ]);
+      expect(result.ux).toContain('NAVI');
+      expect(result.dev).toContain('API');
+      expect(result.dev).toContain('REALTIME');
+      expect(result.prj).toContain('AI');
+      expect(result.dev).toContain('PAYMENT');
+      expect(result.dev.length + result.ux.length + result.prj.length).toBe(5);
+    });
   });
 
   describe('flattenBadgeSet', () => {
@@ -254,6 +273,84 @@ describe('badgePromptInjector', () => {
           expect(BADGE_PROMPT_FRAGMENTS[badge].length).toBeGreaterThan(10);
         }
       });
+    });
+  });
+
+  describe('applySanitizeImportedPlannodeNodeV1', () => {
+    it('strips non-pool flat badges and keeps node identity', () => {
+      const n: Node = {
+        id: 'n1',
+        project_id: 'p1',
+        name: 'N',
+        depth: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        badges: ['tdd', 'pg_cron', 'zzz'],
+        parent_id: 'root'
+      };
+      const out = applySanitizeImportedPlannodeNodeV1(n);
+      expect(out.id).toBe('n1');
+      expect(out.parent_id).toBe('root');
+      expect(out.badges).toEqual(['tdd']);
+    });
+
+    it('keeps non-badge metadata keys while fixing tracks', () => {
+      const n: Node = {
+        id: 'n2a',
+        project_id: 'p1',
+        name: 'N',
+        depth: 0,
+        created_at: 't',
+        updated_at: 't',
+        badges: [],
+        metadata: {
+          functionalSpec: { userTypes: 'guest' },
+          badges: { dev: ['TDD', 'NOPE'], ux: ['LIST'], prj: [] }
+        }
+      };
+      const out = applySanitizeImportedPlannodeNodeV1(n);
+      expect(out.metadata?.functionalSpec).toEqual({ userTypes: 'guest' });
+      expect(out.metadata?.badges).toEqual({ dev: ['TDD'], ux: ['LIST'], prj: [] });
+      expect(out.badges.sort()).toEqual(['list', 'tdd']);
+    });
+
+    it('re-buckets metadata badges placed in wrong track', () => {
+      const n: Node = {
+        id: 'n2',
+        project_id: 'p1',
+        name: 'N',
+        depth: 0,
+        created_at: 't',
+        updated_at: 't',
+        badges: [],
+        metadata: {
+          badges: { dev: ['NAVI', 'FORM', 'CRUD'], ux: [], prj: ['MVP'] }
+        }
+      };
+      const out = applySanitizeImportedPlannodeNodeV1(n);
+      expect(out.metadata?.badges?.dev).toEqual(['CRUD']);
+      expect(out.metadata?.badges?.ux?.sort()).toEqual(['FORM', 'NAVI']);
+      expect(out.metadata?.badges?.prj).toEqual(['MVP']);
+      expect(out.badges.sort()).toEqual(['crud', 'form', 'mvp', 'navi']);
+    });
+
+    it('merges metadata.badges with flat badges and maps synonyms', () => {
+      const n: Node = {
+        id: 'n3',
+        project_id: 'p1',
+        name: 'N',
+        depth: 0,
+        created_at: 't',
+        updated_at: 't',
+        badges: ['oauth2', 'modal'],
+        metadata: {
+          badges: { dev: ['TDD'], ux: ['LIST'], prj: [] }
+        }
+      };
+      const out = applySanitizeImportedPlannodeNodeV1(n);
+      expect(out.metadata?.badges?.dev?.sort()).toEqual(['AUTH', 'TDD']);
+      expect(out.metadata?.badges?.ux?.sort()).toEqual(['LIST', 'MODAL']);
+      expect(out.badges.sort()).toEqual(['auth', 'list', 'modal', 'tdd']);
     });
   });
 });

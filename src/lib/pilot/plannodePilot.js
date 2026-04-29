@@ -8,7 +8,6 @@ import {
   buildPrdViewHtmlV20
 } from '$lib/prdStandardV20';
 import {
-  migrateLegacyBadgesToSet,
   flattenBadgeSet,
   BADGE_COLORS,
   BADGE_LABELS,
@@ -21,6 +20,7 @@ import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
+import { PLANNODETREE_EXPORT_ROOT_VERSION } from '$lib/plannodeTreeV1';
 import {
   unionNodeBoundsAndViewport,
   computeMinimapViewBox,
@@ -61,11 +61,7 @@ function cloneBadgeSet(s) {
   return { dev: [...s.dev], ux: [...s.ux], prj: [...s.prj] };
 }
 function getBadgeSetFromNode(n) {
-  const mb = n.metadata && n.metadata.badges;
-  if (mb && Array.isArray(mb.dev) && Array.isArray(mb.ux) && Array.isArray(mb.prj)) {
-    return cloneBadgeSet(mb);
-  }
-  return migrateLegacyBadgesToSet(n.badges || []);
+  return cloneBadgeSet(getBadgeSetFromNodeInput(n));
 }
 function applyBadgeSetToNode(n, set) {
   n.metadata = n.metadata || {};
@@ -1473,7 +1469,7 @@ function emitAutoCloudSync(reason) {
   } catch (_) {}
 }
 
-/** NEXT-2: 재가져오기·백업용 통일 JSON (플랫 노드 + 프로젝트 메타) */
+/** NEXT-2 / NOW-58: 재가입력·백업용 통일 JSON. 루트 `version`은 `PLANNODETREE_EXPORT_ROOT_VERSION`(현재 1) 고정 — v2 파일 export는 미구현. */
 function buildPlannodeExportV1() {
   const exportedAt = new Date().toISOString();
   const project = curP
@@ -1508,7 +1504,7 @@ function buildPlannodeExportV1() {
   });
   return {
     format: 'plannode.tree',
-    version: 1,
+    version: PLANNODETREE_EXPORT_ROOT_VERSION,
     exportedAt,
     project,
     nodes: nodeRows
@@ -1722,9 +1718,10 @@ function render() {
       (multiSel.has(n.id) ? ' msel' : '') +
       (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '');
     nd.id = 'nd-' + n.id;
-      const bgs = (n.badges || [])
-        .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
-        .join('');
+    const cardBadgeFlat = flattenBadgeSet(getBadgeSetFromNodeInput(n));
+    const bgs = cardBadgeFlat
+      .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
+      .join('');
     const hasDesc = !!(n.description && String(n.description).trim());
     const nameStr = n.name != null ? String(n.name) : '';
     const displayLabel = nameStr.trim() ? nameStr.trim() : '새 노드';
@@ -3074,6 +3071,8 @@ export function initPlannode(opts = {}) {
       syncing = true;
       try {
         clearUndoStack();
+        const prevPid = curP?.id ?? null;
+        const projectChanged = prevPid !== project.id;
         curP = project;
         if (pilotNodes?.length) {
           nodes = pilotNodes.map((n) => ({
@@ -3097,6 +3096,17 @@ export function initPlannode(opts = {}) {
           ];
         }
         syncNcFromNodes();
+        if (projectChanged) {
+          multiSel.clear();
+          selectionBox = null;
+          clearRelinkArm();
+          clearRelinkHold();
+          selId = null;
+        }
+        if (selId && !find(selId)) selId = null;
+        const primary =
+          nodes.find((n) => !n.parent_id) ?? (nodes.length ? nodes[0] : null);
+        if (primary && (!selId || !find(selId))) selId = primary.id;
         const pnt = document.getElementById('PNT');
         if (pnt) pnt.textContent = project.name;
         if (ES) ES.style.display = 'none';

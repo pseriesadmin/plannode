@@ -1,5 +1,7 @@
 import { writable, get } from 'svelte/store';
 import type { Project, Node } from '$lib/supabase/client';
+import { applySanitizeImportedPlannodeNodeV1 } from '$lib/ai/badgePromptInjector';
+import { mergeLearnedBadgeRulesFromImportedNodes } from '$lib/ai/badgeMetadataInference';
 import type { PrdSectionKey } from '$lib/prdStandardV20';
 import { markCloudWorkspaceDirty, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
 import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
@@ -696,11 +698,19 @@ export function upsertImportedPlannodeTreeV1(
   }
   projects.set(next);
 
+  const nodesForStore = nodeList.map(applySanitizeImportedPlannodeNodeV1);
   try {
-    localStorage.setItem(NODES_KEY_PREFIX + merged.id, JSON.stringify(nodeList));
+    localStorage.setItem(NODES_KEY_PREFIX + merged.id, JSON.stringify(nodesForStore));
   } catch (e) {
     console.error('Failed to save imported nodes:', e);
     return null;
+  }
+
+  try {
+    /** 원본 가져오기 노드(`description` 포함)로 배지 학습 병합 — 저장 sanitize 전 스냅샷 */
+    mergeLearnedBadgeRulesFromImportedNodes(nodeList);
+  } catch {
+    /* 학습 병합 실패는 가져오기 본편에 영향 없음 */
   }
 
   const selected = next.find((p) => p.id === merged.id) ?? merged;
