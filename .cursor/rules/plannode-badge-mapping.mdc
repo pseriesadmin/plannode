@@ -1,0 +1,223 @@
+---
+description: >
+  가져오기→노드카드 배지 파이프라인(동의어·추론·저장)·외부 AI 샘플링 규칙.
+  학습 저장소(localStorage)·추론 병합 순서 1~4의 정본. 코드와 함께 유지보수한다.
+globs:
+  - "src/lib/ai/**/*.ts"
+  - "src/lib/plannodeTreeV1.ts"
+  - "src/lib/stores/projects.ts"
+  - "src/routes/+page.svelte"
+alwaysApply: false
+---
+
+# Plannode 배지 매핑 지침 (가져오기 파이프라인)
+
+**근원:** Cursor 플랜 `가져오기_배지_파이프라인_구현결과_bbe7c690.plan.md`를 규칙용으로 재구성·코드 동기화.  
+**제품 의미의 “학습”:** 머신러닝 학습이 아니라 **규칙 테이블 + 브라우저 누적 저장**이다.
+
+---
+
+## 1. 학습·매핑 저장 계층 (상위 학습기록)
+
+추론 파이프라인은 아래 **브라우저 `localStorage` 키**와 연동된다. 에이전트·구현 시 **동일 키명**을 유지한다.
+
+| 계층 | `localStorage` 키 | 역할 | 누적 |
+|------|-------------------|------|------|
+| **표준 배지 풀** | `plannode.standardBadgePool.v1` | 기본 21개 외 커스텀 토큰·트랙 — `getEffectiveBadgePool` | 사용자가 표준 배지 설정에서 저장 시 갱신 |
+| **사용자 추론 규칙** | `plannode.badgeInferenceUserRules.v1` | `UserBadgeInferenceRule[]` — `setUserBadgeInferenceRules` / UI 미구현 시 API·콘솔 | 사용자가 덮어쓰기·초기화 가능 |
+| **AI·외부 트리 누적 학습** | `plannode.badgeInferenceAiLearnedRules.v1` | 가져온 노드의 `metadata.badges`(표준 풀로 해석)로 규칙 생성·병합 — **`name` 전체**, 조건부 **`description` 첫 줄 발췌**, **`metadataHaystack` 한 줄 시그니처** | **누적** — 동일 `(field, contains)`면 `suggestBadges`만 합침; 최대 `AI_LEARNED_RULES_MAX`(400) 초과 시 배열 앞쪽 규칙 드롭 |
+
+**AI 학습기록 갱신 트리거 (코드 정본):**
+
+- `src/lib/stores/projects.ts` — `upsertImportedPlannodeTreeV1` 성공 후 **`mergeLearnedBadgeRulesFromImportedNodes(nodeList)`** (원본 가져오기 노드 기준).
+- 프로그램적 로드: `mergeLearnedBadgeRulesFromPlannodeExportUnknown(obj)` — `{ nodes: [...] }` 형태 JSON 객체.
+
+**해석:** 외부 AI(예: Crazyshot `BADGE_FULL` 등)가 채운 `metadata.badges`는 **동의어 해석 후 표준 토큰만** 규칙에 들어간다. 풀에 없는 문자열은 `resolveImportedBadgeToken`에서 탈락 — **표준 배지 풀 확장** 시 이후 가져오기부터 학습에 반영 가능.
+
+### 1.1 재검증 — 「매핑율이 낮다」와 실제 동작
+
+| 확인 항목 | 결과(샘플 파일·코드 기준) |
+|-----------|---------------------------|
+| **CRAZYSHOT `crazyshot_v5_plannode_BADGE_FULL.json`** | 노드 **약 119개** 중 **118개**가 `metadata.badges`에 배지 1개 이상. 파일 내 **고유 토큰 18종**은 모두 기본 풀 표기이거나 `badgeImportAliases` 동의어로 **표준 토큰으로 해석**된다(예: `ANALYSIS`→`API`, `COMPETITIVE`→`USP`). |
+| **`sanitizeNodeBadgesForTreeV1` 후 (실측)** | 명시 배지만 역산한 칩 수보다 **축소되지 않음**(키워드·extras 등으로 칩이 추가될 수 있음). **동의어 접기**(예: `ANALYSIS`→`API`)로 **표시 문자열은 바뀌지만 해당 노드에서 칩이 전부 사라지지는 않음**(별칭 미등록 시만 소실). |
+| **자동 회귀** | Vitest [`src/lib/ai/crazyshotBadgeFullPipeline.test.ts`](src/lib/ai/crazyshotBadgeFullPipeline.test.ts) — 리포 공식 샘플 [`docs/crazyshot_v5_plannode_BADGE_FULL.json`](docs/crazyshot_v5_plannode_BADGE_FULL.json)(CRAZYSHOT 원본과 동일 내용으로 두고 동기화) 기준: 고유 원문 토큰 전원 해석 가능, `metadata.badges` 슬롯이 있는 노드는 sanitize 후 칩 ≥1, sanitize 후 칩 수 ≥ 명시-only coerce 칩 수. |
+| **고도화의 설계 의도** | 파이프라인은 **풀·동의어·키워드·extras·사용자 규칙·AI 학습 규칙**을 포함하지만, **외부 AI 라벨을 원문 그대로 보존하지는 않는다**. 최종은 항상 **현재 표준 배지 풀**(`filterBadgeSetToCanonicalPool`)로 맞춘다. |
+
+**「매핑율」이 낮아 보일 때 점검**
+
+1. **의미 보존 vs 칩 개수:** `ANALYSIS`가 `API`로 접히면 **라벨 종류 수는 줄어들지만**, 칩이 사라지는 것과는 구별해야 한다.
+2. **일반 JSON:** 풀·동의어에 없는 문자열만 있으면 해당 슬롯은 비워짐 → **표준 배지 풀 확장** 또는 **동의어 행 추가** 검토.
+3. **outline-only MD 등:** 배지 입력이 없으면 비어 있음이 정상.
+4. **비교 지표 통일:** 원본 파일의 **임의 문자열 토큰 수**와 Plannode **21개 체계 칩 수**를 1:1로 기대하면 불일치가 크게 나온다 — 비교는 **resolve 후 표준 토큰** 또는 **노드당 칩 유무** 기준이 타당하다.
+
+---
+
+## 2. 범위와 진입점
+
+- **UI:** 프로젝트 모달 `#BJI` — `src/routes/+page.svelte` `handleJsonImportChange`.
+- **형식:** `.json`/`.txt`, `.md`/`.markdown`(펜스 → outline), `.docx`(outline). 배지 의미는 **트리 JSON 파싱 성공 시**에 한함. outline-only MD는 배지 비어 있음이 정상.
+- **다른 진입:** 클라우드 병합 등 동일 `upsertImportedPlannodeTreeV1` 경로(`sync.ts`, `projectAcl.ts` 등) → AI 학습 병합도 동일하게 실행.
+
+```mermaid
+flowchart LR
+  subgraph importUI [Modal_BJI]
+    A[handleJsonImportChange]
+  end
+  subgraph parse [Parse]
+    B[parsePlannodeTreeV1ImportText / outline]
+    C[parsePlannodeTreeV1Json]
+  end
+  subgraph persist [Persist]
+    D[upsertImportedPlannodeTreeV1]
+    L[mergeLearnedBadgeRulesFromImportedNodes]
+  end
+  subgraph display [Display]
+    F[getBadgeSetFromNodeInput]
+    G[node_card_chips]
+  end
+  A --> B --> C
+  C --> D --> L
+  D --> F --> G
+```
+
+- `applySanitizeImportedPlannodeNodeV1`는 파싱 종단·저장 직전 **두 경로**에서 호출; 동일 sanitize라 멱등에 가깝다.
+
+---
+
+## 3. 파일→파싱→영속 (요약)
+
+| 단계 | 위치 |
+|------|------|
+| 텍스트 로드 | `+page.svelte` |
+| MD | `outlineToPlannodeTreeV1.ts` 등 |
+| JSON | `plannodeTreeV1.ts` `parsePlannodeTreeV1Json` |
+| 영속 | `projects.ts` `upsertImportedPlannodeTreeV1` + 노드 `localStorage` |
+| 스키마 | `src/lib/ai/types.ts` `NodeMetadata` |
+
+---
+
+## 4. 메타 ↔ 배지 매핑 파이프라인 (핵심)
+
+**단일 소스:** `getBadgeSetFromNodeInput` → `sanitizeNodeBadgesForTreeV1` (`badgePromptInjector.ts`).
+
+### 4.1 저장 래퍼
+
+- `applySanitizeImportedPlannodeNodeV1` — `sanitizeNodeBadgesForTreeV1`만 호출; `name`/`description`/기능명세 등 비배지 필드는 유지.
+
+### 4.2 배지 풀
+
+- `badgePoolConfig.ts` — `BADGE_POOL_STORAGE_KEY`, `getEffectiveBadgePool`.
+
+### 4.3 명시 배지 정규화
+
+- 3트랙 `metadata.badges` → `coerceImportedBadgeSetFromTracksAndFlat` + `resolveImportedBadgeToken` (`badgeImportAliases.ts`).
+- 평면 레거시 → `migrateLegacyBadgesToSet`.
+
+### 4.4 메타데이터 힌트 추론 (`inferBadgeHintStringsFromMetadata`)
+
+**병합 순서 (중복 제거 시 먼저 삽입된 토큰 우선):**
+
+1. `metadata.treeImportExtras` 플래그
+2. `keywordHints` — 구조화 메타 + `name` + `description` 정규식
+3. **사용자 규칙** — `plannode.badgeInferenceUserRules.v1`
+4. **AI 누적 학습 규칙** — `plannode.badgeInferenceAiLearnedRules.v1` (`getAiLearnedBadgeInferenceRules` → `applyBadgeInferenceRules`)
+
+그 후 `getBadgeSetFromNodeInput`에서 base + inferred를 `mergeBadgeSets`, 저장 시 `filterBadgeSetToCanonicalPool`.
+
+---
+
+## 5. 사용자 규칙·AI 학습 규칙 스키마
+
+**공통 타입:** `UserBadgeInferenceRule` — `field`: `description` | `name` | `metadataHaystack`, `contains`, `suggestBadges`.
+
+- **사용자:** `{ "rules": [ ... ] }` under `plannode.badgeInferenceUserRules.v1`.
+- **AI 학습:** `{ "v": 1, "updatedAt": ISO8601, "rules": [ ... ] }` under `plannode.badgeInferenceAiLearnedRules.v1`.
+
+AI 학습 규칙은 가져오기 시 노드별로 주로 **`field: "name"`, `contains`: 노드 제목 전체**를 쓴다(너무 짧거나 구분자-only 제목은 스킵). 동일 키면 `suggestBadges`만 합친다.
+
+---
+
+## 6. 파일럿 노드 카드
+
+- `plannodePilot.js` — `getBadgeSetFromNodeInput`과 동일 파이프라인으로 칩 표시.
+
+---
+
+## 7. 한계
+
+- 키워드·규칙 기반; 본문 우연 일치 가능.
+- outline-only 가져오기는 배지 입력 부족이 정상.
+- 별도 ML·피드백 학습 UI는 본 지침 범위 밖.
+
+---
+
+## 8. 부록 — 외부 AI 샘플링용 스펙
+
+정본은 코드: `badgePoolConfig.ts`, `badgeImportAliases.ts`, `badgeMetadataInference.ts`, `badgePromptInjector.ts`, `types.ts` `NodeMetadata`. **표·정규식을 바꾸면 앱과 불일치**한다.
+
+### 8.1 노드 JSON 배지 위치
+
+- 권장: `metadata.badges`: `{ dev[], ux[], prj[] }`.
+- 레거시: 평면 `badges[]` — 병합 후 동일 해석기 통과.
+
+### 8.2 기본 풀(21개)
+
+| 트랙 | 토큰 |
+|------|------|
+| dev | TDD, CRUD, API, AUTH, REALTIME, PAYMENT |
+| ux | NAVI, HEAD, LIST, CARD, FORM, BUTT, MODAL, FEED, DASH, MEDIA |
+| prj | USP, MVP, AI, I18N, MOBILE |
+
+토큰 형식: `^[A-Z][A-Z0-9]{1,14}$` (풀 설정 시 확장 가능).
+
+### 8.3 해석 순서
+
+`resolveImportedBadgeToken`: (1) 풀 직접 매칭 (2) 동의어표 `IMPORT_BADGE_ALIAS_TO_CANONICAL`.
+
+### 8.4 동의어 키 정규화
+
+`normalizeBadgeForAliasLookup`: trim, 소문자, 따옴표 제거, 공백/슬래시/하이픈 → `_`, 중복 `_` 축소.
+
+### 8.5 동의어 → 표준 토큰 (요약 — 전체는 `badgeImportAliases.ts` `ALIAS_GROUPS`)
+
+| 표준 | 동의어 예(원문; 정규화 후 매칭) |
+|------|----------------------------------|
+| TDD | tdd, unit_test, … |
+| CRUD | crud |
+| API | api, rest, graphql, …, **analysis**, analytical, analyze, analyse |
+| AUTH | auth, …, **jwt_token**, jwt, … |
+| REALTIME | realtime, **web_socket**, websocket, ws, … |
+| PAYMENT | payment, stripe, … |
+| … | (HEAD, CARD, LIST, … 동일 파일 참조) |
+| USP | usp, unique_selling, differentiation, **competitive**, competition, competitor, … |
+| AI | ai, llm, gpt, … |
+
+※ **analysis → API**, **competitive 계열 → USP** 등은 외부 AI 라벨과 표준 풀을 맞추기 위한 보강이다.
+
+### 8.6 `treeImportExtras` → 토큰
+
+플랜 원문 §8.7과 동일 — `isTDD`, `hasPayment`, `realtime`, … 참조: `hintsFromTreeImportExtras` in `badgeMetadataInference.ts`.
+
+### 8.7 `keywordHints` 정규식
+
+플랜 원문 §8.8과 동일 — 코드 `keywordHints`와 동기.
+
+### 8.8 명시 + 추론 병합
+
+`mergeBadgeSets(base, inferred)` — base 우선 순서, 트랙 내 중복 토큰 스킵.
+
+---
+
+## 9. 관련 문서·샘플
+
+- `docs/plannode-tree-v1-ai-reference.md` — 파일 계약·§6 코드 근거
+- **`docs/crazyshot_v5_plannode_BADGE_FULL.json`** — CRAZYSHOT v5 실사 스케일·`version`: 2·배지 매핑 풀 예시(리포 내 복사본; 원본은 CRAZYSHOT 워크스페이스 동명 파일과 동기 권장)
+- `docs/plannode-tree-badge-pipeline-sample.json` — 축소 교본(동의어·오트랙·미지원 태그 등 최소 시나리오)
+
+---
+
+## 10. 구현 시 체크리스트
+
+- 가져오기·sanitize·표시가 **`getEffectiveBadgePool`** 단일 풀을 본다.
+- 추론 순서 **1→2→3→4**를 바꾸면 TASK·QA·제품 문서와 충돌할 수 있다.
+- AI 학습 저장소를 비우려면 `clearAiLearnedBadgeInferenceRules()` (테스트·디버그용 API).

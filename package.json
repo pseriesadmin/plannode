@@ -19,6 +19,7 @@
     "vitest": "^4.1.5"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.38.0"
+    "@supabase/supabase-js": "^2.38.0",
+    "mammoth": "^1.12.0"
   }
 }

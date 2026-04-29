@@ -2,16 +2,24 @@
  * Plannode 배지 기반 프롬프트 인젝터
  * - 배지 조합 → AI 프롬프트 조각 자동 생성
  * - 배지별 문서 출력 조건 정의
+ *
+ * **가져오기·표시 공통 배지 파이프라인(모듈 경계)** — 트리·parent_id는 건드리지 않음:
+ * - **표시·직렬화 전**: `getBadgeSetFromNodeInput` → 명시 배지(`coerce…` / `migrate…`) + `inferBadgeHintStringsFromMetadata` → `mergeBadgeSets`.
+ * - **저장·sanitize**: `sanitizeNodeBadgesForTreeV1` → 위와 동일하게 `getBadgeSetFromNodeInput` 결과를 풀 필터(`filterBadgeSetToCanonicalPool`) 후 평면·3트랙 정렬.
+ * - **파싱/스토어 래퍼**: `applySanitizeImportedPlannodeNodeV1`가 `sanitizeNodeBadgesForTreeV1` 단일 경로( `plannodeTreeV1`·`upsertImportedPlannodeTreeV1`에서 이중 호출·멱등).
  */
 
+import type { Node } from '$lib/supabase/client';
 import type { BadgeSet, NodeMetadata } from './types';
+import { resolveImportedBadgeToken } from './badgeImportAliases';
+import { inferBadgeHintStringsFromMetadata } from './badgeMetadataInference';
 import {
   DEFAULT_DEV_KEYS,
   DEFAULT_UX_KEYS,
   DEFAULT_PRJ_KEYS,
   getEffectiveBadgePool,
   poolToSets,
-  resolveLegacyTokenToTrack,
+  type BadgePoolTracks,
 } from './badgePoolConfig';
 
 /** UI·문서 순회용 기본 키(고정 순서). 런타임 허용 풀은 `getEffectiveBadgePool()`. */
@@ -269,24 +277,69 @@ export function shouldForceSonnet(badges: BadgeSet): boolean {
  * @param legacyBadges 기존 배지 배열 ['tdd', 'crud', 'ai', ...]
  * @returns BadgeSet
  */
-export function migrateLegacyBadgesToSet(legacyBadges: string[]): BadgeSet {
+export function migrateLegacyBadgesToSet(
+  legacyBadges: string[],
+  poolParam?: BadgePoolTracks
+): BadgeSet {
   const badgeSet: BadgeSet = { dev: [], ux: [], prj: [] };
 
   if (!legacyBadges || !Array.isArray(legacyBadges)) {
     return badgeSet;
   }
 
-  const pool = getEffectiveBadgePool();
+  const pool = poolParam ?? getEffectiveBadgePool();
 
   for (const badge of legacyBadges) {
-    const lower = String(badge).toLowerCase();
-    const hit = resolveLegacyTokenToTrack(pool, lower);
+    const hit = resolveImportedBadgeToken(String(badge), pool);
     if (!hit) continue;
     const arr = badgeSet[hit.track];
     if (!arr.includes(hit.upper)) arr.push(hit.upper);
   }
 
   return badgeSet;
+}
+
+function coerceImportedBadgeSetFromTracksAndFlat(
+  mb: BadgeSet,
+  flat: string[],
+  pool: BadgePoolTracks
+): BadgeSet {
+  const out: BadgeSet = { dev: [], ux: [], prj: [] };
+  const add = (hit: { track: keyof BadgePoolTracks; upper: string }) => {
+    const arr = out[hit.track];
+    if (!arr.includes(hit.upper)) arr.push(hit.upper);
+  };
+  const consume = (vals: unknown[]) => {
+    for (const v of vals) {
+      if (typeof v !== 'string' && typeof v !== 'number') continue;
+      const hit = resolveImportedBadgeToken(String(v), pool);
+      if (hit) add(hit);
+    }
+  };
+  consume(mb.dev);
+  consume(mb.ux);
+  consume(mb.prj);
+  consume(flat);
+  return out;
+}
+
+function mergeBadgeSets(a: BadgeSet, b: BadgeSet): BadgeSet {
+  const mergeTrack = (x: string[], y: string[]) => {
+    const seen = new Set<string>();
+    const o: string[] = [];
+    for (const t of [...x, ...y]) {
+      const u = String(t).trim().toUpperCase();
+      if (!u || seen.has(u)) continue;
+      seen.add(u);
+      o.push(u);
+    }
+    return o;
+  };
+  return {
+    dev: mergeTrack(a.dev, b.dev),
+    ux: mergeTrack(a.ux, b.ux),
+    prj: mergeTrack(a.prj, b.prj)
+  };
 }
 
 /**
@@ -308,12 +361,33 @@ export function flattenBadgeSet(set: BadgeSet): string[] {
 export function getBadgeSetFromNodeInput(n: {
   badges?: string[];
   metadata?: NodeMetadata | null;
+  name?: string;
+  description?: string;
 }): BadgeSet {
+  const pool = getEffectiveBadgePool();
   const mb = n.metadata?.badges;
-  if (mb && Array.isArray(mb.dev) && Array.isArray(mb.ux) && Array.isArray(mb.prj)) {
-    return { dev: [...mb.dev], ux: [...mb.ux], prj: [...mb.prj] };
+  const hasTrackShape =
+    mb &&
+    typeof mb === 'object' &&
+    !Array.isArray(mb) &&
+    Array.isArray((mb as BadgeSet).dev) &&
+    Array.isArray((mb as BadgeSet).ux) &&
+    Array.isArray((mb as BadgeSet).prj);
+
+  let base: BadgeSet;
+  if (hasTrackShape) {
+    base = coerceImportedBadgeSetFromTracksAndFlat(mb as BadgeSet, n.badges || [], pool);
+  } else {
+    base = migrateLegacyBadgesToSet(n.badges || [], pool);
   }
-  return migrateLegacyBadgesToSet(n.badges || []);
+  const hints = inferBadgeHintStringsFromMetadata({
+    name: n.name,
+    description: n.description,
+    metadata: n.metadata ?? null
+  });
+  if (!hints.length) return base;
+  const inferred = migrateLegacyBadgesToSet(hints, pool);
+  return mergeBadgeSets(base, inferred);
 }
 
 function uniqUpperStrings(arr: readonly string[]): string[] {
@@ -362,6 +436,18 @@ export function sanitizeNodeBadgesForTreeV1(n: {
     badges,
     metadata: Object.keys(base).length > 0 ? base : undefined
   };
+}
+
+/**
+ * 가져오기·클라우드 슬라이스 등 **저장/파싱 산출물**에 동일 배지 규칙 적용.
+ * `sanitizeNodeBadgesForTreeV1` 단일 구현을 쓰며, `plannodeTreeV1`·`upsertImportedPlannodeTreeV1`에서 재사용한다.
+ */
+export function applySanitizeImportedPlannodeNodeV1(node: Node): Node {
+  const san = sanitizeNodeBadgesForTreeV1({
+    badges: node.badges ?? [],
+    metadata: node.metadata
+  });
+  return { ...node, badges: san.badges, metadata: san.metadata };
 }
 
 /** PRD·트리 한 줄에 쓰는 DEV | UX | PRJ 표기 */

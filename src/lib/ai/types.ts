@@ -57,6 +57,8 @@ export interface NodeMetadata {
   badges?: BadgeSet;
   functionalSpec?: FunctionalSpecRowMeta;
   iaGrid?: IaGridRowMeta;
+  /** v2 임포트 등 알 수 없는 노드 키 승격분 — 배지 추론 플래그(`isTDD` 등)에 사용 */
+  treeImportExtras?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
