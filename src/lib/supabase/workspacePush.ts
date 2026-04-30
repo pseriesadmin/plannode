@@ -7,9 +7,20 @@ import {
 } from '$lib/supabase/sync';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { workspaceIsDirty, markCloudWorkspaceSyncing, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
+import { dedupeProjectsStoreByLatestUpdatedAt } from '$lib/stores/projects';
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let bidirectionalBusy = false;
+
+function bumpModalProjectListSync(reason: string): void {
+  if (!browser) return;
+  try {
+    dedupeProjectsStoreByLatestUpdatedAt();
+    window.dispatchEvent(new CustomEvent('plannode-modal-project-list-sync', { detail: { reason } }));
+  } catch {
+    /* ignore */
+  }
+}
 
 /** 로컬 변경 후 클라우드 반영(더티일 때만). 수동 ☁↑와 동일한 upload 사용 */
 export async function flushCloudWorkspaceNow(reason: string): Promise<boolean> {
@@ -21,7 +32,10 @@ export async function flushCloudWorkspaceNow(reason: string): Promise<boolean> {
   if (!get(workspaceIsDirty)) return true;
   markCloudWorkspaceSyncing();
   const r = await uploadWorkspaceToCloud();
-  if (r.ok) return true;
+  if (r.ok) {
+    bumpModalProjectListSync(reason);
+    return true;
+  }
   if (import.meta.env.DEV) console.warn('[cloud auto]', reason, r.message);
   return false;
 }
@@ -60,5 +74,6 @@ export async function runBidirectionalCloudSync(reason: string): Promise<void> {
     }
   } finally {
     bidirectionalBusy = false;
+    bumpModalProjectListSync(reason);
   }
 }

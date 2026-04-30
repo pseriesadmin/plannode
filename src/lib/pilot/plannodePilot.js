@@ -163,22 +163,33 @@ const COL_W = 244,
   /** 노드 카드 폭(+20%) — 스타일·연결선·미니맵과 동일 값 */
   NODE_CARD_W_ROOT = 202,
   NODE_CARD_W_CHILD = 226,
-  /** 하위분포: 깊이(행) 간격 — ROW_H 대비 배수 · 이전 간격 대비 ×1.5 적용 시 2.25 (=1.5²) */
-  TOPDOWN_ROW_GAP_MULT = 2.25,
-  /** 하위분포 좌측 뎁스 스트립 폭 — 한 줄 라벨 기준 최소 */
-  TOPDOWN_DEPTH_STRIP_W = 26,
-  /** 우측분포: 열·행(댑스)·그룹 간격 배수 — 기본 대비 1.5배(topdown 미적용) */
-  RIGHT_LAYOUT_GAP_MULT = 1.5;
+  /** 하위분포: 깊이(행) 간격 — 부모~자식 간 수직 여유(간선 분기) */
+  TOPDOWN_ROW_GAP_MULT = 2.42,
+  /** 하위분포 `.pb2` +버튼: 스타일과 동일 `bottom:-22`·높이 20 */
+  TOPDOWN_PB2_BELOW_NW = 22,
+  TOPDOWN_PB2_H = 20,
+  /** 하위분포 좌측 뎁스 스트립 폭 — 노드 카드와 수평 겹침 방지·라벨 여유 */
+  TOPDOWN_DEPTH_STRIP_W = 44,
+  /** 하위분포: 뎁스 스트립 오른쪽 ~ 트리 열 사이 간격 */
+  TOPDOWN_STRIP_NODE_GAP = 48,
+  /** 우측분포: 열(가로) 간격 배수 — 카드 폭·컬럼 라벨과 정합 */
+  RIGHT_LAYOUT_GAP_MULT = 1.5,
+  /** 우측분포: 행 간격만 확대 — ROW_H×1.5만으로는 카드 실높이(설명·배지) 대비 수직 겹침 발생(NOW-79~80) */
+  RIGHT_ROW_GAP_MULT = 2.25;
 
 function layoutColW() {
   return nodeMapLayoutMode === 'right' ? COL_W * RIGHT_LAYOUT_GAP_MULT : COL_W;
 }
 function layoutRowH() {
   if (nodeMapLayoutMode === 'topdown') return ROW_H * TOPDOWN_ROW_GAP_MULT;
+  if (nodeMapLayoutMode === 'right') return ROW_H * RIGHT_ROW_GAP_MULT;
   return ROW_H * RIGHT_LAYOUT_GAP_MULT;
 }
 function layoutOriginX() {
-  return 28 + (nodeMapLayoutMode === 'topdown' ? TOPDOWN_DEPTH_STRIP_W : 0);
+  if (nodeMapLayoutMode === 'topdown') {
+    return 40 + TOPDOWN_DEPTH_STRIP_W + TOPDOWN_STRIP_NODE_GAP;
+  }
+  return 28;
 }
 /** 노드맵 배치 선호 — `nodes` SSoT 아님 · localStorage 키 plan-output P-4.5 */
 const NODE_MAP_LAYOUT_LS = 'plannode.nodeMapLayout';
@@ -197,6 +208,8 @@ let scale = 0.85,
   pinchStartDist = 1,
   pinchStartScale = 1,
   selId = null,
+  /** 접기: 노드 id가 있으면 해당 노드의 직·간접 자손을 트리에서 숨김 — 세션만(프로젝트 전환 시 초기화) */
+  collapsedNodeIds = new Set(),
   /** Shift+클릭으로 묶인 다중 선택(그룹 이동). 영속 필드 아님. */
   multiSel = new Set(),
   selectionBox = null, // Shift+드래그 범위 선택용
@@ -327,6 +340,86 @@ export function dismissPilotRelinkGuide() {
 }
 
 const find = (id) => nodes.find((n) => n.id === id);
+
+function isUnderCollapsedAncestor(n) {
+  let pid = n.parent_id;
+  while (pid) {
+    if (collapsedNodeIds.has(pid)) return true;
+    const p = find(pid);
+    pid = p ? p.parent_id : null;
+  }
+  return false;
+}
+function isTreeNodeShown(n) {
+  return !isUnderCollapsedAncestor(n);
+}
+function nodeHasAnyChild(nid) {
+  return nodes.some((x) => x.parent_id === nid);
+}
+/** 캔버스 메뉴「모두접기」— 루트 카드만 두고 자손 숨김, 뷰포트를 보이는 루트 영역에 맞춤 */
+function collapseAllTreesToRootParentsOnly() {
+  if (!curP) {
+    toast('프로젝트를 먼저 선택해줘');
+    return;
+  }
+  collapsedNodeIds.clear();
+  for (const r of nodes) {
+    if (!r.parent_id && nodeHasAnyChild(r.id)) collapsedNodeIds.add(r.id);
+  }
+  if (selId) {
+    const sn = find(selId);
+    if (sn && !isTreeNodeShown(sn)) {
+      const pick = nodes.find((k) => !k.parent_id && isTreeNodeShown(k));
+      selId = pick?.id ?? null;
+    }
+  }
+  render();
+  fitViewportToContent({ silent: true });
+}
+function isStrictDescendantOf(nid, ancId) {
+  let pid = find(nid)?.parent_id;
+  while (pid) {
+    if (pid === ancId) return true;
+    const p = find(pid);
+    pid = p ? p.parent_id : null;
+  }
+  return false;
+}
+/** 트리 접기 버튼 표시 크기(22px 대비 30% 축소). viewBox는 22 유지 */
+const NODE_COLLAPSE_BTN_PX = 22 * 0.7;
+/**
+ * 트리 접기 토글 SVG 내부 — `right`: 펼침→우측, 접힘→좌측 · `topdown`: 펼침→위, 접힘→아래
+ * @param {boolean} isCollapsed
+ * @param {'right' | 'topdown'} layoutMode
+ */
+function collapseToggleSvgInnerHtml(isCollapsed, layoutMode) {
+  const inner = `<circle cx="11" cy="11" r="11" transform="rotate(90 11 11)" fill="#E6E4FF"/><path d="M15 10L11.7273 13.4293C11 14.19 11 14.1905 10.2727 13.4293L7 10" stroke="#6B61F6" stroke-width="2" stroke-linecap="round"/>`;
+  if (layoutMode === 'right') {
+    const deg = isCollapsed ? 90 : -90;
+    return `<g transform="rotate(${deg} 11 11)">${inner}</g>`;
+  }
+  return isCollapsed ? inner : `<g transform="rotate(180 11 11)">${inner}</g>`;
+}
+function buildSelectionHighlightEdgeKeys() {
+  const S = new Set();
+  if (!selId) return S;
+  let x = selId;
+  while (x) {
+    const n = find(x);
+    if (!n || !n.parent_id) break;
+    S.add(`${n.parent_id}|${x}`);
+    x = n.parent_id;
+  }
+  const stack = [selId];
+  while (stack.length) {
+    const id = stack.pop();
+    for (const ch of nodes.filter((k) => k.parent_id === id)) {
+      S.add(`${id}|${ch.id}`);
+      stack.push(ch.id);
+    }
+  }
+  return S;
+}
 const getDC = (d) => DC[((d % DC.length) + DC.length) % DC.length];
 
 const RELINK_HOLD_MS = 1500;
@@ -771,7 +864,7 @@ function applyRelinkDrop(newParentId) {
   toast('노드 연결을 바꿨어 · 순서·분류번호 자동 반영됨');
 }
 
-/** 카드(또는 제목)에서: 1.5초 유지 → 재연결 / 그 전에 움직이면 기존 위치 드래그(제목 제외) */
+/** 카드(또는 제목)에서: 1.5초 유지 → 재연결 / 그 전에 움직이면 기존 위치 드래그(제목 제외). 제목 짧은 탭은 pointerup에서 편집 모달(click 합성 불신) */
 function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
   clearRelinkHold();
   const pid = e.pointerId;
@@ -779,6 +872,7 @@ function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
   let lastCy = e.clientY;
   const cx = e.clientX;
   const cy = e.clientY;
+  let movedTooFar = false;
   const timer = setTimeout(() => {
     if (relinkHoldCleanup) {
       relinkHoldCleanup();
@@ -794,6 +888,7 @@ function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
     const dx = ev.clientX - cx;
     const dy = ev.clientY - cy;
     if (dx * dx + dy * dy > RELINK_MOVE_PX * RELINK_MOVE_PX) {
+      movedTooFar = true;
       clearTimeout(timer);
       if (relinkHoldCleanup) {
         relinkHoldCleanup();
@@ -804,21 +899,36 @@ function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
       }
     }
   };
-  const onUp = (ev) => {
+  const onUpOrCancel = (ev) => {
     if (ev.pointerId !== pid) return;
+    if (ev.type === 'pointerup' && ev.pointerType === 'mouse' && ev.button !== 0) return;
     clearTimeout(timer);
     if (relinkHoldCleanup) {
       relinkHoldCleanup();
       relinkHoldCleanup = null;
     }
+    if (
+      ev.type === 'pointerup' &&
+      fromTitle &&
+      !movedTooFar &&
+      !ev.shiftKey &&
+      Date.now() >= suppressNodeCardUiUntil &&
+      !relinkSuppressClick &&
+      !relinkArm &&
+      !relinkDragActive
+    ) {
+      selId = n.id;
+      requestAnimationFrame(() => render());
+      showEdit(n);
+    }
   };
   document.addEventListener('pointermove', onMove);
-  document.addEventListener('pointerup', onUp);
-  document.addEventListener('pointercancel', onUp);
+  document.addEventListener('pointerup', onUpOrCancel);
+  document.addEventListener('pointercancel', onUpOrCancel);
   relinkHoldCleanup = () => {
     document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-    document.removeEventListener('pointercancel', onUp);
+    document.removeEventListener('pointerup', onUpOrCancel);
+    document.removeEventListener('pointercancel', onUpOrCancel);
   };
 }
 
@@ -1365,6 +1475,7 @@ function fitViewportToContent(opts = {}) {
     mxX = -Infinity,
     mxY = -Infinity;
   for (const n of nodes) {
+    if (!isTreeNodeShown(n)) continue;
     const p = gp(n),
       w = nodeCardWidth(n),
       h = nodeCardHeightPx(n);
@@ -1372,6 +1483,10 @@ function fitViewportToContent(opts = {}) {
     mnY = Math.min(mnY, p.y);
     mxX = Math.max(mxX, p.x + w);
     mxY = Math.max(mxY, p.y + h);
+  }
+  if (!Number.isFinite(mnX) || !Number.isFinite(mxX)) {
+    if (!silent) toast('표시할 노드가 없어');
+    return false;
   }
   const edge = 20;
   mnX -= edge;
@@ -1394,6 +1509,8 @@ function fitViewportToContent(opts = {}) {
 }
 
 function fitToScreen() {
+  collapsedNodeIds.clear();
+  render();
   fitViewportToContent({ silent: false });
 }
 
@@ -1525,7 +1642,7 @@ function downloadPlannodeJson() {
 }
 
 function bld(nid, col, r) {
-  const kids = nodes.filter((n) => n.parent_id === nid);
+  const kids = collapsedNodeIds.has(nid) ? [] : nodes.filter((n) => n.parent_id === nid);
   if (!kids.length) {
     // 리프 노드: col, row 바로 저장
     lm[nid] = { col, row: r };
@@ -1578,13 +1695,15 @@ function applyNodeMapLayout(mode) {
 
 /** 탑다운: `row` = 깊이, `col` = 가로(부모는 자식 col 범위의 중심) */
 function bldTopDown(nid, depth, colCursor) {
-  const kids = nodes
-    .filter((n) => n.parent_id === nid)
-    .sort(
-      (a, b) =>
-        String(a.num ?? '').localeCompare(String(b.num ?? ''), undefined, { numeric: true }) ||
-        String(a.id).localeCompare(String(b.id))
-    );
+  const kids = collapsedNodeIds.has(nid)
+    ? []
+    : nodes
+        .filter((n) => n.parent_id === nid)
+        .sort(
+          (a, b) =>
+            String(a.num ?? '').localeCompare(String(b.num ?? ''), undefined, { numeric: true }) ||
+            String(a.id).localeCompare(String(b.id))
+        );
   if (!kids.length) {
     lm[nid] = { col: colCursor + 0.5, row: depth };
     return colCursor + 1;
@@ -1639,6 +1758,10 @@ function nodeBottomY(n) {
   const el = document.getElementById('nd-' + n.id);
   if (el && el.offsetHeight > 0) return top + el.offsetHeight;
   return top + 88;
+}
+/** 하위분포: `+`(pb2) 버튼 중심 Y — 간선은 카드 하단이 아니라 여기서 출발 */
+function nodeTopdownPlusCenterY(n) {
+  return nodeBottomY(n) + (TOPDOWN_PB2_BELOW_NW - TOPDOWN_PB2_H / 2);
 }
 
 function render() {
@@ -1703,6 +1826,7 @@ function render() {
   }
   const relinkHi = relinkHighlightIds();
   nodes.forEach((n) => {
+    if (!isTreeNodeShown(n)) return;
     const d = getDepth(n.id),
       bc = getDC(d),
       pos = gp(n);
@@ -1763,6 +1887,7 @@ function render() {
       if (e.shiftKey) {
         multiSel.add(n.id);
         selId = n.id;
+        render();
         try {
           e.preventDefault();
         } catch (_) {}
@@ -1771,14 +1896,13 @@ function render() {
       }
       if (e.target.closest('.nn-line')) {
         selId = n.id;
-        try {
-          e.preventDefault();
-        } catch (_) {}
+        requestAnimationFrame(() => render());
         startRelinkHoldOrDeferDrag(e, n, true);
         return;
       }
       multiSel.clear();
       selId = n.id;
+      render();
       try {
         e.preventDefault();
       } catch (_) {}
@@ -1791,27 +1915,59 @@ function render() {
       render();
       showCtx(e, n);
     });
-    // 노드 제목 클릭 시 편집 모달 호출 (Shift 없을 때만)
+    // 노드 제목: 짧은 탭 → 편집 모달은 pointerup(startRelinkHoldOrDeferDrag)에서만 연동 — click은 DOM 치환·합성 누락에 취약
     const titleEl = nd.querySelector('.nn-line');
     if (titleEl) {
       titleEl.style.cursor = 'pointer';
-      titleEl.addEventListener('click', (e) => {
-        if (e.shiftKey) return;
-        if (Date.now() < suppressNodeCardUiUntil) return;
-        if (relinkSuppressClick || relinkArm) {
-          e.stopPropagation();
-          e.preventDefault();
-          return;
-        }
-        e.stopPropagation();
-        e.preventDefault();
-        selId = n.id;
-        showEdit(n);
-      });
     }
     const na = nd.querySelector('#na-' + n.id);
     if (n.parent_id) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
     w.appendChild(nd);
+    if (nodeHasAnyChild(n.id)) {
+      const cb = document.createElement('button');
+      cb.type = 'button';
+      const col = collapsedNodeIds.has(n.id);
+      cb.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="${NODE_COLLAPSE_BTN_PX}" height="${NODE_COLLAPSE_BTN_PX}" viewBox="0 0 22 22" fill="none" overflow="visible" aria-hidden="true">${collapseToggleSvgInnerHtml(col, nodeMapLayoutMode)}</svg>`;
+      cb.setAttribute('aria-expanded', col ? 'false' : 'true');
+      cb.setAttribute('aria-label', col ? '하위 트리 펼치기' : '하위 트리 접기');
+      cb.title = col ? '하위 트리 펼치기' : '하위 트리 접기';
+      cb.className = 'node-collapse-btn';
+      cb.setAttribute(
+        'style',
+        nodeMapLayoutMode === 'topdown'
+          ? `position:absolute;left:50%;bottom:14px;transform:translateX(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:0;box-shadow:none;overflow:visible`
+          : `position:absolute;right:12px;top:50%;transform:translateY(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:0;box-shadow:none;overflow:visible`
+      );
+      cb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const ref = find(n.id) ?? n;
+        const p0 = gp(ref);
+        const cx0 = p0.x + nodeCardWidth(ref) / 2;
+        const cy0 = p0.y + nodeCardHeightPx(ref) / 2;
+        if (collapsedNodeIds.has(n.id)) {
+          collapsedNodeIds.delete(n.id);
+          for (const ch of nodes.filter((x) => x.parent_id === n.id)) {
+            if (nodeHasAnyChild(ch.id)) collapsedNodeIds.add(ch.id);
+          }
+        } else {
+          collapsedNodeIds.add(n.id);
+          if (selId && isStrictDescendantOf(selId, n.id)) selId = n.id;
+        }
+        render();
+        const ref1 = find(n.id);
+        if (ref1) {
+          const p1 = gp(ref1);
+          const cx1 = p1.x + nodeCardWidth(ref1) / 2;
+          const cy1 = p1.y + nodeCardHeightPx(ref1) / 2;
+          panX += (cx0 - cx1) * scale;
+          panY += (cy0 - cy1) * scale;
+          applyTx();
+        }
+      });
+      cb.addEventListener('pointerdown', (e) => e.stopPropagation());
+      w.appendChild(cb);
+    }
     const pb = document.createElement('button');
     pb.type = 'button';
     pb.className = 'pb2' + (relinkArm && !relinkDragActive ? ' pb2-drop' : '');
@@ -1823,8 +1979,8 @@ function render() {
     pb.setAttribute(
       'style',
       nodeMapLayoutMode === 'topdown'
-        ? `position:absolute;left:50%;bottom:-22px;top:auto;right:auto;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(0,0,0,.2)`
-        : `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+        ? `position:absolute;left:50%;bottom:-22px;top:auto;right:auto;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+        : `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
     );
     pb.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
@@ -1924,8 +2080,12 @@ function drawEdges() {
   mk.appendChild(py);
   defs.appendChild(mk);
   EG.appendChild(defs);
+  const hiKeys = buildSelectionHighlightEdgeKeys();
   nodes.forEach((n) => {
-    nodes.filter((c) => c.parent_id === n.id).forEach((c) => {
+    if (!isTreeNodeShown(n)) return;
+    nodes
+      .filter((c) => c.parent_id === n.id && isTreeNodeShown(c))
+      .forEach((c) => {
       const d = getDepth(n.id),
         pp = gp(n),
         cp = gp(c);
@@ -1935,24 +2095,34 @@ function drawEdges() {
         const pw = nodeCardWidth(n),
           cw = nodeCardWidth(c);
         const x1 = pp.x + pw / 2,
-          y1 = nodeBottomY(n),
+          y1 = nodeTopdownPlusCenterY(n),
           x2 = cp.x + cw / 2,
-          y2 = nodeTopY(c),
-          mx = (x1 + x2) / 2,
-          my = (y1 + y2) / 2;
-        pathD = `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+          y2top = nodeTopY(c),
+          y2 = y2top - 20,
+          dist = Math.max(y2 - y1, 12),
+          dx = Math.abs(x2 - x1),
+          dyEnd = Math.min(168, Math.max(dist * 0.78, dx * 0.28)),
+          dyStart = Math.min(52, 18 + dist * 0.108),
+          cx1 = x1 + (x2 - x1) * 0.2;
+        let dEnd = dyEnd;
+        if (dyStart + dEnd > dist - 8) dEnd = Math.max(dist * 0.5, dist - dyStart - 8);
+        pathD = `M${x1},${y1} C${cx1},${y1 + dyStart} ${x2},${y2 - dEnd} ${x2},${y2}`;
       } else {
         const pw = nodeCardWidth(n);
         const x1 = pp.x + pw,
           y1 = nodeCenterY(n),
-          x2 = cp.x,
+          x2raw = cp.x,
+          x2 = x2raw - 12,
           y2 = nodeCenterY(c),
-          mx = (x1 + x2) / 2;
-        pathD = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+          dist = Math.max(Math.abs(x2 - x1), 8),
+          dx = Math.min(88, dist * 0.52);
+        pathD = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
       }
       p.setAttribute('d', pathD);
-      p.setAttribute('stroke', getDC(d) + '66');
-      p.setAttribute('stroke-width', '1.5');
+      const hi = hiKeys.has(`${n.id}|${c.id}`);
+      const strokeCol = getDC(d);
+      p.setAttribute('stroke', hi ? strokeCol : strokeCol + '66');
+      p.setAttribute('stroke-width', hi ? '3.5' : '1.5');
       p.setAttribute('fill', 'none');
       p.setAttribute('marker-end', 'url(#ar)');
       EG.appendChild(p);
@@ -2432,6 +2602,7 @@ function updMM() {
     mxX = -Infinity,
     mxY = -Infinity;
   for (const n of nodes) {
+    if (!isTreeNodeShown(n)) continue;
     const p = gp(n),
       w = nodeCardWidth(n),
       h = nodeCardHeightPx(n);
@@ -2465,6 +2636,7 @@ function updMM() {
   });
 
   nodes.forEach((n) => {
+    if (!isTreeNodeShown(n)) return;
     const p = gp(n),
       d = getDepth(n.id),
       isSelected = n.id === selId;
@@ -2691,6 +2863,7 @@ export function initPlannode(opts = {}) {
 
   const bft = document.getElementById('BFT');
   const bar = document.getElementById('BAR');
+  const bfa = document.getElementById('BFA');
   const bmd = document.getElementById('BMD');
   const bpr = document.getElementById('BPR');
   const bjn = document.getElementById('BJN');
@@ -2701,6 +2874,7 @@ export function initPlannode(opts = {}) {
   };
   wireBtn(bft, fitToScreen);
   wireBtn(bar, resetAllManualLayout);
+  wireBtn(bfa, collapseAllTreesToRootParentsOnly);
   const bun = document.getElementById('BUN');
   wireBtn(bun, () => {
     if (!curP) {
@@ -2818,9 +2992,12 @@ export function initPlannode(opts = {}) {
       return;
     }
 
-    // Shift 없음: 팬 활성화 + 그룹 선택 해제 (§4.0.1 재연결 모드는 Esc·드롭으로만 종료)
+    // Shift 없음: 팬 활성화 + 그룹 선택·단일 선택(간선 강조) 해제 — 재연결 모드 중에는 selId 유지
     if (e.pointerType !== 'mouse' || e.button === 0) {
       multiSel.clear();
+      if (!relinkArm && !relinkDragActive) {
+        selId = null;
+      }
       render();
     }
     panning = true;
@@ -3102,6 +3279,7 @@ export function initPlannode(opts = {}) {
           clearRelinkArm();
           clearRelinkHold();
           selId = null;
+          collapsedNodeIds.clear();
         }
         if (selId && !find(selId)) selId = null;
         const primary =
@@ -3122,6 +3300,7 @@ export function initPlannode(opts = {}) {
         clearUndoStack();
         curP = null;
         nodes = [];
+        collapsedNodeIds.clear();
         if (ES) ES.style.display = 'flex';
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';

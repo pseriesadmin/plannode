@@ -13,7 +13,9 @@
     updateProjectFields,
     updateProjectPrdSectionDraft,
     deleteProject,
-    registerPendingWorkspaceDeletion
+    registerPendingWorkspaceDeletion,
+    getPendingWorkspaceDeletionIds,
+    mergeModalListCloudCanon
   } from '$lib/stores/projects';
   import {
     captureNodeSnapshot,
@@ -33,11 +35,13 @@
     parseMarkdownFileForProjectImport
   } from '$lib/outlineToPlannodeTreeV1';
   import { supabase, type Project } from '$lib/supabase/client';
-  import { isSupabaseCloudConfigured } from '$lib/supabase/sync';
+  import { isSupabaseCloudConfigured, fetchOwnWorkspaceProjectMetasForModal } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
   import { startCloudBackgroundSync, stopCloudBackgroundSync } from '$lib/supabase/cloudBackgroundSync';
   import { cloudSyncBadge } from '$lib/stores/workspaceDirty';
   import {
+    canAccessProject,
+    isAclEnforced,
     trySelectProject,
     ensureOwnerAclRowForMyProject,
     repairOwnedProjectsAclWorkspaceSources,
@@ -61,7 +65,7 @@
     projectPresenceSelectedEmail,
     toggleProjectPresencePeerEmail
   } from '$lib/supabase/projectPresence';
-  import { getAuthUserId, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
+  import { getAuthUserId, getAuthEmail, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
   import StandardBadgePoolModal from '$lib/components/StandardBadgePoolModal.svelte';
   import IAExportMenu from '$lib/components/IAExportMenu.svelte';
@@ -271,6 +275,60 @@
   let aclInviteRows: AclInviteSummary[] = [];
   let aclInvitesErr = '';
   let aclImportBusyKey = '';
+  /** `getPendingWorkspaceDeletionIds`는 비반응형 — 삭제 직후 초대 목록 필터를 다시 돌리기 위한 루프 키 */
+  let invitePanelEpoch = 0;
+
+  /**
+   * 모달 프로젝트 목록: null = ACL 필터 미적용(로컬 전부 표시) · 배열 = `canAccessProject` 통과한 것만
+   * 클라우드 설정 시(+ 로그인) 목록 행은 서버 **`plannode_workspace.projects_json`** 정본을 우선하고 로컬 전용 id만 뒤에 붙인다(NOW-70~72).
+   */
+  let projectsForModal: Project[] | null = null;
+  let modalProjectListToken = 0;
+
+  async function syncProjectsForModalList() {
+    const token = ++modalProjectListToken;
+    if (!get(showProjectModal)) return;
+
+    if (!isAclEnforced()) {
+      if (token !== modalProjectListToken) return;
+      projectsForModal = null;
+      return;
+    }
+    const uid = getAuthUserId();
+    const em = getAuthEmail();
+    if (!uid || !em) {
+      if (token !== modalProjectListToken) return;
+      projectsForModal = null;
+      return;
+    }
+
+    if (token !== modalProjectListToken) return;
+    projectsForModal = [];
+
+    const plist = get(projects);
+    let mergedList: Project[];
+    if (cloudSyncAvailable) {
+      const cloudRes = await fetchOwnWorkspaceProjectMetasForModal();
+      if (token !== modalProjectListToken) return;
+      mergedList = cloudRes.ok ? mergeModalListCloudCanon(cloudRes.projects, plist) : [...plist];
+    } else {
+      mergedList = [...plist];
+    }
+
+    const next: Project[] = [];
+    for (const p of mergedList) {
+      if (token !== modalProjectListToken) return;
+      if (await canAccessProject(p)) next.push(p);
+    }
+    if (token !== modalProjectListToken) return;
+    projectsForModal = next;
+  }
+
+  $: if ($showProjectModal) {
+    void $projects;
+    void $authUser?.id;
+    void syncProjectsForModalList();
+  }
 
   let autoLoadAttempted = false;
   let lastAutoLoadTime = 0;
@@ -353,7 +411,7 @@
     jsonImportInput?.click();
   }
 
-  /** pilot이 `#BMD` `#BPR` `#BJN` `#BFT` `#BAR` `#BUN`(sink)에 연결 — UI는 드롭다운·툴바에서 동일 요소에 click 위임 */
+  /** pilot이 `#BMD` `#BPR` `#BJN` `#BFT` `#BFA` `#BAR` `#BUN`(sink)에 연결 — UI는 드롭다운·툴바에서 동일 요소에 click 위임 */
   let showOutputMenu = false;
   let outputMenuWrapEl: HTMLDivElement | undefined;
 
@@ -378,7 +436,7 @@
     showViewportMenu = false;
   }
 
-  function triggerPilotViewport(id: 'BFT' | 'BAR') {
+  function triggerPilotViewport(id: 'BFT' | 'BFA' | 'BAR') {
     closeViewportMenu();
     closeViewMenu();
     closeOutputMenu();
@@ -762,6 +820,12 @@
         }
       }
 
+      /** 다른 프로젝트가 열려 있으면 지연 persist 전에 전환하면 이전 캔버스가 저장되지 않음 — 엎어쓰기처럼 보임 */
+      const alreadyOpen = get(currentProject);
+      if (alreadyOpen && alreadyOpen.id !== newProj.id) {
+        pilotFlushPersistNow();
+      }
+
       const r = await trySelectProject(newProj);
       if (!r.ok) {
         alert(r.message ?? '프로젝트를 열 수 없습니다');
@@ -842,7 +906,18 @@
   }
 
   $: aclProjectIdSet = new Set(aclInviteRows.map((r) => r.project_id));
-  $: invitedRemoteOnly = aclInviteRows.filter((r) => !$projects.some((p) => p.id === r.project_id));
+  /** 로컬 목록에 없고, 방금 이 기기에서 삭제해 클라우드 반영 대기 중인 id는 제외(ACL 조회 지연·소유자 행 잔상 방지) */
+  $: invitedRemoteOnly = (() => {
+    void invitePanelEpoch;
+    void aclInviteRows;
+    void $projects;
+    const pendingDel = getPendingWorkspaceDeletionIds();
+    return aclInviteRows.filter((r) => {
+      if ($projects.some((p) => p.id === r.project_id)) return false;
+      if (pendingDel.has(r.project_id)) return false;
+      return true;
+    });
+  })();
 
   /** 모달에서 카드별 삭제 버튼 표시용(ACL·플랫폼 마스터 등 owner_user_id만으로는 모르는 경우) */
   let projectDeletableById: Record<string, boolean> = {};
@@ -912,6 +987,7 @@
         scheduleCloudFlush('delete-project', 100);
       }
       showPilotToast('프로젝트를 삭제했어.');
+      invitePanelEpoch++;
       void loadAclInvitesForModal();
     } finally {
       deletingProjectId = '';
@@ -1127,6 +1203,11 @@
     };
     window.addEventListener('plannode-auto-cloud-sync', onExportSync);
 
+    const onModalListSync = () => {
+      void syncProjectsForModalList();
+    };
+    window.addEventListener('plannode-modal-project-list-sync', onModalListSync);
+
     const onPresencePeersJoined = (ev: Event) => {
       const d = (ev as CustomEvent<{ projectId?: string }>).detail;
       if (!d?.projectId) return;
@@ -1175,6 +1256,7 @@
       window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
+      window.removeEventListener('plannode-modal-project-list-sync', onModalListSync);
       window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
       window.removeEventListener('plannode-pilot-toast', onPilotToast);
       document.removeEventListener('visibilitychange', onVis);
@@ -1351,7 +1433,7 @@
               class="tb-viewport-btn"
               aria-haspopup="menu"
               aria-expanded={showViewportMenu}
-              title="캔버스 맞춤 — 모두보기(창에 맞춤), 자동정렬"
+              title="캔버스 맞춤 — 모두보기, 모두접기, 자동정렬"
               on:click={() => {
                 const next = !showViewportMenu;
                 showViewportMenu = next;
@@ -1372,6 +1454,12 @@
                   class="tb-viewport-menu-item"
                   title="캔버스를 창 크기에 맞게 맞춤"
                   on:click={() => triggerPilotViewport('BFT')}>모두보기</button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="tb-viewport-menu-item"
+                  title="루트 노드만 표시 후 캔버스를 루트 카드에 맞춤"
+                  on:click={() => triggerPilotViewport('BFA')}>모두접기</button>
                 <button
                   type="button"
                   role="menuitem"
@@ -1433,6 +1521,7 @@
         </div>
         <div class="pilot-wire-sinks" aria-hidden="true">
           <button type="button" id="BFT" class="pilot-wire-sink" tabindex="-1">모두보기</button>
+          <button type="button" id="BFA" class="pilot-wire-sink" tabindex="-1">모두접기</button>
           <button type="button" id="BAR" class="pilot-wire-sink" tabindex="-1">자동정렬</button>
           <button type="button" id="BUN" class="pilot-wire-sink" tabindex="-1">↩ 되돌리기</button>
           <button type="button" id="BMD" class="pilot-wire-sink" tabindex="-1">MD</button>
@@ -1982,7 +2071,7 @@
               <p class="acl-err">{aclInvitesErr}</p>
             {/if}
             <div id="PLC" data-svelte-managed="1">
-              {#each $projects as proj}
+              {#each (projectsForModal === null ? $projects : projectsForModal) as proj (proj.id)}
                 <div class="prow">
                   <div
                     class="pcard"
@@ -3347,6 +3436,14 @@
   :global(.nd:hover) {
     z-index: 30;
     outline-color: rgba(107, 78, 246, 0.38);
+  }
+  :global(.nw .node-collapse-btn),
+  :global(.nw .pb2) {
+    z-index: 32;
+  }
+  /* UA button 기본 overflow:hidden이 원형 SVG 스트로크·AA를 우·하단에서 잘라냄 */
+  :global(.nw .node-collapse-btn) {
+    overflow: visible;
   }
   :global(.nd.sel) {
     outline: 2px solid rgba(107, 78, 246, 0.65);

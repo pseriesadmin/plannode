@@ -175,6 +175,11 @@ function readPendingWorkspaceDeletionSet(): Set<string> {
   }
 }
 
+/** 삭제 직후~클라우드 반영 전까지 보류된 project_id(초대 패널·병합 스킵과 동일 소스) */
+export function getPendingWorkspaceDeletionIds(): Set<string> {
+  return readPendingWorkspaceDeletionSet();
+}
+
 function makeRootNode(project: Project): Node {
   const now = new Date().toISOString();
   return {
@@ -620,6 +625,60 @@ export type WorkspaceBundle = {
   nodesByProject: Record<string, Node[]>;
 };
 
+const parseTs = (iso: string | undefined): number => {
+  const t = Date.parse(String(iso ?? ''));
+  return Number.isFinite(t) ? t : 0;
+};
+
+/**
+ * 모달 목록 카드(NOW-70~72): 로그인·클라우드 사용 가능 시 **`plannode_workspace.projects_json`** 행을 카드 행의 정본으로 쓰고,
+ * 아직 서버에 없는 로컬 전용 프로젝트는 목록 뒤에 붙인다. 미로그인·`isAclEnforced()` 거짓(오프라인 호환)일 때는 로컬 `$projects`만 사용한다(+page).
+ * 동일 id는 메타 **`updated_at`이 더 새쪽**을 카드에 표시(미플러시 로컬 편집분 우선).
+ */
+export function mergeModalListCloudCanon(cloudRows: Project[], localPlist: Project[]): Project[] {
+  const cloudIds = new Set(cloudRows.map((p) => p.id));
+  const out: Project[] = [];
+  for (const cp of cloudRows) {
+    const loc = localPlist.find((p) => p.id === cp.id);
+    if (!loc) {
+      out.push(cp);
+      continue;
+    }
+    const lt = parseTs(loc.updated_at);
+    const ct = parseTs(cp.updated_at);
+    out.push(lt > ct ? loc : cp);
+  }
+  for (const lp of localPlist) {
+    if (!cloudIds.has(lp.id)) out.push(lp);
+  }
+  return out;
+}
+
+/** 동일 `id` 중복 행 제거 — **updated_at** 최신 한 줄만 유지(+page는 건드리지 않음). 저장·풀 라운드트립 후 목록 스테일 완화용(NOW-74). */
+export function dedupeProjectsStoreByLatestUpdatedAt(): void {
+  if (typeof window === 'undefined') return;
+  const plist = get(projects);
+  const bestById = new Map<string, Project>();
+  for (const p of plist) {
+    const prev = bestById.get(p.id);
+    if (!prev || parseTs(p.updated_at) >= parseTs(prev.updated_at)) bestById.set(p.id, p);
+  }
+  const order = [...new Set(plist.map((p) => p.id))];
+  const next = order.map((id) => bestById.get(id)!);
+  if (next.length === plist.length) return;
+  try {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore */
+  }
+  projects.set(next);
+  const cur = get(currentProject);
+  if (cur) {
+    const ref = next.find((p) => p.id === cur.id);
+    if (ref) selectProject(ref);
+  }
+}
+
 export function gatherWorkspaceBundle(): WorkspaceBundle {
   if (typeof window === 'undefined') {
     return { projects: get(projects), nodesByProject: {} };
@@ -722,11 +781,6 @@ export function upsertImportedPlannodeTreeV1(
   }
   return selected;
 }
-
-const parseTs = (iso: string | undefined): number => {
-  const t = Date.parse(String(iso ?? ''));
-  return Number.isFinite(t) ? t : 0;
-};
 
 /** 로컬에 저장된 프로젝트 노드만 읽기(스토어와 무관) — 클라우드 병합 시 사용 */
 export function loadProjectNodesFromLocalStorage(projectId: string): Node[] {
