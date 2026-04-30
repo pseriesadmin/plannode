@@ -33,6 +33,11 @@ import {
 
 export { isSupabaseCloudConfigured };
 
+/**
+ * 동기·공유 슬라이스 간극 요약(NOW-68): 비실시간(Realtime 미구독). 공유 merge는 revision·lock RPC 경로에서
+ * `revision_stale`·`merge_locked` 등으로 완화·재시도하며 OT/CRDT 수준 동시 편집은 아님. 상세는 `docs/plannode_workspace_sync_overview.md` §3.
+ */
+
 const TABLE = 'plannode_workspace';
 
 /** 내 plannode_workspace 행의 `updated_at` 캐시 — 자동 풀 시 불필요한 전체 병합 방지 */
@@ -551,6 +556,26 @@ export async function downloadWorkspaceFromCloud(): Promise<{ ok: boolean; messa
   return { ok: true, message: '클라우드에서 받았어 ✓' };
 }
 
+/** 모달 카드용: `plannode_workspace.projects_json` 만 조회(노드 번들 없음). 네트워크·RPC 오류 시 `ok: false`. */
+export async function fetchOwnWorkspaceProjectMetasForModal(): Promise<{
+  ok: boolean;
+  projects: Project[];
+}> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return { ok: true, projects: [] };
+  const { userId } = await requireSessionUserId();
+  if (!userId) return { ok: true, projects: [] };
+
+  const { data, error } = await supabase.from(TABLE).select('projects_json').eq('user_id', userId).maybeSingle();
+
+  if (error) {
+    if (import.meta.env.DEV) console.warn('[fetchOwnWorkspaceProjectMetasForModal]', error.message);
+    return { ok: false, projects: [] };
+  }
+  if (!data) return { ok: true, projects: [] };
+  const pj = (data as { projects_json?: unknown }).projects_json;
+  return { ok: true, projects: Array.isArray(pj) ? (pj as Project[]) : [] };
+}
+
 /** 내 워크스페이스 행이 서버에서 바뀌었으면 프로젝트별 LWW로 로컬에 합침 */
 export async function pullOwnWorkspaceIfChanged(): Promise<number> {
   if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
@@ -573,6 +598,10 @@ export async function pullOwnWorkspaceIfChanged(): Promise<number> {
     prev = '';
   }
   if (!remoteTs || prev === remoteTs) return 0;
+
+  if (import.meta.env.DEV) {
+    console.info('[pullOwnWorkspaceIfChanged] workspace row ts advance', { prevCached: prev, remoteTs });
+  }
 
   const bundle = normalizeBundle(data as { projects_json: unknown; nodes_by_project_json: unknown });
   if (!bundle) return 0;
