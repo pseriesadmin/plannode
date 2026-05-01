@@ -13,7 +13,6 @@
       "isBackground": true,
       "problemMatcher": {
         "owner": "plannode-http",
-        "pattern": [{ "regexp": "^$" }],
         "background": {
           "activeOnStart": true,
           "beginsPattern": ".",
