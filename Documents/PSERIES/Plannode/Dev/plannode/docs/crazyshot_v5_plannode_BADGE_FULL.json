@@ -1,0 +1,2992 @@
+{
+  "format": "plannode.tree",
+  "version": 2,
+  "exportedAt": "2026-04-28T12:00:00.000Z",
+  "project": {
+    "id": "crazyshot-v5-complete-master",
+    "name": "CRAZYSHOT RENEWAL v5.0 COMPLETE",
+    "author": "Stephen Cconzy",
+    "start_date": "2026-05-01",
+    "end_date": "2026-12-31",
+    "description": "경쟁사 분석 + M1~M5 + 장바구니 4-Zone + DDL/RPC/SM/Concurrency 완전 통합 | AI 개발 가능 100%"
+  },
+  "nodes": [
+    {
+      "id": "root",
+      "parent_id": null,
+      "num": "0",
+      "node_type": "root",
+      "name": "CRAZYSHOT RENEWAL v5.0 COMPLETE",
+      "description": "경쟁사 분석 + M1~M5 설계 + 장바구니 4-Zone + 상세 구현 명세(DDL/RPC/SM/Concurrency) 완전 통합판",
+      "metadata": {
+        "level": "L0",
+        "status": "active",
+        "priority": "Critical",
+        "phase": "v5.0",
+        "aiDevReady": true,
+        "badges": {
+          "dev": [],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "part1",
+      "parent_id": "root",
+      "num": "1",
+      "node_type": "service",
+      "name": "PART 1 | 경쟁사 초정밀 분석",
+      "description": "SLR렌트(상담형) × 데이페이(결제형) DB 알고리즘 역산 분해 | 크레이지샷 차별화 5가지 도출",
+      "metadata": {
+        "level": "L1",
+        "status": "active",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": [
+            "COMPETITIVE"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-slr",
+      "parent_id": "part1",
+      "num": "1.1",
+      "node_type": "feature_group",
+      "name": "1.1 | SLR렌트 초정밀 분해",
+      "description": "상담형 퍼널 | Serial-Level Hard Lock | 24h Flat Rate | 동시성 미흡 | 해외 미지원",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": [
+            "COMPETITIVE"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-slr-flow",
+      "parent_id": "p1-slr",
+      "num": "1.1.1",
+      "node_type": "feature",
+      "name": "1.1.1 | 예약 퍼널 분석",
+      "description": "온라인 표면 / 운영자 개입 내부 | 상담-견적-계약-입금-예약 시퀀셜",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p1-slr-inv",
+      "parent_id": "p1-slr",
+      "num": "1.1.2",
+      "node_type": "feature",
+      "name": "1.1.2 | 재고 잠금 알고리즘",
+      "description": "S/N Hard Lock | 5단계 상태 | 동시성 제어 미흡 추정 | daterange 단위 → 12h 불가",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p1-slr-price",
+      "parent_id": "p1-slr",
+      "num": "1.1.3",
+      "node_type": "feature",
+      "name": "1.1.3 | 요금 산정 로직",
+      "description": "24h 기준 단가 / 2-3일 할인율 / 12h 미지원 / 동적 가격 불가 / 부속품 번들 공식 없음",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p1-datafy",
+      "parent_id": "part1",
+      "num": "1.2",
+      "node_type": "feature_group",
+      "name": "1.2 | 데이페이 초정밀 분해",
+      "description": "결제형 즉시 예약 | Pool-Level Soft Lock | 혼합결제 VAT 역산 오류 | 웹훅 fallback 미정의",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": [
+            "COMPETITIVE"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-dp-flow",
+      "parent_id": "p1-datafy",
+      "num": "1.2.1",
+      "node_type": "feature",
+      "name": "1.2.1 | 예약 퍼널 분석",
+      "description": "실시간 가용성 조회 / 즉시 결제 / 상담 없음",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p1-dp-inv",
+      "parent_id": "p1-datafy",
+      "num": "1.2.2",
+      "node_type": "feature",
+      "name": "1.2.2 | Pool Lock Race Condition",
+      "description": "SELECT-INSERT 사이 동시 요청 → 재고 초과 배정 가능 | 웹훅 실패 fallback 미정의",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "ANALYSIS"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p1-dp-pay",
+      "parent_id": "p1-datafy",
+      "num": "1.2.3",
+      "node_type": "feature",
+      "name": "1.2.3 | 혼합 결제 VAT 역산 오류",
+      "description": "포인트+카드 순서 / VAT 역산 기준 불명확 / 간헐적 금액 오류 / 환율 오류",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "ANALYSIS",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p1-usp",
+      "parent_id": "part1",
+      "num": "1.3",
+      "node_type": "feature_group",
+      "name": "1.3 | 크레이지샷 핵심 차별화 5가지",
+      "description": "비대면 택배 · 국내외 분리 · 3중 단가 · Vision Agent · Harness 자동화",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [],
+          "ux": [],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-usp1",
+      "parent_id": "p1-usp",
+      "num": "1.3.1",
+      "node_type": "feature",
+      "name": "① 비대면 택배+퀵",
+      "description": "M5 배송 모듈 + carrier adapter (epost/cj/quick/locker/pickup)",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [],
+          "ux": [],
+          "prj": [
+            "USP",
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-usp2",
+      "parent_id": "p1-usp",
+      "num": "1.3.2",
+      "node_type": "feature",
+      "name": "② 국내외 분리 구조",
+      "description": "reserve_for_foreign_pickup RPC | visa_expiry 검증 | 공항·서울 거점",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [],
+          "ux": [],
+          "prj": [
+            "USP",
+            "I18N"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-usp3",
+      "parent_id": "p1-usp",
+      "num": "1.3.3",
+      "node_type": "feature",
+      "name": "③ 3중 단가 + 동적 요율",
+      "description": "12h/24h/purchase + 멤버십 할인 + 계절 요율 | 데이페이 VAT 오류 해결",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "USP",
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-usp4",
+      "parent_id": "p1-usp",
+      "num": "1.3.4",
+      "node_type": "feature",
+      "name": "④ Vision Agent 반납 검수",
+      "description": "confidence≥0.85 자동 확정 | 픽셀 비교 파손 자동 분류",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "AI"
+          ],
+          "ux": [],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p1-usp5",
+      "parent_id": "p1-usp",
+      "num": "1.3.5",
+      "node_type": "feature",
+      "name": "⑤ Commerce-Harness-Flow 자동화",
+      "description": "SP1~SP4 에이전트 + ESLint 강제 | GATE A~F 자동 검증",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "part2",
+      "parent_id": "root",
+      "num": "2",
+      "node_type": "service",
+      "name": "PART 2 | M1~M5 서비스 아키텍처 설계",
+      "description": "5개 모듈 전체 DDL + RPC + State Machine | 원자 예약 · 결제 공식 · 멤버십 · 배송·검수",
+      "metadata": {
+        "level": "L1",
+        "status": "active",
+        "priority": "Critical",
+        "phase": "S0~S2",
+        "aiDevReady": true,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m1",
+      "parent_id": "part2",
+      "num": "2.1",
+      "node_type": "feature_group",
+      "name": "M1 | 상품·재고 관리",
+      "description": "products / product_options(신규) / price_rules(duration_type 단일화) / assets(S/N+Weighted-Pool)",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m1-products",
+      "parent_id": "m1",
+      "num": "2.1.1",
+      "node_type": "feature",
+      "name": "M1.01 | products + product_options",
+      "description": "8개 카테고리 | product_options 신규(price_12h/24h/purchase 독립) | DDL 완전",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "specLevel": "DETAILED",
+        "ddlLinesCount": 80,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m1-price",
+      "parent_id": "m1",
+      "num": "2.1.2",
+      "node_type": "feature",
+      "name": "M1.02 | price_rules duration_type 단일화",
+      "description": "rule_type 폐지 → duration_type('12h'|'24h'|'purchase') | ESLint H-06 추가",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "migrationRequired": true,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m1-assets",
+      "parent_id": "m1",
+      "num": "2.1.3",
+      "node_type": "feature",
+      "name": "M1.03 | assets S/N 실물 추적 + Weighted-Pool",
+      "description": "serial_number UNIQUE | pool_weight / usage_count | condition_score(0~100) | Weighted-Pool Index | DDL 완전",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "specLevel": "DETAILED",
+        "ddlLinesCount": 85,
+        "indexDef": "CREATE INDEX ON assets(product_id, pool_weight DESC, usage_count ASC) WHERE status='available'",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m2",
+      "parent_id": "part2",
+      "num": "2.2",
+      "node_type": "feature_group",
+      "name": "M2 | 예약·가용성 관리 ★TDD",
+      "description": "atomic_reserve_asset(SERIALIZABLE+FOR UPDATE+EXCLUDE) | 임시점유 10분+pg_cron | tsrange",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "testCaseCount": 35,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m2-atomic",
+      "parent_id": "m2",
+      "num": "2.2.1",
+      "node_type": "feature",
+      "name": "M2.01 | atomic_reserve_asset() ★TDD ★CRITICAL",
+      "description": "SERIALIZABLE 격리 | FOR UPDATE SKIP LOCKED | EXCLUDE gist(asset_id,tsrange) | 버퍼 1h | Retry 3회 | 완전 코드 포함",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "gate": "GATE C",
+        "rpcCodeLines": 180,
+        "testCaseCount": 35,
+        "concurrencyScenarios": 8,
+        "specLevel": "DETAILED_WITH_FULL_CODE",
+        "returnType": "JSONB",
+        "errorCodes": [
+          "NO_AVAILABLE_ASSET",
+          "EXCLUSION_CONFLICT",
+          "SERIALIZATION_FAILED"
+        ],
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m2-batch",
+      "parent_id": "m2",
+      "num": "2.2.2",
+      "node_type": "feature",
+      "name": "M2.02 | batch_atomic_reserve() ★TDD",
+      "description": "장바구니 전체 일괄 원자 예약 | All-or-Nothing 롤백 | 실패 상품 특정 응답",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "gate": "GATE C",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m2-sync",
+      "parent_id": "m2",
+      "num": "2.2.3",
+      "node_type": "feature",
+      "name": "M2.03 | sync_cart_dates() ★신규 ★TDD",
+      "description": "전체 상품 일정 일괄 적용 | 충돌 상품 감지 → 경고 모달 | 데이페이 미지원 차별화",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "isTDD": true,
+        "rpcCodeLines": 75,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m2-hold",
+      "parent_id": "m2",
+      "num": "2.2.4",
+      "node_type": "feature",
+      "name": "M2.04 | 임시점유 10분 + pg_cron",
+      "description": "status='pending' + expires_at=NOW()+10min | pg_cron '*/1 * * * *' 자동 해제 | FCM 2분 전 경고",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "cronDef": "SELECT cron.schedule('release_expired_temp_holds','*/1 * * * *',...)",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m2-calendar",
+      "parent_id": "m2",
+      "num": "2.2.5",
+      "node_type": "feature",
+      "name": "M2.05 | 달력 가용성 ghosting UI",
+      "description": "tsrange 겹침 체크 → 예약 불가 날짜 비활성 | SvelteKit DatePicker 연동",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "FEED",
+            "MOBILE"
+          ],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "m3",
+      "parent_id": "part2",
+      "num": "2.3",
+      "node_type": "feature_group",
+      "name": "M3 | 결제·정산 관리 ★TDD",
+      "description": "calculate_cart_total(9단계 완전공식) | VAT 역산 | 쿠폰 4유형 | 보증금 가승인 | Toss v2",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        },
+        "testCaseCount": 40
+      }
+    },
+    {
+      "id": "m3-total",
+      "parent_id": "m3",
+      "num": "2.3.1",
+      "node_type": "feature",
+      "name": "M3.05 | calculate_cart_total() ★TDD ★CRITICAL",
+      "description": "9단계 계산 (기본료→옵션→VAT분리→멤버십→쿠폰→포인트→VAT역산→배송→적립) | 완전 코드 포함",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "gate": "GATE C",
+        "rpcCodeLines": 220,
+        "testCaseCount": 20,
+        "specLevel": "DETAILED_WITH_FULL_CODE",
+        "calculationSteps": 9,
+        "vatFormula": "floor(inc_subtotal * 0.1)",
+        "earnPointsFormula": "floor(final_price * 0.01)",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m3-coupon",
+      "parent_id": "m3",
+      "num": "2.3.2",
+      "node_type": "feature",
+      "name": "M3.06 | 쿠폰 4유형 + coupons 테이블",
+      "description": "all / first_purchase(rental_count=0) / student(is_student) / subscriber(grade) | instant_use 선점 처리",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m3-deposit",
+      "parent_id": "m3",
+      "num": "2.3.3",
+      "node_type": "feature",
+      "name": "M3.07 | 보증금 가승인 + deposit_holds",
+      "description": "실결제 vs 가승인 완전 분리 | credit_score→deposit_rate | CRAZY 면제 | toss_payment_key",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "depositRates": {
+          "score_85plus": "0%",
+          "score_70_84": "30%",
+          "score_50_69": "50%",
+          "score_under_50": "100%"
+        },
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m3-idempotency",
+      "parent_id": "m3",
+      "num": "2.3.4",
+      "node_type": "feature",
+      "name": "M3.08 | 이중결제 방지 (idempotency_key)",
+      "description": "payments 테이블 UNIQUE(idempotency_key) | 웹훅 2회 수신 시 두 번째 자동 실패 → 자동 환불",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "gate": "GATE C",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m4",
+      "parent_id": "part2",
+      "num": "2.4",
+      "node_type": "feature_group",
+      "name": "M4 | 멤버십·고객 관리",
+      "description": "EASY/POP/CRAZY 구독 | credit_score | 외국인 체류자격 | is_student 버그픽스",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API",
+            "AUTH"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m4-student",
+      "parent_id": "m4",
+      "num": "2.4.1",
+      "node_type": "feature",
+      "name": "M4.02 | is_student 버그픽스 ★즉시 S0",
+      "description": "ALTER TABLE user_profiles ADD COLUMN is_student BOOLEAN DEFAULT false | S0 마이그레이션 선행 필수",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "phase": "S0",
+        "migrationRequired": true,
+        "sql": "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_student BOOLEAN DEFAULT false",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "AUTH"
+          ],
+          "ux": [
+            "FORM"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m4-grade",
+      "parent_id": "m4",
+      "num": "2.4.2",
+      "node_type": "feature",
+      "name": "M4.01 | 멤버십 등급 → Zone3 연동",
+      "description": "POP -10% / CRAZY -20%+무료배송 | 구독 실패 시 EASY 강등 | calculate_cart_total 자동 반영",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "DASH"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m4-credit",
+      "parent_id": "m4",
+      "num": "2.4.3",
+      "node_type": "feature",
+      "name": "M4.04 | credit_score 신용 평가",
+      "description": "rental_count +2 / late_return -8 / damage -15 | 기본점수 70 | deposit_rate 자동 결정",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "formula": "70 + (rental_count×2) - (late_count×8) - (damage_count×15)",
+        "badges": {
+          "dev": [
+            "TDD",
+            "AI"
+          ],
+          "ux": [
+            "DASH"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m4-foreign",
+      "parent_id": "m4",
+      "num": "2.4.4",
+      "node_type": "feature",
+      "name": "M4.03 | 외국인 체류자격 검증",
+      "description": "visa_expiry 검증 | reserve_for_foreign_pickup RPC | 공항·서울 거점 픽업",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "phase": "S1+",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "AUTH"
+          ],
+          "ux": [
+            "FORM"
+          ],
+          "prj": [
+            "I18N"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m5",
+      "parent_id": "part2",
+      "num": "2.5",
+      "node_type": "feature_group",
+      "name": "M5 | 배송·검수 관리",
+      "description": "shipments + carrier adapter | check_delivery_deadline | Vision Agent(confidence≥0.85) | 파손 자동 배상",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API",
+            "AI"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m5-ship",
+      "parent_id": "m5",
+      "num": "2.5.1",
+      "node_type": "feature",
+      "name": "M5.01 | 배송 처리 + create_shipment()",
+      "description": "carrier 추상화(epost/cj/quick/locker/pickup) | 송장 생성 + 예약 연동 | Zone2 배송방식 연동",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m5-deadline",
+      "parent_id": "m5",
+      "num": "2.5.2",
+      "node_type": "feature",
+      "name": "M5.02 | check_delivery_deadline() + public_holidays",
+      "description": "carrier별 마감(택배15:00/퀵17:00/보관함18:00/픽업19:00) | 휴일제외 | deadlineWarning 플래그",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "carrierDeadlines": {
+          "epost": "15:00",
+          "cj": "15:00",
+          "quick": "17:00",
+          "locker": "18:00",
+          "pickup": "19:00"
+        },
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m5-inspect",
+      "parent_id": "m5",
+      "num": "2.5.3",
+      "node_type": "feature",
+      "name": "M5.03 | 상태 증명 아카이브 (asset_inspections)",
+      "description": "4방향 사진 필수 | Cloudinary 저장 | before/after 비교 | DDL 완전",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m5-vision",
+      "parent_id": "m5",
+      "num": "2.5.4",
+      "node_type": "feature",
+      "name": "M5.04 | Vision Agent 반납 검수 ★AI",
+      "description": "픽셀 비교 파손 자동 분류 | confidence≥0.85 자동확정 | Claude Vision API | S2~G1",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "aiModel": "Claude Vision API",
+        "confidenceThreshold": 0.85,
+        "phase": "S2~G1",
+        "badges": {
+          "dev": [
+            "TDD",
+            "AI",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "m5-damage",
+      "parent_id": "m5",
+      "num": "2.5.5",
+      "node_type": "feature",
+      "name": "M5.05 | 파손 처리 자동화",
+      "description": "Vision 분류 → 배상 역산 → 보증금 청구 | inspection.status→billed",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "AI",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "part3",
+      "parent_id": "root",
+      "num": "3",
+      "node_type": "service",
+      "name": "PART 3 | 장바구니 4-Zone 고도화",
+      "description": "Zone1(제품·옵션) → Zone2(대여옵션) → Zone3(할인·결제) → Zone4(버튼) | SvelteKit 컴포넌트 완전 명세",
+      "metadata": {
+        "level": "L1",
+        "status": "active",
+        "priority": "Critical",
+        "phase": "S1~S1+",
+        "aiDevReady": true,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [
+            "CARD",
+            "FORM",
+            "MODAL",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "zone1",
+      "parent_id": "part3",
+      "num": "3.1",
+      "node_type": "feature_group",
+      "name": "Zone1 | 제품목록·옵션 영역",
+      "description": "상품카드 + 부속품 옵션 수량 조정 + 항목 제거 | update_cart_option() RPC | Zone1CartItem.svelte",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [
+            "CARD",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z1-card",
+      "parent_id": "zone1",
+      "num": "3.1.1",
+      "node_type": "feature",
+      "name": "Zone1.01 | 상품카드 렌더링",
+      "description": "product_options LEFT JOIN | condition_score 뱃지 | 부속품 패널 접이식 | SvelteKit",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z1-option",
+      "parent_id": "zone1",
+      "num": "3.1.2",
+      "node_type": "feature",
+      "name": "Zone1.02 | update_cart_option() RPC ★TDD",
+      "description": "qty>0=수량변경 / qty=0=제거 | duration_type 단가 자동 결정 | RPC 완전 코드 | Test 10개",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "rpcCodeLines": 65,
+        "testCaseCount": 10,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "FORM"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z1-spinner",
+      "parent_id": "zone1",
+      "num": "3.1.3",
+      "node_type": "feature",
+      "name": "Zone1.03 | 수량 스피너 UI",
+      "description": "옵션별 독립 스피너 | 변경 시 cartStore.refresh() → Zone3 debounce 300ms 재계산 트리거",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "zone2",
+      "parent_id": "part3",
+      "num": "3.2",
+      "node_type": "feature_group",
+      "name": "Zone2 | 대여옵션 설정 영역",
+      "description": "배송방식 4종 + 수령·반납 일정 분리 + 배송마감 카운트다운 + 전체상품 일정 일괄적용 | Zone2RentalOption.svelte",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z2-delivery",
+      "parent_id": "zone2",
+      "num": "3.2.1",
+      "node_type": "feature",
+      "name": "Zone2.01 | 배송방식 4종 선택",
+      "description": "택배/퀵/무인보관함/방문픽업 | 수령≠반납 독립 선택 | pickup_points 연동 | 해외 픽업 지원",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z2-deadline",
+      "parent_id": "zone2",
+      "num": "3.2.2",
+      "node_type": "feature",
+      "name": "Zone2.02 | 배송마감 카운트다운 ★NEW",
+      "description": "check_delivery_deadline() 연동 | deadlineWarning→Zone4.canProceed=false | 휴일 제외",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "carrierDeadlines": {
+          "epost": "15:00",
+          "quick": "17:00",
+          "locker": "18:00",
+          "pickup": "19:00"
+        },
+        "testCaseCount": 12,
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z2-sync",
+      "parent_id": "zone2",
+      "num": "3.2.3",
+      "node_type": "feature",
+      "name": "Zone2.03 | sync_cart_dates() 일괄 적용 ★차별화 ★TDD",
+      "description": "전체 상품 날짜 일괄 적용 | 충돌 감지 → 경고 모달 | 데이페이 미지원 USP",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "rpcCodeLines": 75,
+        "conflictDetection": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "MODAL",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "zone3",
+      "parent_id": "part3",
+      "num": "3.3",
+      "node_type": "feature_group",
+      "name": "Zone3 | 할인·결제 산출 영역 ★CRITICAL",
+      "description": "쿠폰 4유형 + 멤버십 할인 + 포인트 + VAT 역산 분리 + 실시간 재계산(debounce 300ms) | Zone3Discount.svelte",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        },
+        "testCaseCount": 25
+      }
+    },
+    {
+      "id": "z3-total",
+      "parent_id": "zone3",
+      "num": "3.3.1",
+      "node_type": "feature",
+      "name": "Zone3.01 | calculate_cart_total() 연동 ★CRITICAL",
+      "description": "9단계 완전공식 | VAT 역산 정확 | 할인 순서 고정(불변) | 30초 이내 결과만 유효",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "gate": "GATE C",
+        "calcSteps": 9,
+        "immutableOrder": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z3-order",
+      "parent_id": "zone3",
+      "num": "3.3.2",
+      "node_type": "feature",
+      "name": "Zone3.02 | 할인 순서 고정 (불변 규칙)",
+      "description": "기본료+옵션 → VAT분리 → 멤버십 → 쿠폰 → 포인트 → VAT역산 → 배송비 → 적립. 순서 변경 금지.",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "isTDD": true,
+        "immutable": true,
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z3-coupon",
+      "parent_id": "zone3",
+      "num": "3.3.3",
+      "node_type": "feature",
+      "name": "Zone3.03 | 쿠폰 4유형 선택",
+      "description": "all / first_purchase(rental_count=0) / student(is_student=true) / subscriber(등급별) | 선점 처리",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "FORM"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z3-vat",
+      "parent_id": "zone3",
+      "num": "3.3.4",
+      "node_type": "feature",
+      "name": "Zone3.04 | VAT 역산 분리 표시 ★차별화",
+      "description": "소계(inc)+소계(ex)+VAT(10%)+배송비+총합+적립포인트 | floor(inc_subtotal×0.1)",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "vatFormula": "floor(inc_subtotal×0.1)",
+        "badges": {
+          "dev": [
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z3-realtime",
+      "parent_id": "zone3",
+      "num": "3.3.5",
+      "node_type": "feature",
+      "name": "Zone3.05 | 실시간 재계산 (debounce 300ms)",
+      "description": "cartStore lastUpdated / selectedCoupon / pointInput 변경 → debounce 300ms → RPC | calcAt 추적",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "debounceMs": 300,
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "zone4",
+      "parent_id": "part3",
+      "num": "3.4",
+      "node_type": "feature_group",
+      "name": "Zone4 | 버튼 영역",
+      "description": "견적서 발행(재고잠금없음) + 장바구니비움 + 예약진행하기(canProceed guard) | Zone4Actions.svelte",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [
+            "BUTT",
+            "MODAL",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z4-quote",
+      "parent_id": "zone4",
+      "num": "3.4.1",
+      "node_type": "feature",
+      "name": "Zone4.01 | 견적서 발행 ★신규",
+      "description": "generate_quote() RPC | quotes 테이블 | PDF(Cloudinary) | 7일 유효 | 재고잠금 없음",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "BUTT"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "z4-clear",
+      "parent_id": "zone4",
+      "num": "3.4.2",
+      "node_type": "feature",
+      "name": "Zone4.02 | 장바구니 비움",
+      "description": "확인 모달 → DELETE WHERE user_id | 임시점유 해제 동시 실행",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [
+            "BUTT",
+            "MODAL"
+          ],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "z4-proceed",
+      "parent_id": "zone4",
+      "num": "3.4.3",
+      "node_type": "feature",
+      "name": "Zone4.03 | 예약 진행하기 canProceed guard ★TDD",
+      "description": "Zone1≥1 + Zone2완성 + !deadlineWarning + calc_at<30s → 모두 충족 시만 활성 | batch_atomic_reserve 호출",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Critical",
+        "isTDD": true,
+        "gate": "GATE C",
+        "guardConditions": [
+          "cartItems.length>=1",
+          "rentalStartDate&&rentalEndDate",
+          "selectedDeliveryMethod",
+          "!deadlineWarning",
+          "calcAt&&(now-calcAt<30000)"
+        ],
+        "testCaseCount": 12,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [
+            "BUTT"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "svelte",
+      "parent_id": "part3",
+      "num": "3.5",
+      "node_type": "feature_group",
+      "name": "3.5 | SvelteKit 컴포넌트 구조",
+      "description": "Zone1~4 독립 컴포넌트 + cartStore 중앙 관리 + FCM/카카오 알림 통합",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "svelte-store",
+      "parent_id": "svelte",
+      "num": "3.5.1",
+      "node_type": "implementation",
+      "name": "cartStore.ts",
+      "description": "cartItems / cartSummary / refreshCartSummary(debounce300) / lastUpdated / selectedCoupon / calcAt",
+      "metadata": {
+        "level": "L3",
+        "filePath": "src/lib/stores/cartStore.ts",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "svelte-z1",
+      "parent_id": "svelte",
+      "num": "3.5.2",
+      "node_type": "implementation",
+      "name": "Zone1CartItem.svelte",
+      "description": "src/lib/components/cart/Zone1CartItem.svelte | 상품카드 + 옵션 스피너",
+      "metadata": {
+        "level": "L3",
+        "filePath": "src/lib/components/cart/Zone1CartItem.svelte",
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [
+            "CARD",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "svelte-z2",
+      "parent_id": "svelte",
+      "num": "3.5.3",
+      "node_type": "implementation",
+      "name": "Zone2RentalOption.svelte",
+      "description": "src/lib/components/cart/Zone2RentalOption.svelte | 배송방식+날짜+마감경고",
+      "metadata": {
+        "level": "L3",
+        "filePath": "src/lib/components/cart/Zone2RentalOption.svelte",
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [
+            "FORM",
+            "FEED",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "svelte-z3",
+      "parent_id": "svelte",
+      "num": "3.5.4",
+      "node_type": "implementation",
+      "name": "Zone3Discount.svelte",
+      "description": "src/lib/components/cart/Zone3Discount.svelte | 쿠폰+포인트+VAT표시",
+      "metadata": {
+        "level": "L3",
+        "filePath": "src/lib/components/cart/Zone3Discount.svelte",
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "svelte-z4",
+      "parent_id": "svelte",
+      "num": "3.5.5",
+      "node_type": "implementation",
+      "name": "Zone4Actions.svelte",
+      "description": "src/lib/components/cart/Zone4Actions.svelte | canProceed guard + 3버튼",
+      "metadata": {
+        "level": "L3",
+        "filePath": "src/lib/components/cart/Zone4Actions.svelte",
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [
+            "BUTT",
+            "MODAL",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "part4",
+      "parent_id": "root",
+      "num": "4",
+      "node_type": "service",
+      "name": "PART 4 | 상세 구현 명세 (AI 개발 가능 100%)",
+      "description": "전체 DDL + RPC 완전 코드 + State Machine + Concurrency 분석 + Test Case 150+ | 이 파트만으로 Cursor AI 개발 착수 가능",
+      "metadata": {
+        "level": "L1",
+        "status": "active",
+        "priority": "Critical",
+        "aiDevReady": true,
+        "totalDDLLines": 1200,
+        "totalRPCLines": 800,
+        "totalTestCases": 150,
+        "raceConditionScenarios": 8,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API",
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-schema",
+      "parent_id": "part4",
+      "num": "4.0",
+      "node_type": "feature_group",
+      "name": "4.0 | 전체 DB 스키마 (DDL 완전판)",
+      "description": "신규 10개 테이블 + 보완 4개 테이블 | RLS 정책 8개 | 인덱스 15개 | FK 제약 모두 포함",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Critical",
+        "specLevel": "DETAILED_WITH_FULL_CODE",
+        "newTables": [
+          "product_options",
+          "assets",
+          "rental_reservations",
+          "coupons",
+          "quotes",
+          "deposit_holds",
+          "shipments",
+          "asset_inspections",
+          "pickup_points",
+          "public_holidays"
+        ],
+        "alteredTables": [
+          "products",
+          "price_rules",
+          "cart_items",
+          "user_profiles"
+        ],
+        "rlsCount": 8,
+        "indexCount": 15,
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-assets-ddl",
+      "parent_id": "p4-schema",
+      "num": "4.0.1",
+      "node_type": "feature",
+      "name": "4.0.1 | assets DDL + Index + RLS",
+      "description": "serial_number UNIQUE | pool_weight/usage_count | condition_score CHECK(0~100) | Weighted-Pool 인덱스 2개",
+      "metadata": {
+        "level": "L3",
+        "ddlLinesCount": 85,
+        "indexCount": 2,
+        "hasRLS": true,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-rental-ddl",
+      "parent_id": "p4-schema",
+      "num": "4.0.2",
+      "node_type": "feature",
+      "name": "4.0.2 | rental_reservations DDL + EXCLUDE ★CRITICAL",
+      "description": "tsrange | EXCLUDE USING gist(asset_id WITH =, rental_period WITH &&) WHERE status<>'cancelled' | btree_gist 필수",
+      "metadata": {
+        "level": "L3",
+        "ddlLinesCount": 110,
+        "excludeConstraint": true,
+        "btreeGistRequired": true,
+        "concurrencyCritical": true,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-cart-ddl",
+      "parent_id": "p4-schema",
+      "num": "4.0.3",
+      "node_type": "feature",
+      "name": "4.0.3 | cart_items 보완 컬럼",
+      "description": "selected_option_ids UUID[] | option_quantities JSONB | rental_start/end_date | delivery_method CHECK",
+      "metadata": {
+        "level": "L3",
+        "alteredTable": "cart_items",
+        "newColumnsCount": 8,
+        "badges": {
+          "dev": [
+            "CRUD",
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-rpc",
+      "parent_id": "part4",
+      "num": "4.1",
+      "node_type": "feature_group",
+      "name": "4.1 | RPC 완전 코드 (핵심 40개)",
+      "description": "atomic_reserve_asset(180줄) + calculate_cart_total(220줄) + sync_cart_dates + check_delivery_deadline 등",
+      "metadata": {
+        "level": "L2",
+        "rpcCount": 40,
+        "totalRPCLines": 800,
+        "criticalRPCs": [
+          "atomic_reserve_asset",
+          "calculate_cart_total",
+          "batch_atomic_reserve"
+        ],
+        "badges": {
+          "dev": [
+            "API",
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-atomic-rpc",
+      "parent_id": "p4-rpc",
+      "num": "4.1.1",
+      "node_type": "feature",
+      "name": "4.1.1 | atomic_reserve_asset() 완전 코드",
+      "description": "180줄 PL/pgSQL | SERIALIZABLE DEFINER | FOR UPDATE | EXCLUDE | 1h 버퍼 | 3가지 오류코드 반환",
+      "metadata": {
+        "level": "L3",
+        "rpcCodeLines": 180,
+        "specLevel": "DETAILED_WITH_FULL_CODE",
+        "hasFullCode": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-calc-rpc",
+      "parent_id": "p4-rpc",
+      "num": "4.1.2",
+      "node_type": "feature",
+      "name": "4.1.2 | calculate_cart_total() 완전 코드",
+      "description": "220줄 PL/pgSQL | 9단계 계산 | VAT역산 공식 | 적립포인트 | JSONB 반환",
+      "metadata": {
+        "level": "L3",
+        "rpcCodeLines": 220,
+        "specLevel": "DETAILED_WITH_FULL_CODE",
+        "hasFullCode": true,
+        "vatFormula": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-sm",
+      "parent_id": "part4",
+      "num": "4.2",
+      "node_type": "feature_group",
+      "name": "4.2 | State Machine (예약·배송·검수)",
+      "description": "예약 9상태 + 배송 5상태 + 검수 4상태 | Guard Condition | Auto-transition | Timeout 정의",
+      "metadata": {
+        "level": "L2",
+        "totalStates": 18,
+        "diagramsCount": 3,
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-sm-reservation",
+      "parent_id": "p4-sm",
+      "num": "4.2.1",
+      "node_type": "feature",
+      "name": "4.2.1 | 예약 상태 전환 (9가지)",
+      "description": "PENDING→CONFIRMED/CANCELLED_AUTO | CONFIRMED→PREPARING→IN_TRANSIT→ACTIVE→RETURN_IN_TRANSIT→RETURNED→INSPECTION | Guard 포함",
+      "metadata": {
+        "level": "L3",
+        "stateCount": 9,
+        "transitionCount": 12,
+        "guardConditions": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-sm-delivery",
+      "parent_id": "p4-sm",
+      "num": "4.2.2",
+      "node_type": "feature",
+      "name": "4.2.2 | 배송 상태 전환 (5가지)",
+      "description": "CREATED→PICKED→IN_TRANSIT→DELIVERED→VERIFIED",
+      "metadata": {
+        "level": "L3",
+        "stateCount": 5,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-sm-inspection",
+      "parent_id": "p4-sm",
+      "num": "4.2.3",
+      "node_type": "feature",
+      "name": "4.2.3 | 검수 상태 전환 (4가지)",
+      "description": "PENDING→PROCESSING→PASSED/FAILED→BILLED | confidence threshold 0.85",
+      "metadata": {
+        "level": "L3",
+        "stateCount": 4,
+        "badges": {
+          "dev": [
+            "TDD",
+            "AI",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-concurrency",
+      "parent_id": "part4",
+      "num": "4.3",
+      "node_type": "feature_group",
+      "name": "4.3 | Concurrency & Race Condition 분석 ★CRITICAL",
+      "description": "8가지 시나리오 분석 | FOR UPDATE + EXCLUDE + SERIALIZABLE + idempotency_key | Timeout+Retry 정책",
+      "metadata": {
+        "level": "L2",
+        "scenariosCount": 8,
+        "criticality": "EXTREME",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-race",
+      "parent_id": "p4-concurrency",
+      "num": "4.3.1",
+      "node_type": "feature",
+      "name": "4.3.1 | 동시 예약 Race Condition 시뮬레이션",
+      "description": "8-step 타임라인 분석 | FOR UPDATE → 순차 처리 | EXCLUDE 제약 → 겹침 차단 | Retry backoff(1s→2s→4s)",
+      "metadata": {
+        "level": "L3",
+        "timelineSteps": 8,
+        "preventionMechanisms": 4,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p4-timeout",
+      "parent_id": "p4-concurrency",
+      "num": "4.3.2",
+      "node_type": "feature",
+      "name": "4.3.2 | Timeout & Retry 정책",
+      "description": "atomic_reserve(5초,3회) | batch_reserve(10초,1회) | calculate_total(2초,1회) | 웹훅fallback(15분,1회)",
+      "metadata": {
+        "level": "L3",
+        "policyCount": 6,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p4-deadlock",
+      "parent_id": "p4-concurrency",
+      "num": "4.3.3",
+      "node_type": "feature",
+      "name": "4.3.3 | Deadlock 방지 규칙",
+      "description": "잠금 순서 고정(assets→reservations) | id ASC 정렬 | FOR UPDATE SKIP LOCKED | 트랜잭션 최소화",
+      "metadata": {
+        "level": "L3",
+        "rules": 4,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": []
+        }
+      }
+    },
+    {
+      "id": "p4-tests",
+      "parent_id": "part4",
+      "num": "4.4",
+      "node_type": "feature_group",
+      "name": "4.4 | Test Case 정의 (150+ 개)",
+      "description": "M2 atomic_reserve 35개 | M3 calculate_total 20개 | Zone2 배송마감 12개 | Zone4 canProceed 12개 | 기타 70+",
+      "metadata": {
+        "level": "L2",
+        "totalTestCases": 150,
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-test-m2",
+      "parent_id": "p4-tests",
+      "num": "4.4.1",
+      "node_type": "feature",
+      "name": "4.4.1 | M2 atomic_reserve_asset Test (35개)",
+      "description": "정상예약 / 가용없음 / 동시예약(Race) / EXCLUDE충돌 / 임시점유해제 / 버퍼확인 / Weighted-Pool / 50-concurrent",
+      "metadata": {
+        "level": "L3",
+        "testCaseCount": 35,
+        "concurrencyTests": true,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-test-m3",
+      "parent_id": "p4-tests",
+      "num": "4.4.2",
+      "node_type": "feature",
+      "name": "4.4.2 | M3 calculate_cart_total Test (20개)",
+      "description": "EASY/POP/CRAZY / 쿠폰4종 / 포인트초과 / VAT역산정확도 / 할인순서 / 옵션합산 / 적립포인트",
+      "metadata": {
+        "level": "L3",
+        "testCaseCount": 20,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4-test-z2",
+      "parent_id": "p4-tests",
+      "num": "4.4.3",
+      "node_type": "feature",
+      "name": "4.4.3 | Zone2 배송마감 Test (12개)",
+      "description": "carrier별 마감시간 / 공휴일처리 / 연속공휴일 / deadlineWarning 플래그",
+      "metadata": {
+        "level": "L3",
+        "testCaseCount": 12,
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "part5",
+      "parent_id": "root",
+      "num": "5",
+      "node_type": "service",
+      "name": "PART 5 | Harness Flow v3.0 & 실행 계획",
+      "description": "SP1~SP4 에이전트 | GATE A~F | FCM+카카오 알림 | 개발 로드맵 S0→G3",
+      "metadata": {
+        "level": "L1",
+        "status": "active",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "harness",
+      "parent_id": "part5",
+      "num": "5.1",
+      "node_type": "feature_group",
+      "name": "5.1 | Commerce-Harness-Flow v3.0",
+      "description": "SP1 Planner → SP2 Worker(TDD/GSD) → SP3 Evaluator → SP4 Deployer | GATE A~F | ESLint+Pre-commit",
+      "metadata": {
+        "level": "L2",
+        "agentCount": 4,
+        "gateCount": 6,
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "notify",
+      "parent_id": "part5",
+      "num": "5.2",
+      "node_type": "feature_group",
+      "name": "5.2 | FCM + 카카오 알림톡 트리거",
+      "description": "FCM 5종 + 카카오 7종 | M2~M5 전체 트리거 정의 | 배송마감 2분전 경고 포함",
+      "metadata": {
+        "level": "L2",
+        "fcmCount": 5,
+        "kakaoCount": 7,
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "roadmap",
+      "parent_id": "part5",
+      "num": "5.3",
+      "node_type": "feature_group",
+      "name": "5.3 | 개발 로드맵 (12주 + Growth)",
+      "description": "S0(W1~2) → S1 MVP TDD(W3~8) → S1+(W9~11) → S2 QA(W12) → G1~G3 성장",
+      "metadata": {
+        "level": "L2",
+        "totalWeeks": 12,
+        "hasGrowthPhase": true,
+        "badges": {
+          "dev": [],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "phase-s0",
+      "parent_id": "roadmap",
+      "num": "5.3.0",
+      "node_type": "feature",
+      "name": "S0 마이그레이션 (W1~W2) ★즉시",
+      "description": "btree_gist 확장 | product_options신규 | is_student컬럼 | price_rules단일화 | assets신규 | rental_reservations신규 | ESLint H-06",
+      "metadata": {
+        "level": "L3",
+        "weeks": 2,
+        "phase": "S0",
+        "gate": "GATE A",
+        "migrationSteps": 10,
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "phase-s1",
+      "parent_id": "roadmap",
+      "num": "5.3.1",
+      "node_type": "feature",
+      "name": "S1 MVP TDD (W3~W8)",
+      "description": "M1 CRUD + M2 atomic_reserve(35 TC) + M3 calculate_total(20 TC) | GATE B,C 통과",
+      "metadata": {
+        "level": "L3",
+        "weeks": 6,
+        "phase": "S1",
+        "gate": "GATE B,C",
+        "isTDD": true,
+        "testCaseCount": 150,
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "phase-s1plus",
+      "parent_id": "roadmap",
+      "num": "5.3.2",
+      "node_type": "feature",
+      "name": "S1+ 기능 완성 (W9~W11)",
+      "description": "M4 멤버십 + M5 배송·검수 + 4-Zone UI 완성 + FCM/카카오 알림 | GATE D,E",
+      "metadata": {
+        "level": "L3",
+        "weeks": 3,
+        "phase": "S1+",
+        "gate": "GATE D,E",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "phase-s2",
+      "parent_id": "roadmap",
+      "num": "5.3.3",
+      "node_type": "feature",
+      "name": "S2 QA (W12)",
+      "description": "전 기능 검증 + 성능 최적화 + 보안 감사 + Stress Test(동시100명) + API p95<200ms",
+      "metadata": {
+        "level": "L3",
+        "weeks": 1,
+        "phase": "S2",
+        "gate": "GATE F",
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "phase-growth",
+      "parent_id": "roadmap",
+      "num": "5.3.4",
+      "node_type": "feature",
+      "name": "G1~G3 성장 (Month4+)",
+      "description": "Claude API 추천엔진 + Vision AI 고도화 + 자연어 조회 + i18n(영/일)",
+      "metadata": {
+        "level": "L3",
+        "phase": "G1~G3",
+        "badges": {
+          "dev": [
+            "AI"
+          ],
+          "ux": [],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "appendix",
+      "parent_id": "root",
+      "num": "A",
+      "node_type": "feature_group",
+      "name": "부록 | Harness 파일 목록 + S0 마이그레이션 순서",
+      "description": "8개 .mdc 파일 목록 | S0 10단계 마이그레이션 실행 순서",
+      "metadata": {
+        "level": "L1",
+        "mdcFileCount": 8,
+        "migrationSteps": 10,
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "app-mdc",
+      "parent_id": "appendix",
+      "num": "A.1",
+      "node_type": "feature",
+      "name": "A.1 | .cursor/rules/ .mdc 파일 목록",
+      "description": "core-rules(alwaysApply) / rental / payment / ui-mobile / delivery / membership / concurrency / test-spec",
+      "metadata": {
+        "level": "L2",
+        "files": [
+          "core-rules.mdc",
+          "rental.mdc",
+          "payment.mdc",
+          "ui-mobile.mdc",
+          "delivery.mdc",
+          "membership.mdc",
+          "concurrency.mdc",
+          "test-spec.mdc"
+        ],
+        "badges": {
+          "dev": [
+            "TDD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "app-s0",
+      "parent_id": "appendix",
+      "num": "A.2",
+      "node_type": "feature",
+      "name": "A.2 | S0 마이그레이션 실행 순서 (10단계)",
+      "description": "btree_gist → product_options → price_rules → assets → rental_reservations → user_profiles ALTER → coupons/quotes/deposit_holds → shipments/asset_inspections → cart_items ALTER → RLS정책 → ESLint H-06",
+      "metadata": {
+        "level": "L2",
+        "steps": 10,
+        "badges": {
+          "dev": [
+            "CRUD"
+          ],
+          "ux": [],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-subscription",
+      "parent_id": "root",
+      "num": "3.99",
+      "node_type": "service",
+      "name": "🔄 GNB | SUBSCRIPTION (정기 구독) ★NEW",
+      "description": "멤버십 플랜 (EASY/POP/CRAZY) | 장기 렌탈 전용관 | 구독 혜택 관리",
+      "metadata": {
+        "level": "L1",
+        "status": "planning",
+        "priority": "Critical",
+        "badges": {
+          "dev": [
+            "API",
+            "AUTH"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-intro",
+      "parent_id": "gnb-subscription",
+      "num": "3.99.1",
+      "node_type": "feature_group",
+      "name": "멤버십 플랜 안내",
+      "description": "EASY(0원) / POP(29,900원 -10%) / CRAZY(59,900원 -20%+무료배송)",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-easy",
+      "parent_id": "gnb-sub-intro",
+      "num": "3.99.1.1",
+      "node_type": "feature",
+      "name": "EASY 플랜 (기본)",
+      "description": "월 0원 | 기본 할인 없음 | 기본 배송비 3,000원",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-pop",
+      "parent_id": "gnb-sub-intro",
+      "num": "3.99.1.2",
+      "node_type": "feature",
+      "name": "POP 플랜",
+      "description": "월 29,900원 | 전체 대여료 -10% | 배송비 3,000원",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-crazy",
+      "parent_id": "gnb-sub-intro",
+      "num": "3.99.1.3",
+      "node_type": "feature",
+      "name": "CRAZY 플랜 ★인기",
+      "description": "월 59,900원 | 전체 대여료 -20% | 무료배송 | 보증금 면제 가능",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badge": "BEST",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-camera",
+      "parent_id": "gnb-subscription",
+      "num": "3.99.2",
+      "node_type": "feature_group",
+      "name": "카메라 장기 구독",
+      "description": "월 단위 렌탈 전용관 | 신형 카메라 최신 업데이트 | 구독자 우대가",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-lens",
+      "parent_id": "gnb-subscription",
+      "num": "3.99.3",
+      "node_type": "feature_group",
+      "name": "렌즈 장기 구독",
+      "description": "렌즈 조합 커스터마이징 | 월 2회 교환 | 포함 배터리/메모리카드",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "CARD",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "gnb-sub-benefit",
+      "parent_id": "gnb-subscription",
+      "num": "3.99.4",
+      "node_type": "feature",
+      "name": "나의 구독 혜택 보기",
+      "description": "마이페이지 LNB → 현재 구독 현황 / 남은 혜택 / 다음 결제일",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-subscription",
+      "parent_id": "root",
+      "num": "3.98",
+      "node_type": "service",
+      "name": "💎 LNB | 나의 구독 및 혜택 ★NEW",
+      "description": "멤버십 관리 | 신용점수 | 쿠폰 | 학생할인",
+      "metadata": {
+        "level": "L1",
+        "status": "planning",
+        "priority": "Critical",
+        "badges": {
+          "dev": [
+            "API",
+            "AUTH"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-sub-manage",
+      "parent_id": "lnb-subscription",
+      "num": "3.98.1",
+      "node_type": "feature_group",
+      "name": "멤버십 구독 관리 ★NEW",
+      "description": "현재 플랜 조회 | 업그레이드 | 취소 | 결제수단 | 자동갱신 설정",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "Critical",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API",
+            "AUTH"
+          ],
+          "ux": [
+            "FORM",
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-sub-current",
+      "parent_id": "lnb-sub-manage",
+      "num": "3.98.1.1",
+      "node_type": "feature",
+      "name": "현재 구독 플랜 조회",
+      "description": "check_subscription_active() RPC | 플랜명 / 가입일 / 갱신일 / 요금",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "DASH"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-sub-upgrade",
+      "parent_id": "lnb-sub-manage",
+      "num": "3.98.1.2",
+      "node_type": "feature",
+      "name": "등급 업그레이드",
+      "description": "subscribe_plan() RPC | EASY→POP→CRAZY | 일할계산 결제 | Toss subscription API",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT",
+            "AUTH"
+          ],
+          "ux": [
+            "FORM",
+            "MODAL"
+          ],
+          "prj": [
+            "MVP",
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-sub-cancel",
+      "parent_id": "lnb-sub-manage",
+      "num": "3.98.1.3",
+      "node_type": "feature",
+      "name": "구독 취소 / 일시중지",
+      "description": "cancel_subscription() RPC | 환불 일할계산 | 해지 사유 기록",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [
+            "MODAL"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-sub-payment",
+      "parent_id": "lnb-sub-manage",
+      "num": "3.98.1.4",
+      "node_type": "feature",
+      "name": "결제 수단 관리",
+      "description": "카드 등록/변경/삭제 | 자동갱신 on/off | 갱신 예정일 알림",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "CRUD",
+            "API",
+            "PAYMENT"
+          ],
+          "ux": [
+            "FORM"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-score",
+      "parent_id": "lnb-subscription",
+      "num": "3.98.2",
+      "node_type": "feature_group",
+      "name": "나의 크레이지 스코어 ★NEW",
+      "description": "신용점수(0~100) | 보증금 면제 현황 | 대여/반납 이력 | 등급 변동 예측",
+      "metadata": {
+        "level": "L2",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "TDD",
+            "AI"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-score-display",
+      "parent_id": "lnb-score",
+      "num": "3.98.2.1",
+      "node_type": "feature",
+      "name": "신용 점수 대시보드",
+      "description": "credit_score 시각화 | 게이지 표시(0~100) | 등급별 배지 | 점수 변동 그래프",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "AI"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-score-deposit",
+      "parent_id": "lnb-score",
+      "num": "3.98.2.2",
+      "node_type": "feature",
+      "name": "보증금 면제 현황",
+      "description": "score≥85 → 면제 | 점수별 deposit_rate | CRAZY 등급 자동 면제",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "High",
+        "badges": {
+          "dev": [
+            "TDD",
+            "API"
+          ],
+          "ux": [
+            "DASH"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-score-history",
+      "parent_id": "lnb-score",
+      "num": "3.98.2.3",
+      "node_type": "feature",
+      "name": "대여/반납 이력",
+      "description": "rental_count | late_return_count | damage_count | 점수 변동 내역",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Medium",
+        "badges": {
+          "dev": [
+            "API"
+          ],
+          "ux": [
+            "MOBILE"
+          ],
+          "prj": [
+            "MVP"
+          ]
+        }
+      }
+    },
+    {
+      "id": "lnb-score-prediction",
+      "parent_id": "lnb-score",
+      "num": "3.98.2.4",
+      "node_type": "feature",
+      "name": "예상 등급 변동",
+      "description": "현재 점수 기반 30일/90일 후 예측 | 점수 올리는 팁",
+      "metadata": {
+        "level": "L3",
+        "status": "planning",
+        "priority": "Low",
+        "badges": {
+          "dev": [
+            "AI"
+          ],
+          "ux": [
+            "DASH",
+            "MOBILE"
+          ],
+          "prj": [
+            "USP"
+          ]
+        }
+      }
+    }
+  ]
+}

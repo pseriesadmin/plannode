@@ -1,0 +1,10 @@
+---
+description: Markdown 가이드·README 유지보수
+globs: "**/*.md"
+alwaysApply: false
+---
+
+# 문서
+
+- 단일 진입: 로컬 기능 보완 이후 Git·Supabase·Vercel·DNS는 `PLANNODE_INTEGRATED_GUIDE.md` 한 파일을 기준으로 한다.
+- `README.md`의 파일 구조 목록을 바꿀 만한 문서를 추가·이동하면 목록을 갱신한다.
