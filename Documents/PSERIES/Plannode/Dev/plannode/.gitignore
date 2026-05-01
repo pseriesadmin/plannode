@@ -1,0 +1,18 @@
+node_modules/
+# SvelteKit 빌드·생성 산출물(로컬 전용, 커밋하지 않음)
+.svelte-kit/
+# 환경 변수(비밀·로컬 전용) — 예시만 커밋: .env.example
+.env
+.env.*
+!.env.example
+.env.local
+.DS_Store
+*.log
+# Vercel CLI가 만드는 로컬 연동 정보(저장소에 올리지 않음)
+.vercel/
+# Cursor/VSCode — 로컬 전용은 무시, 팀 공유 tasks만 예외
+.vscode/*
+!.vscode/tasks.json
+dist/
+# Plannode 하네스 — 로컬 @qa 보고(워크플로·중요, 저장소 커밋 대상 아님)
+.cursor/harness/QA_REPORT.md

@@ -1,0 +1,82 @@
+{
+  "format": "plannode.tree",
+  "version": 1,
+  "exportedAt": "2026-04-29T00:00:00.000Z",
+  "project": {
+    "id": "proj_badge_pipeline_sample",
+    "name": "배지 파이프라인 샘플 (외부 AI용)",
+    "author": "Plannode",
+    "start_date": "2026-04-01",
+    "end_date": "2026-12-31",
+    "description": "축소 교본: 동의어·오트랙·평면 병합 최소 예시. 실사 대규모 트리는 docs/crazyshot_v5_plannode_BADGE_FULL.json 참고.",
+  },
+  "nodes": [
+    {
+      "id": "proj_badge_pipeline_sample-r",
+      "parent_id": null,
+      "name": "루트",
+      "description": "정석: metadata.badges 3트랙 + badges 평면은 sanitize 후 정합.",
+      "num": "0",
+      "badges": ["tdd", "list", "mvp"],
+      "node_type": "root",
+      "metadata": {
+        "badges": {
+          "dev": ["TDD", "API"],
+          "ux": ["LIST", "FORM"],
+          "prj": ["MVP", "AI"]
+        }
+      }
+    },
+    {
+      "id": "n-external-aliases",
+      "parent_id": "proj_badge_pipeline_sample-r",
+      "name": "외부 AI 동의어 (평면 badges만)",
+      "description": "navigation·websocket·genai 등 → NAVI·REALTIME·AI 로 자동 매핑.",
+      "num": "1",
+      "badges": [
+        "navigation",
+        "REST_API",
+        "websocket",
+        "genai",
+        "billing",
+        "unknown_vendor_tag"
+      ],
+      "node_type": "feature",
+      "metadata": {
+        "source": "external_llm_flat_badges"
+      }
+    },
+    {
+      "id": "n-wrong-bucket",
+      "parent_id": "proj_badge_pipeline_sample-r",
+      "name": "트랙 오배치 (가져오기 시 재분류)",
+      "description": "다른 AI가 NAVI·FORM 을 dev 배열에 넣은 경우 → 올바른 UX 트랙으로 이동.",
+      "num": "2",
+      "badges": [],
+      "node_type": "feature",
+      "metadata": {
+        "badges": {
+          "dev": ["NAVI", "FORM", "CRUD"],
+          "ux": [],
+          "prj": ["MVP"]
+        }
+      }
+    },
+    {
+      "id": "n-mixed-flat-and-meta",
+      "parent_id": "proj_badge_pipeline_sample-r",
+      "name": "메타 + 평면 병합",
+      "description": "metadata.badges 와 badges[] 를 모두 읽어 중복 제거 후 풀에 맞춤.",
+      "num": "3",
+      "badges": ["oauth2", "modal"],
+      "node_type": "detail",
+      "metadata": {
+        "badges": {
+          "dev": ["TDD"],
+          "ux": ["LIST"],
+          "prj": []
+        }
+      }
+    }
+  ]
+}

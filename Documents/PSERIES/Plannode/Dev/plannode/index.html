@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Plannode - AI 기획 도구 for PSeries">
+  <meta name="author" content="Stephen Cconzy">
+  <title>Plannode by pseries</title>
+  <link rel="icon" href="data:,">
+  <style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#f5f5f0}
+#root{width:100vw;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+
+#R{width:100%;height:100%;background:#f5f5f0;display:flex;flex-direction:column;position:relative;overflow:hidden;border-radius:0}
+#TB{min-height:52px;background:#fff;border-bottom:1.5px solid #e8e4de;display:flex;flex-wrap:wrap;align-items:center;align-content:flex-start;padding:8px 14px;gap:8px 10px;row-gap:10px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.05);z-index:50}
+.tb-main{display:flex;flex-wrap:wrap;align-items:center;gap:8px;flex:1 1 auto;min-width:0}
+.tb-proj-label{font-size:11px;color:#aaa;white-space:nowrap}
+@media (max-width:900px){.tb-dv-mid{display:none}}
+.logo{font-size:13px;font-weight:700;color:#6b4ef6;white-space:nowrap}
+.logo-s{font-size:10px;color:#bbb;margin-left:2px}
+.dv{width:1px;height:22px;background:#e0dbd4;flex-shrink:0}
+.pntag{font-size:12px;font-weight:600;color:#1a1a1a;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vg{display:flex;flex-wrap:wrap;gap:4px}
+.vtab{padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;border-radius:8px;white-space:nowrap;transition:all .15s;background:#fff;color:#6b4ef6;border:none}
+.vtab:hover{background:#f5f3ff;color:#6b4ef6;border-color:#b8aff0;border:1.5px solid #b8aff0}
+.vtab.on{background:#f0ecff;color:#6b4ef6;border:1.5px solid #6b4ef6}
+.tbr{display:flex;flex-wrap:wrap;gap:5px 6px;row-gap:6px;align-items:center;justify-content:flex-start;flex:1 1 100%;width:100%;max-width:100%;min-width:0;margin-left:0;box-sizing:border-box}
+@media (min-width:1180px){#TB{flex-wrap:nowrap}.tbr{flex:0 1 auto;width:auto;margin-left:auto;justify-content:flex-end}}
+
+#VIEWS{flex:1;position:relative;overflow:hidden}
+.view{position:absolute;inset:0;display:none;overflow:hidden}
+.view.active{display:flex;flex-direction:column}
+
+#CW{flex:1;position:relative;overflow:hidden;user-select:none}
+#CV{position:absolute;top:0;left:0;transform-origin:0 0}
+svg#EG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
+svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-index:6}
+.cp-row{position:absolute;top:8px;left:0;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;padding-left:28px;box-sizing:border-box;z-index:2;pointer-events:none}
+.cp{position:static;flex:0 0 244px;width:244px;min-width:0;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:flex-start;padding:2px 10px;border-radius:20px;font-size:10px;font-weight:700;line-height:1.2;white-space:nowrap;word-break:keep-all;writing-mode:horizontal-tb;box-sizing:border-box;pointer-events:none;z-index:2}
+.cp0{background:#6b4ef6;color:#fff}.cp1{background:#f0ecff;color:#6b4ef6;border:1px solid #d4caff}.cp2{background:#f3f0ff;color:#7c6fd4;border:1px solid #ddd6fe}.cp3{background:#f7f5ff;color:#9d8fe0;border:1px solid #ede9fe}.cp4{background:#faf8ff;color:#b4a8e8;border:1px solid #f0ecff}
+.nw{position:absolute;z-index:5}
+.nd{background:#fff;border:1px solid #e0dbd4;border-radius:10px;width:188px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.07);transition:border-color .15s,box-shadow .15s}
+.nd:hover{border-color:#b8aff0;box-shadow:0 2px 10px rgba(107,78,246,.12)}
+.nd.sel{border-color:#6b4ef6;box-shadow:0 0 0 3px rgba(107,78,246,.15)}
+.nd.rnd{width:168px;border-color:#d4caff}
+.ndt{display:flex;align-items:flex-start;padding:9px 9px 4px;gap:6px}
+.nb{width:3px;border-radius:2px;flex-shrink:0;margin-top:2px;align-self:stretch;min-height:12px}
+.nn{font-size:12px;color:#1a1a1a;font-weight:500;line-height:1.35;word-break:break-word}
+.ndepth{font-size:9px;color:#ccc;font-family:monospace;margin-left:3px}
+.nds{font-size:10px;color:#999;margin:1px 9px 0;line-height:1.4}
+.nm{display:flex;align-items:center;padding:4px 9px;gap:3px;flex-wrap:wrap;min-height:16px}
+.bg{font-size:9px;padding:1px 5px;border-radius:7px;font-weight:600}
+.btdd{background:#fff1f0;color:#dc2626;border:1px solid #fca5a5}.bai{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}.bcrud{background:#eff6ff;color:#1d4ed8;border:1px solid #93c5fd}.bapi{background:#faf5ff;color:#7c3aed;border:1px solid #c4b5fd}.busp{background:#fffbeb;color:#b45309;border:1px solid #fcd34d}
+.nnum{margin-left:auto;font-size:9px;color:#ccc;font-family:monospace}
+.na{display:flex;justify-content:flex-end;padding:2px 7px 8px;gap:4px}
+.pb2{position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:#6b4ef6;color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(107,78,246,.35)}
+.mm{position:absolute;bottom:10px;right:10px;width:120px;height:72px;background:#fff;border:1px solid #e0dbd4;border-radius:8px;overflow:hidden;z-index:20}
+.mmvp{position:absolute;border:2px solid #6b4ef6;border-radius:2px;pointer-events:none;background:rgba(107,78,246,.06)}
+.zc{position:absolute;bottom:10px;left:10px;display:flex;gap:3px;z-index:20;align-items:center;background:#fff;border:1px solid #e0dbd4;border-radius:8px;padding:3px 7px}
+.zb{width:20px;height:20px;border:none;background:transparent;color:#555;font-size:14px;cursor:pointer;border-radius:4px;font-weight:700}
+.zb:hover{background:#f0ece8}
+.zp{font-size:10px;color:#999;min-width:28px;text-align:center}
+
+#V-PRD{background:#fff;padding:28px 32px;overflow-y:auto;gap:0}
+.prd-header{margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #6b4ef6}
+.prd-title{font-size:20px;font-weight:700;color:#1a1a1a;margin-bottom:6px}
+.prd-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#888}
+.prd-meta strong{color:#555;font-weight:600}
+.prd-section{margin-bottom:18px}
+.prd-section h2{font-size:14px;font-weight:700;color:#6b4ef6;margin-bottom:8px;padding-left:10px;border-left:3px solid #6b4ef6}
+.prd-tree{font-family:monospace;font-size:11px;color:#444;line-height:1.9;background:#faf9f7;border-radius:8px;padding:14px 16px;white-space:pre-wrap;word-break:break-all}
+
+#V-SPEC{background:#fff;overflow-y:auto;gap:0}
+.spec-inner{padding:22px 26px}
+.spec-title{font-size:15px;font-weight:700;color:#1a1a1a;margin-bottom:14px}
+.spec-table{width:100%;border-collapse:collapse;font-size:12px}
+.spec-table th{background:#f5f5f0;padding:8px 12px;text-align:left;font-weight:700;color:#555;border-bottom:2px solid #e8e4de;white-space:nowrap}
+.spec-table td{padding:8px 12px;border-bottom:1px solid #f0ece8;color:#333;vertical-align:top;line-height:1.5}
+.spec-table tr:hover td{background:#faf9ff}
+.depth-pill{display:inline-block;font-size:9px;padding:1px 7px;border-radius:10px;font-weight:700;color:#fff}
+
+#V-AI{background:#f5f5f0;overflow-y:auto;gap:0}
+.ai-inner{padding:24px 28px;max-width:680px}
+.ai-title{font-size:15px;font-weight:700;color:#1a1a1a;margin-bottom:4px}
+.ai-sub{font-size:12px;color:#aaa;margin-bottom:18px}
+.ai-btn-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.ai-btn{background:#fff;border:1px solid #e0dbd4;border-radius:10px;padding:14px 16px;cursor:pointer;text-align:left;transition:all .15s}
+.ai-btn:hover{border-color:#b8aff0;box-shadow:0 2px 8px rgba(107,78,246,.1)}
+.ai-btn-icon{font-size:18px;margin-bottom:5px}
+.ai-btn-title{font-size:13px;font-weight:600;color:#1a1a1a;margin-bottom:2px}
+.ai-btn-desc{font-size:11px;color:#aaa;line-height:1.4}
+.ai-result{background:#fff;border:1px solid #e0dbd4;border-radius:10px;padding:14px;margin-top:4px;font-size:12px;color:#444;line-height:1.7;white-space:pre-wrap;display:none}
+.ai-result.show{display:block}
+
+#CTX{display:none;position:absolute;background:#fff;border:1px solid #e0dbd4;border-radius:10px;padding:3px 0;min-width:158px;z-index:5000;box-shadow:0 8px 24px rgba(0,0,0,.14)}
+.cx{padding:6px 12px;font-size:12px;color:#333;cursor:pointer;display:flex;align-items:center;gap:7px;user-select:none}
+.cx:hover{background:#f5f5f0}.cx.dng{color:#dc2626}.cx.dng:hover{background:#fff1f0}
+.cxsp{height:1px;background:#f0ece8;margin:2px 0}
+.cxsc{padding:2px 12px 1px;font-size:10px;color:#bbb;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.mbg{position:absolute;inset:0;background:rgba(20,10,50,.42);z-index:6000;display:flex;align-items:flex-start;justify-content:center;padding-top:36px}
+.mo{background:#fff;border-radius:16px;padding:22px;width:452px;max-width:calc(100% - 32px);max-height:calc(100% - 72px);overflow-y:auto;box-shadow:0 24px 60px rgba(0,0,0,.2)}
+.mo h3{font-size:15px;color:#1a1a1a;font-weight:700;margin-bottom:14px}
+.fl{font-size:11px;color:#666;display:block;margin-bottom:4px;font-weight:600}
+.fi{width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 11px;outline:none;font-family:inherit;transition:border-color .15s}
+.fi:focus{border-color:#6b4ef6;box-shadow:0 0 0 3px rgba(107,78,246,.1)}
+.fg{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fe{background:#fff1f0;border:1px solid #fca5a5;border-radius:7px;padding:8px 12px;font-size:12px;color:#dc2626;margin-top:4px}
+.pl{margin-top:16px;padding-top:14px;border-top:1px solid #f0ece8}
+.plt{font-size:11px;color:#aaa;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.pc{width:100%;text-align:left;border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s;display:flex;align-items:flex-start;gap:10px;margin-bottom:6px;background:#faf9f7;border:1.5px solid #e8e4de}
+.pc:hover{border-color:#c4b5fd;background:#f8f6ff}.pc.acp{border-color:#6b4ef6;background:#f0ecff}
+.pi{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.pif{flex:1;min-width:0}
+.pn2{font-size:13px;font-weight:600;color:#1a1a1a;margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc.acp .pn2{color:#6b4ef6}
+.pm2{font-size:11px;color:#aaa}
+.ct{font-size:10px;background:#6b4ef6;color:#fff;padding:2px 7px;border-radius:10px;font-weight:600;align-self:center;flex-shrink:0}
+.tst{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:#1a1a1a;color:#fff;font-size:12px;padding:8px 16px;border-radius:9px;z-index:7000;white-space:nowrap;pointer-events:none}
+#ES{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="R">
+      <div id="TB">
+        <span class="logo">Plannode</span><span class="logo-s">by pseries</span>
+        <div class="dv"></div>
+        <span style="font-size:11px;color:#aaa;white-space:nowrap">프로젝트:</span>
+        <span class="pntag" id="PNT">—</span>
+        <div class="dv"></div>
+
+        <div class="vg">
+          <button class="vtab on" data-view="tree">노드</button>
+          <button class="vtab" data-view="prd">PRD</button>
+          <button class="vtab" data-view="spec">기능명세</button>
+          <button class="vtab" data-view="ai">AI 분석</button>
+        </div>
+
+        <div class="tbr">
+          <button id="BFT" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">맞춤 ⊡</button>
+          <button type="button" id="BAR" title="드래그로 저장된 수동 위치(mx/my) 전부 제거 → 트리 자동 배치" style="padding:6px 10px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">자동정렬</button>
+          <button type="button" id="BUN" title="실행 취소 (Ctrl+Z / ⌘Z)" style="padding:6px 10px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">↩</button>
+          <button id="BMD" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #6b4ef6;color:#6b4ef6;background:#f0ecff;cursor:pointer;font-weight:600">MD 출력</button>
+          <button id="BPR" style="padding:6px 12px;font-size:12px;border-radius:7px;border:none;background:#6b4ef6;color:#fff;cursor:pointer;font-weight:600">PRD 출력</button>
+          <button type="button" id="BJN" title="노드 트리 JSON (백업·재가져오기용)" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #6b4ef6;color:#6b4ef6;background:#f0ecff;cursor:pointer;font-weight:600">JSON</button>
+          <div class="dv"></div>
+          <button id="BPN" style="width:32px;height:32px;border-radius:8px;border:none;background:#6b4ef6;color:#fff;font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center">+</button>
+        </div>
+      </div>
+
+      <div id="VIEWS">
+        <div class="view active" id="V-TREE">
+          <div id="CW">
+            <div id="CV">
+              <svg id="EG"></svg>
+              <svg id="SG"></svg>
+            </div>
+            <div id="ES">
+              <div style="font-size:36px;margin-bottom:12px">📋</div>
+              <div style="font-size:14px;color:#bbb;margin-bottom:16px">프로젝트를 선택하거나 새로 만들어줘</div>
+              <button id="BNE" style="padding:9px 22px;font-size:13px;border-radius:8px;border:none;background:#6b4ef6;color:#fff;font-weight:700;cursor:pointer">+ 새 프로젝트</button>
+            </div>
+            <div class="zc"><button class="zb" id="ZO">−</button><span class="zp" id="ZP">85%</span><button class="zb" id="ZI">+</button><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">축소확대: Ctrl+스크롤</span><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">그룹이동: Shift+노드선택</span></div>
+            <div class="mm"><canvas id="MMC"></canvas><div class="mmvp" id="MMV"></div></div>
+          </div>
+        </div>
+        <div class="view" id="V-PRD">
+          <div class="prd-header"><div class="prd-title" id="prd-title">PRD 문서</div><div class="prd-meta" id="prd-meta"></div></div>
+          <div class="prd-section"><h2>기능 트리</h2><div class="prd-tree" id="prd-tree">프로젝트를 열면 자동 생성돼.</div></div>
+          <div class="prd-section"><h2>TDD 필수 도메인</h2><div id="prd-tdd" style="font-size:12px;color:#666;line-height:1.8;background:#fff1f0;border-radius:8px;padding:12px 14px">—</div></div>
+          <div class="prd-section"><h2>AI 연동 기능</h2><div id="prd-ai" style="font-size:12px;color:#666;line-height:1.8;background:#f0fdf4;border-radius:8px;padding:12px 14px">—</div></div>
+        </div>
+        <div class="view" id="V-SPEC">
+          <div class="spec-inner"><div class="spec-title">기능명세서</div>
+            <table class="spec-table"><thead><tr><th style="width:60px">번호</th><th style="width:80px">뎁스</th><th>기능명</th><th>설명</th><th style="width:120px">배지</th></tr></thead>
+            <tbody id="spec-tbody"><tr><td colspan="5" style="text-align:center;padding:40px;color:#bbb;font-size:13px">프로젝트를 열면 자동 생성돼.</td></tr></tbody></table>
+          </div>
+        </div>
+        <div class="view" id="V-AI">
+          <div class="ai-inner">
+            <div class="ai-title">AI 분석</div>
+            <div class="ai-sub">현재 기능 트리를 분석해서 개발 가이드를 생성해</div>
+            <div class="ai-btn-grid">
+              <button class="ai-btn" id="ai-prd"><div class="ai-btn-icon">📄</div><div class="ai-btn-title">PRD 완성본 생성</div><div class="ai-btn-desc">기능 트리 → 완전한 PRD 문서</div></button>
+              <button class="ai-btn" id="ai-miss"><div class="ai-btn-icon">🔍</div><div class="ai-btn-title">누락 기능 탐지</div><div class="ai-btn-desc">현재 트리에서 빠진 기능 분석</div></button>
+              <button class="ai-btn" id="ai-tdd"><div class="ai-btn-icon">⚡</div><div class="ai-btn-title">TDD 우선순위</div><div class="ai-btn-desc">P0/P1/P2 테스트 케이스 정리</div></button>
+              <button class="ai-btn" id="ai-harness"><div class="ai-btn-icon">🔧</div><div class="ai-btn-title">하네스 플랜 생성</div><div class="ai-btn-desc">Cursor AI 하네스 워크플로우 출력</div></button>
+            </div>
+            <div class="ai-result" id="ai-result"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="CTX"></div>
+      <div class="tst" id="TST" style="display:none"></div>
+
+      <div class="mbg" id="PM" style="display:none">
+        <div class="mo">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <h3 style="margin:0">프로젝트 추가</h3>
+            <button id="MCL" style="width:24px;height:24px;border:none;background:#f0ece8;border-radius:6px;cursor:pointer;font-size:13px;color:#666">✕</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div><span class="fl">프로젝트 이름 *</span><input class="fi" id="FN" placeholder="예: 크레이지샷 리뉴얼 2026"></div>
+            <div><span class="fl">작성자 *</span><input class="fi" id="FA" placeholder="예: Stephen Cconzy"></div>
+            <div class="fg">
+              <div><span class="fl">시작일 *</span><input class="fi" type="date" id="FS"></div>
+              <div><span class="fl">종료일 *</span><input class="fi" type="date" id="FE"></div>
+            </div>
+            <div><span class="fl">설명</span><textarea class="fi" id="FD" rows="2" style="resize:vertical" placeholder="간단한 설명"></textarea></div>
+            <div id="FER" class="fe" style="display:none"></div>
+            <button id="BCR" style="width:100%;padding:10px;border-radius:9px;border:none;background:#6b4ef6;color:#fff;font-size:13px;font-weight:700;cursor:pointer">+ 프로젝트 생성</button>
+          </div>
+          <div class="pl"><div class="plt" id="PLT">생성된 프로젝트</div><div id="PLC"></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 캔버스 단일 원본: src/lib/pilot/plannodePilot.js (Vite `npm run dev` / `npm run build` 로 열기) -->
+  <script type="module">
+    import { initPlannode } from './src/lib/pilot/plannodePilot.js';
+    initPlannode({ delegateTabs: false, delegateProjectModal: false, seedDemoProjects: true });
+  </script>
+</body>
+</html>
