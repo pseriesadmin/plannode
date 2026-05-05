@@ -190,7 +190,7 @@
   .pn {
     margin: 0 0 14px;
     font-weight: 700;
-    color: #6b4ef6;
+    color: #631EED;
     font-size: 14px;
   }
   .err {
@@ -257,7 +257,7 @@
     padding: 2px 8px;
     border-radius: 6px;
     background: #ede9fe;
-    color: #5b21b6;
+    color: #2C155A;
   }
   .tag.g {
     background: #ecfdf5;
@@ -305,7 +305,7 @@
     padding: 10px 14px;
     border: none;
     border-radius: 8px;
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
     font-weight: 700;
     cursor: pointer;

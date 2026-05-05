@@ -67,7 +67,7 @@
     font-family: system-ui, sans-serif;
     font-size: 1.5rem;
     font-weight: 700;
-    color: #5b21b6;
+    color: #2C155A;
     background: #f5f5f0;
   }
   .splash.wide {

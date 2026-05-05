@@ -321,7 +321,7 @@
     background: #fff;
   }
   .iax-copy {
-    border-color: #6b61f6;
+    border-color: #631EED;
     color: #3d36b5;
   }
 </style>

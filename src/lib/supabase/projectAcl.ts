@@ -146,6 +146,20 @@ export async function fetchMyAclInviteSummaries(): Promise<{ rows: AclInviteSumm
   return { rows: rows.filter((x) => x.project_id) };
 }
 
+/** ACL·소유자 판별용 최소 Project (로컬에 없는 id만 알 때) */
+function aclStubProject(projectId: string): Project {
+  const now = new Date().toISOString();
+  return {
+    id: projectId,
+    name: '',
+    author: '',
+    start_date: '',
+    end_date: '',
+    created_at: now,
+    updated_at: now
+  };
+}
+
 function parseProjectFromJson(obj: unknown): Project | null {
   if (!obj || typeof obj !== 'object') return null;
   const o = obj as Record<string, unknown>;
@@ -200,11 +214,69 @@ export async function fetchProjectSliceFromCloud(
   return { project, nodes };
 }
 
+export type ImportSharedProjectResult = {
+  ok: boolean;
+  message: string;
+  /** 워크스페이스 RPC에 프로젝트 슬라이스가 없음(삭제·미동기·RLS 등) — 죽은 초대 정리에 사용 */
+  sliceMissing?: boolean;
+};
+
+/**
+ * 워크스페이스에 슬라이스가 없을 때: 멤버는 본인 ACL 행만 제거 · 내 워크스페이스 소유자 고스트 행이면 전체 ACL 삭제 시도
+ * (RLS: docs/supabase/plannode_project_acl_delete_member_self_v1.sql 멤버 self-delete 필요)
+ */
+export async function pruneStaleInviteAfterSliceMissing(
+  inv: AclInviteSummary
+): Promise<{ outcome: 'pruned' | 'skipped'; message?: string }> {
+  if (!isAclEnforced()) return { outcome: 'skipped' };
+
+  if (!inv.is_owner) {
+    const email = getAuthEmail();
+    if (!email) return { outcome: 'skipped', message: '로그인이 필요해.' };
+    const { data: deletedRows, error } = await supabase
+      .from(TABLE)
+      .delete()
+      .eq('project_id', inv.project_id)
+      .eq('is_owner', false)
+      .eq('email', normalizeAclEmail(email))
+      .select('id');
+    if (error) {
+      if (import.meta.env.DEV) {
+        console.warn('[pruneStaleInviteAfterSliceMissing] member row delete:', error.message);
+      }
+      return { outcome: 'skipped', message: userFacingAclErrorFromSupabase(error) };
+    }
+    if (!deletedRows?.length) {
+      return {
+        outcome: 'skipped',
+        message:
+          '초대 행을 지우지 못했어. Supabase에서 docs/supabase/plannode_project_acl_delete_member_self_v1.sql 을 실행했는지 확인해줘.'
+      };
+    }
+    return { outcome: 'pruned' };
+  }
+
+  const uid = getAuthUserId();
+  if (!uid || inv.workspace_source_user_id !== uid) {
+    return { outcome: 'skipped' };
+  }
+
+  const stub = aclStubProject(inv.project_id);
+  const d = await deleteAllAclRowsForProjectIfOwner(stub);
+  if (!d.ok) {
+    if (import.meta.env.DEV) {
+      console.warn('[pruneStaleInviteAfterSliceMissing] owner acl purge:', d.message);
+    }
+    return { outcome: 'skipped', message: d.message };
+  }
+  return { outcome: 'pruned' };
+}
+
 /** RPC: 소유자 워크스페이스에서 한 프로젝트만 가져와 로컬에 합침 후 ACL 통과 시 연다 */
 export async function importSharedProjectFromWorkspace(
   workspaceSourceUserId: string,
   projectId: string
-): Promise<{ ok: boolean; message: string }> {
+): Promise<ImportSharedProjectResult> {
   if (!isAclEnforced()) return { ok: false, message: 'Supabase가 꺼져 있어.' };
   if (!workspaceSourceUserId || !projectId) {
     return { ok: false, message: '클라우드 소스 정보가 없어. 소유자가 접근 목록을 다시 저장한 뒤 시도해줘.' };
@@ -223,6 +295,7 @@ export async function importSharedProjectFromWorkspace(
   if (!slice) {
     return {
       ok: false,
+      sliceMissing: true,
       message:
         '프로젝트를 찾지 못했어. 소유자가 클라우드에 올렸는지, ACL에 네 이메일이 맞는지 확인해줘.'
     };
@@ -249,9 +322,18 @@ export async function autoLoadInvitedProjects(
   skippedAlreadyLocal: number;
   /** ACL에 workspace_source_user_id 없음 — 소유자가 멤버 행 복구·☁ 동기 필요할 수 있음 */
   skippedNoWorkspaceSource: number;
+  /** 슬라이스 없음 → 멤버 본인 행·고스트 소유자 ACL 정리 성공 건수 */
+  prunedStaleInvites: number;
   errors: Array<{ projectId: string; message: string }>;
 }> {
-  const empty = { loaded: 0, skipped: 0, skippedAlreadyLocal: 0, skippedNoWorkspaceSource: 0, errors: [] as Array<{ projectId: string; message: string }> };
+  const empty = {
+    loaded: 0,
+    skipped: 0,
+    skippedAlreadyLocal: 0,
+    skippedNoWorkspaceSource: 0,
+    prunedStaleInvites: 0,
+    errors: [] as Array<{ projectId: string; message: string }>
+  };
   if (!isAclEnforced()) return empty;
 
   const { rows: acl, error: aclErr } = await fetchMyAclInviteSummaries();
@@ -262,6 +344,7 @@ export async function autoLoadInvitedProjects(
   let loaded = 0;
   let skippedAlreadyLocal = 0;
   let skippedNoWorkspaceSource = 0;
+  let prunedStaleInvites = 0;
   const errors: Array<{ projectId: string; message: string }> = [];
 
   for (const inv of acl) {
@@ -296,6 +379,17 @@ export async function autoLoadInvitedProjects(
     );
     if (r.ok) {
       loaded++;
+    } else if (r.sliceMissing) {
+      const pr = await pruneStaleInviteAfterSliceMissing(inv);
+      if (pr.outcome === 'pruned') {
+        prunedStaleInvites++;
+        if (import.meta.env.DEV) {
+          console.info('[autoLoadInvitedProjects] pruned stale invite:', inv.project_id);
+        }
+      } else {
+        const detail = pr.message ? ` (${pr.message})` : '';
+        errors.push({ projectId: inv.project_id, message: `${r.message}${detail}` });
+      }
     } else {
       errors.push({ projectId: inv.project_id, message: r.message });
     }
@@ -303,7 +397,7 @@ export async function autoLoadInvitedProjects(
 
   const skipped = skippedAlreadyLocal + skippedNoWorkspaceSource;
 
-  return { loaded, skipped, skippedAlreadyLocal, skippedNoWorkspaceSource, errors };
+  return { loaded, skipped, skippedAlreadyLocal, skippedNoWorkspaceSource, prunedStaleInvites, errors };
 }
 
 export async function fetchProjectAcl(projectId: string): Promise<{ rows: AclRow[]; error?: string }> {

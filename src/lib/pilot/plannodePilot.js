@@ -28,10 +28,23 @@ import {
   minimapUniformFit,
 } from '$lib/pilot/minimapXyflow.js';
 
-const V = '#6b4ef6',
+/** NOW-38 / `+page.svelte`와 동일 — BYOK localStorage + 요청 헤더 */
+const LS_USER_ANTHROPIC_KEY = 'plannode_user_anthropic_key_v1';
+const HDR_USER_ANTHROPIC_KEY = 'x-plannode-user-anthropic-key';
+
+function readStoredUserAnthropicKey() {
+  try {
+    if (typeof localStorage === 'undefined') return '';
+    return String(localStorage.getItem(LS_USER_ANTHROPIC_KEY) ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+const V = '#631EED',
   RD = '#dc2626',
   GY = '#4b5563';
-const DC = ['#9ca3af', '#6b4ef6', '#818cf8', '#f59e0b', '#10b981', '#f43f5e', '#0ea5e9', '#a78bfa'];
+const DC = ['#9ca3af', '#631EED', '#818cf8', '#f59e0b', '#10b981', '#f43f5e', '#0ea5e9', '#a78bfa'];
 const DN = ['루트', '모듈', '기능', '상세기능', '서브기능', '세부항목', '하위항목', '기타'];
 /** 좌측 뎁스 스트립 — 짧은 한 줄 라벨(폭 최소화), 전체 명은 `title` */
 const DN_STRIP = ['루트', '모듈', '기능', '상세', '서브', '세부', '하위', '기타'];
@@ -395,7 +408,7 @@ const NODE_COLLAPSE_BTN_PX = 22 * 0.7;
 function collapseToggleSvgInnerHtml(isCollapsed, layoutMode) {
   const inner = `<circle cx="11" cy="11" r="11" transform="rotate(90 11 11)" fill="#E6E4FF"/><path d="M15 10L11.7273 13.4293C11 14.19 11 14.1905 10.2727 13.4293L7 10" stroke="#6B61F6" stroke-width="2" stroke-linecap="round"/>`;
   if (layoutMode === 'right') {
-    const deg = isCollapsed ? 90 : -90;
+    const deg = isCollapsed ? -90 : 90;
     return `<g transform="rotate(${deg} 11 11)">${inner}</g>`;
   }
   return isCollapsed ? inner : `<g transform="rotate(180 11 11)">${inner}</g>`;
@@ -1323,9 +1336,16 @@ async function triggerAI(type) {
   }
 
   try {
+    const userAnthropicKey = readStoredUserAnthropicKey();
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    };
+    if (userAnthropicKey) headers[HDR_USER_ANTHROPIC_KEY] = userAnthropicKey;
+
     const r = await fetch('/api/ai/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers,
       body: JSON.stringify({ system: prompt.system, user: prompt.user, outputIntent })
     });
     const j = await r.json().catch(() => ({}));
@@ -1347,7 +1367,10 @@ async function triggerAI(type) {
     }
     if (j.code === 'NO_KEY' || j.ok === false) {
       placeAiResult(clipText);
-      toast(j.hint || '서버에 ANTHROPIC_API_KEY가 없어. 클립보드로 복사해 수동 실행해줘.');
+      toast(
+        j.hint ||
+          'Anthropic 키가 없어. 서버 환경 변수를 쓰거나, 프로젝트 모달의「모델API 등록」에서 키를 넣어줘. 클립보드로 수동 실행도 할 수 있어.'
+      );
       return;
     }
     if (j.text) {
@@ -2680,8 +2703,8 @@ function updMM() {
   const vW = vw * mmScale,
     vH = vh * mmScale;
   c.save();
-  c.fillStyle = 'rgba(107, 78, 246, 0.14)';
-  c.strokeStyle = 'rgba(107, 78, 246, 0.92)';
+  c.fillStyle = 'rgba(99, 30, 237, 0.14)';
+  c.strokeStyle = 'rgba(99, 30, 237, 0.92)';
   c.lineWidth = 2;
   c.setLineDash([]);
   c.fillRect(vLeft, vTop, Math.max(2, vW), Math.max(2, vH));
