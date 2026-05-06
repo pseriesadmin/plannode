@@ -7,24 +7,26 @@
   <meta name="author" content="Stephen Cconzy">
   <title>Plannode by pseries</title>
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%;background:#f5f5f0}
-#root{width:100vw;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+#root{width:100vw;height:100vh;font-family:'Pretendard','Noto Sans KR',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 
 #R{width:100%;height:100%;background:#f5f5f0;display:flex;flex-direction:column;position:relative;overflow:hidden;border-radius:0}
 #TB{min-height:52px;background:#fff;border-bottom:1.5px solid #e8e4de;display:flex;flex-wrap:wrap;align-items:center;align-content:flex-start;padding:8px 14px;gap:8px 10px;row-gap:10px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.05);z-index:50}
 .tb-main{display:flex;flex-wrap:wrap;align-items:center;gap:8px;flex:1 1 auto;min-width:0}
 .tb-proj-label{font-size:11px;color:#aaa;white-space:nowrap}
 @media (max-width:900px){.tb-dv-mid{display:none}}
-.logo{font-size:13px;font-weight:700;color:#6b4ef6;white-space:nowrap}
+.logo{font-size:13px;font-weight:700;color:#631EED;white-space:nowrap}
 .logo-s{font-size:10px;color:#bbb;margin-left:2px}
 .dv{width:1px;height:22px;background:#e0dbd4;flex-shrink:0}
 .pntag{font-size:12px;font-weight:600;color:#1a1a1a;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vg{display:flex;flex-wrap:wrap;gap:4px}
-.vtab{padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;border-radius:8px;white-space:nowrap;transition:all .15s;background:#fff;color:#6b4ef6;border:none}
-.vtab:hover{background:#f5f3ff;color:#6b4ef6;border-color:#b8aff0;border:1.5px solid #b8aff0}
-.vtab.on{background:#f0ecff;color:#6b4ef6;border:1.5px solid #6b4ef6}
+.vtab{padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;border-radius:8px;white-space:nowrap;transition:all .15s;background:#fff;color:#631EED;border:none}
+.vtab:hover{background:#f5f3ff;color:#631EED;border-color:#b8aff0;border:1.5px solid #b8aff0}
+.vtab.on{background:#f0ecff;color:#631EED;border:1.5px solid #631EED}
 .tbr{display:flex;flex-wrap:wrap;gap:5px 6px;row-gap:6px;align-items:center;justify-content:flex-start;flex:1 1 100%;width:100%;max-width:100%;min-width:0;margin-left:0;box-sizing:border-box}
 @media (min-width:1180px){#TB{flex-wrap:nowrap}.tbr{flex:0 1 auto;width:auto;margin-left:auto;justify-content:flex-end}}
 
@@ -38,11 +40,11 @@ svg#EG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
 svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-index:6}
 .cp-row{position:absolute;top:8px;left:0;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;padding-left:28px;box-sizing:border-box;z-index:2;pointer-events:none}
 .cp{position:static;flex:0 0 244px;width:244px;min-width:0;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:flex-start;padding:2px 10px;border-radius:20px;font-size:10px;font-weight:700;line-height:1.2;white-space:nowrap;word-break:keep-all;writing-mode:horizontal-tb;box-sizing:border-box;pointer-events:none;z-index:2}
-.cp0{background:#6b4ef6;color:#fff}.cp1{background:#f0ecff;color:#6b4ef6;border:1px solid #d4caff}.cp2{background:#f3f0ff;color:#7c6fd4;border:1px solid #ddd6fe}.cp3{background:#f7f5ff;color:#9d8fe0;border:1px solid #ede9fe}.cp4{background:#faf8ff;color:#b4a8e8;border:1px solid #f0ecff}
+.cp0{background:#631EED;color:#fff}.cp1{background:#f0ecff;color:#631EED;border:1px solid #d4caff}.cp2{background:#f3f0ff;color:#7c6fd4;border:1px solid #ddd6fe}.cp3{background:#f7f5ff;color:#9d8fe0;border:1px solid #ede9fe}.cp4{background:#faf8ff;color:#b4a8e8;border:1px solid #f0ecff}
 .nw{position:absolute;z-index:5}
 .nd{background:#fff;border:1px solid #e0dbd4;border-radius:10px;width:188px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.07);transition:border-color .15s,box-shadow .15s}
-.nd:hover{border-color:#b8aff0;box-shadow:0 2px 10px rgba(107,78,246,.12)}
-.nd.sel{border-color:#6b4ef6;box-shadow:0 0 0 3px rgba(107,78,246,.15)}
+.nd:hover{border-color:#b8aff0;box-shadow:0 2px 10px rgba(99,30,237,.12)}
+.nd.sel{border-color:#631EED;box-shadow:0 0 0 3px rgba(99,30,237,.15)}
 .nd.rnd{width:168px;border-color:#d4caff}
 .ndt{display:flex;align-items:flex-start;padding:9px 9px 4px;gap:6px}
 .nb{width:3px;border-radius:2px;flex-shrink:0;margin-top:2px;align-self:stretch;min-height:12px}
@@ -54,21 +56,21 @@ svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-ind
 .btdd{background:#fff1f0;color:#dc2626;border:1px solid #fca5a5}.bai{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}.bcrud{background:#eff6ff;color:#1d4ed8;border:1px solid #93c5fd}.bapi{background:#faf5ff;color:#7c3aed;border:1px solid #c4b5fd}.busp{background:#fffbeb;color:#b45309;border:1px solid #fcd34d}
 .nnum{margin-left:auto;font-size:9px;color:#ccc;font-family:monospace}
 .na{display:flex;justify-content:flex-end;padding:2px 7px 8px;gap:4px}
-.pb2{position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:#6b4ef6;color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(107,78,246,.35)}
+.pb2{position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:#631EED;color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:6;box-shadow:0 2px 5px rgba(99,30,237,.35)}
 .mm{position:absolute;bottom:10px;right:10px;width:120px;height:72px;background:#fff;border:1px solid #e0dbd4;border-radius:8px;overflow:hidden;z-index:20}
-.mmvp{position:absolute;border:2px solid #6b4ef6;border-radius:2px;pointer-events:none;background:rgba(107,78,246,.06)}
+.mmvp{position:absolute;border:2px solid #631EED;border-radius:2px;pointer-events:none;background:rgba(99,30,237,.06)}
 .zc{position:absolute;bottom:10px;left:10px;display:flex;gap:3px;z-index:20;align-items:center;background:#fff;border:1px solid #e0dbd4;border-radius:8px;padding:3px 7px}
 .zb{width:20px;height:20px;border:none;background:transparent;color:#555;font-size:14px;cursor:pointer;border-radius:4px;font-weight:700}
 .zb:hover{background:#f0ece8}
 .zp{font-size:10px;color:#999;min-width:28px;text-align:center}
 
 #V-PRD{background:#fff;padding:28px 32px;overflow-y:auto;gap:0}
-.prd-header{margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #6b4ef6}
+.prd-header{margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #631EED}
 .prd-title{font-size:20px;font-weight:700;color:#1a1a1a;margin-bottom:6px}
 .prd-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#888}
 .prd-meta strong{color:#555;font-weight:600}
 .prd-section{margin-bottom:18px}
-.prd-section h2{font-size:14px;font-weight:700;color:#6b4ef6;margin-bottom:8px;padding-left:10px;border-left:3px solid #6b4ef6}
+.prd-section h2{font-size:14px;font-weight:700;color:#631EED;margin-bottom:8px;padding-left:10px;border-left:3px solid #631EED}
 .prd-tree{font-family:monospace;font-size:11px;color:#444;line-height:1.9;background:#faf9f7;border-radius:8px;padding:14px 16px;white-space:pre-wrap;word-break:break-all}
 
 #V-SPEC{background:#fff;overflow-y:auto;gap:0}
@@ -86,7 +88,7 @@ svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-ind
 .ai-sub{font-size:12px;color:#aaa;margin-bottom:18px}
 .ai-btn-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
 .ai-btn{background:#fff;border:1px solid #e0dbd4;border-radius:10px;padding:14px 16px;cursor:pointer;text-align:left;transition:all .15s}
-.ai-btn:hover{border-color:#b8aff0;box-shadow:0 2px 8px rgba(107,78,246,.1)}
+.ai-btn:hover{border-color:#b8aff0;box-shadow:0 2px 8px rgba(99,30,237,.1)}
 .ai-btn-icon{font-size:18px;margin-bottom:5px}
 .ai-btn-title{font-size:13px;font-weight:600;color:#1a1a1a;margin-bottom:2px}
 .ai-btn-desc{font-size:11px;color:#aaa;line-height:1.4}
@@ -103,19 +105,19 @@ svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-ind
 .mo h3{font-size:15px;color:#1a1a1a;font-weight:700;margin-bottom:14px}
 .fl{font-size:11px;color:#666;display:block;margin-bottom:4px;font-weight:600}
 .fi{width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 11px;outline:none;font-family:inherit;transition:border-color .15s}
-.fi:focus{border-color:#6b4ef6;box-shadow:0 0 0 3px rgba(107,78,246,.1)}
+.fi:focus{border-color:#631EED;box-shadow:0 0 0 3px rgba(99,30,237,.1)}
 .fg{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .fe{background:#fff1f0;border:1px solid #fca5a5;border-radius:7px;padding:8px 12px;font-size:12px;color:#dc2626;margin-top:4px}
 .pl{margin-top:16px;padding-top:14px;border-top:1px solid #f0ece8}
 .plt{font-size:11px;color:#aaa;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
 .pc{width:100%;text-align:left;border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s;display:flex;align-items:flex-start;gap:10px;margin-bottom:6px;background:#faf9f7;border:1.5px solid #e8e4de}
-.pc:hover{border-color:#c4b5fd;background:#f8f6ff}.pc.acp{border-color:#6b4ef6;background:#f0ecff}
+.pc:hover{border-color:#c4b5fd;background:#f8f6ff}.pc.acp{border-color:#631EED;background:#f0ecff}
 .pi{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
 .pif{flex:1;min-width:0}
 .pn2{font-size:13px;font-weight:600;color:#1a1a1a;margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pc.acp .pn2{color:#6b4ef6}
+.pc.acp .pn2{color:#631EED}
 .pm2{font-size:11px;color:#aaa}
-.ct{font-size:10px;background:#6b4ef6;color:#fff;padding:2px 7px;border-radius:10px;font-weight:600;align-self:center;flex-shrink:0}
+.ct{font-size:10px;background:#631EED;color:#fff;padding:2px 7px;border-radius:10px;font-weight:600;align-self:center;flex-shrink:0}
 .tst{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:#1a1a1a;color:#fff;font-size:12px;padding:8px 16px;border-radius:9px;z-index:7000;white-space:nowrap;pointer-events:none}
 #ES{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
   </style>
@@ -141,11 +143,11 @@ svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-ind
           <button id="BFT" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">맞춤 ⊡</button>
           <button type="button" id="BAR" title="드래그로 저장된 수동 위치(mx/my) 전부 제거 → 트리 자동 배치" style="padding:6px 10px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">자동정렬</button>
           <button type="button" id="BUN" title="실행 취소 (Ctrl+Z / ⌘Z)" style="padding:6px 10px;font-size:12px;border-radius:7px;border:1.5px solid #c8c4be;color:#333;background:#fff;cursor:pointer;font-weight:600">↩</button>
-          <button id="BMD" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #6b4ef6;color:#6b4ef6;background:#f0ecff;cursor:pointer;font-weight:600">MD 출력</button>
-          <button id="BPR" style="padding:6px 12px;font-size:12px;border-radius:7px;border:none;background:#6b4ef6;color:#fff;cursor:pointer;font-weight:600">PRD 출력</button>
-          <button type="button" id="BJN" title="노드 트리 JSON (백업·재가져오기용)" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #6b4ef6;color:#6b4ef6;background:#f0ecff;cursor:pointer;font-weight:600">JSON</button>
+          <button id="BMD" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #631EED;color:#631EED;background:#f0ecff;cursor:pointer;font-weight:600">MD 출력</button>
+          <button id="BPR" style="padding:6px 12px;font-size:12px;border-radius:7px;border:none;background:#631EED;color:#fff;cursor:pointer;font-weight:600">PRD 출력</button>
+          <button type="button" id="BJN" title="노드 트리 JSON (백업·재가져오기용)" style="padding:6px 12px;font-size:12px;border-radius:7px;border:1.5px solid #631EED;color:#631EED;background:#f0ecff;cursor:pointer;font-weight:600">JSON</button>
           <div class="dv"></div>
-          <button id="BPN" style="width:32px;height:32px;border-radius:8px;border:none;background:#6b4ef6;color:#fff;font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center">+</button>
+          <button id="BPN" style="width:32px;height:32px;border-radius:8px;border:none;background:#631EED;color:#fff;font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center">+</button>
         </div>
       </div>
 
@@ -159,7 +161,7 @@ svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-ind
             <div id="ES">
               <div style="font-size:36px;margin-bottom:12px">📋</div>
               <div style="font-size:14px;color:#bbb;margin-bottom:16px">프로젝트를 선택하거나 새로 만들어줘</div>
-              <button id="BNE" style="padding:9px 22px;font-size:13px;border-radius:8px;border:none;background:#6b4ef6;color:#fff;font-weight:700;cursor:pointer">+ 새 프로젝트</button>
+              <button id="BNE" style="padding:9px 22px;font-size:13px;border-radius:8px;border:none;background:#631EED;color:#fff;font-weight:700;cursor:pointer">+ 새 프로젝트</button>
             </div>
             <div class="zc"><button class="zb" id="ZO">−</button><span class="zp" id="ZP">85%</span><button class="zb" id="ZI">+</button><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">축소확대: Ctrl+스크롤</span><span style="font-size:9px;color:#bbb;padding:0 4px;border-left:1px solid #e8e4de;margin-left:2px;white-space:nowrap">그룹이동: Shift+노드선택</span></div>
             <div class="mm"><canvas id="MMC"></canvas><div class="mmvp" id="MMV"></div></div>
@@ -210,7 +212,7 @@ svg#SG{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;z-ind
             </div>
             <div><span class="fl">설명</span><textarea class="fi" id="FD" rows="2" style="resize:vertical" placeholder="간단한 설명"></textarea></div>
             <div id="FER" class="fe" style="display:none"></div>
-            <button id="BCR" style="width:100%;padding:10px;border-radius:9px;border:none;background:#6b4ef6;color:#fff;font-size:13px;font-weight:700;cursor:pointer">+ 프로젝트 생성</button>
+            <button id="BCR" style="width:100%;padding:10px;border-radius:9px;border:none;background:#631EED;color:#fff;font-size:13px;font-weight:700;cursor:pointer">+ 프로젝트 생성</button>
           </div>
           <div class="pl"><div class="plt" id="PLT">생성된 프로젝트</div><div id="PLC"></div></div>
         </div>

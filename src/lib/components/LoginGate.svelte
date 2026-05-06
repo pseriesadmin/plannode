@@ -153,9 +153,9 @@
     color: #555;
   }
   .gate-tabs button.act {
-    border-color: #6b4ef6;
+    border-color: #631EED;
     background: #f0ecff;
-    color: #5b21b6;
+    color: #2C155A;
   }
   .gate-form {
     display: flex;
@@ -181,7 +181,7 @@
     padding: 12px;
     border: none;
     border-radius: 10px;
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
     font-weight: 700;
     font-size: 15px;

@@ -29,6 +29,7 @@
     PLANNODE_TREE_IMPORT_BJI_ARIA_LABEL,
     PLANNODE_TREE_IMPORT_BJI_TITLE
   } from '$lib/plannodeTreeV1';
+  import { extractAndParseTree } from '$lib/ai/agendaResponseParser';
   import { extractDocxPlainTextFromFile } from '$lib/docxPlainText';
   import {
     outlinePlainTextToPlannodeTreeV1,
@@ -51,6 +52,7 @@
     aclModalProject,
     fetchMyAclInviteSummaries,
     importSharedProjectFromWorkspace,
+    pruneStaleInviteAfterSliceMissing,
     autoLoadInvitedProjects,
     fetchProjectAcl,
     isCurrentUserProjectOwner,
@@ -65,8 +67,9 @@
     projectPresenceSelectedEmail,
     toggleProjectPresencePeerEmail
   } from '$lib/supabase/projectPresence';
-  import { getAuthUserId, getAuthEmail, signOutEverywhere, authUser, authLoading } from '$lib/stores/authSession';
+  import { getAuthUserId, getAuthEmail, signOutEverywhere, authUser, authLoading, authSession } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
+  import BadgeImportMappingOverlay from '$lib/components/BadgeImportMappingOverlay.svelte';
   import StandardBadgePoolModal from '$lib/components/StandardBadgePoolModal.svelte';
   import IAExportMenu from '$lib/components/IAExportMenu.svelte';
   import IAGridSheet from '$lib/components/IAGridSheet.svelte';
@@ -95,9 +98,67 @@
   let projectStart = '';
   let projectEnd = '';
   let projectDesc = '';
+  /** 요구사항(아젠다) → AI 트리 생성 중 — 중복 클릭 방지 */
+  let agendaTreeBusy = false;
 
   /** 프로젝트 관리 모달 안 — 표준 배지 풀(localStorage) */
   let showBadgePoolModal = false;
+
+  /** 서버 `resolveAnthropicApiKey.ts`의 `PLANNODE_USER_ANTHROPIC_KEY_HEADER`와 동일해야 함 */
+  const PLANNODE_USER_ANTHROPIC_KEY_HEADER = 'x-plannode-user-anthropic-key';
+  const LS_USER_ANTHROPIC_KEY = 'plannode_user_anthropic_key_v1';
+
+  /** NOW-37: Anthropic 키 BYOK(브라우저) — 중첩 모달 */
+  let showModelApiModal = false;
+  let modelApiKeyDraft = '';
+  let hasStoredAnthropicKey = false;
+
+  function readStoredUserAnthropicKey(): string {
+    if (typeof localStorage === 'undefined') return '';
+    return String(localStorage.getItem(LS_USER_ANTHROPIC_KEY) ?? '').trim();
+  }
+
+  function openModelApiModal() {
+    if (typeof localStorage !== 'undefined') {
+      hasStoredAnthropicKey = readStoredUserAnthropicKey().length > 0;
+    } else {
+      hasStoredAnthropicKey = false;
+    }
+    modelApiKeyDraft = '';
+    showModelApiModal = true;
+  }
+
+  function saveModelApiKey() {
+    const v = modelApiKeyDraft.trim();
+    if (!v) {
+      showPilotToast('키를 입력해줘.');
+      return;
+    }
+    try {
+      localStorage.setItem(LS_USER_ANTHROPIC_KEY, v);
+    } catch {
+      showPilotToast('저장에 실패했어. 브라우저 저장 공간을 확인해줘.');
+      return;
+    }
+    modelApiKeyDraft = '';
+    hasStoredAnthropicKey = true;
+    showPilotToast('저장했어. AI 트리·AI 탭 요청에 반영돼.');
+  }
+
+  function clearModelApiKey() {
+    try {
+      localStorage.removeItem(LS_USER_ANTHROPIC_KEY);
+    } catch {
+      /* ignore */
+    }
+    modelApiKeyDraft = '';
+    hasStoredAnthropicKey = false;
+    showPilotToast('브라우저에 저장된 키를 지웠어.');
+  }
+
+  /** 가져오기 직후 upsertImportedPlannodeTreeV1(배지 sanitize·학습 병합) 동안 짧게 표시 */
+  let showBadgeImportMappingOverlay = false;
+  const BADGE_IMPORT_OVERLAY_MIN_MS = 260;
 
   /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
   let showSnapshotHistoryModal = false;
@@ -759,7 +820,24 @@
       showPilotToast('가져오기를 취소했어.');
       return;
     }
-    const merged = upsertImportedPlannodeTreeV1(parsed.project, parsed.nodes, { openAfter: false });
+
+    showBadgeImportMappingOverlay = true;
+    await tick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const overlayT0 = typeof performance !== 'undefined' ? performance.now() : 0;
+    let merged: Project | null = null;
+    try {
+      merged = upsertImportedPlannodeTreeV1(parsed.project, parsed.nodes, { openAfter: false });
+    } finally {
+      const elapsed =
+        typeof performance !== 'undefined' ? performance.now() - overlayT0 : BADGE_IMPORT_OVERLAY_MIN_MS;
+      if (elapsed < BADGE_IMPORT_OVERLAY_MIN_MS) {
+        await new Promise((r) => setTimeout(r, BADGE_IMPORT_OVERLAY_MIN_MS - elapsed));
+      }
+      showBadgeImportMappingOverlay = false;
+    }
+
     if (!merged) {
       showPilotToast('저장에 실패했어.');
       return;
@@ -848,26 +926,176 @@
     }
   }
 
+  /** NOW-35: 요구사항 텍스트로 AI plannode.tree 생성 → upsert → 캔버스 동기 (PRD M6 · M1 F1-1 · F2-5) */
+  async function handleAgendaTreeGenerate() {
+    if (agendaTreeBusy) return;
+    if (!projectName?.trim() || !projectAuthor?.trim() || !projectStart || !projectEnd) {
+      alert('이름·작성자·시작일·종료일을 먼저 입력해줘');
+      return;
+    }
+    if (!projectDesc?.trim()) {
+      alert('프로젝트 요구사항 상세 입력에 아젠다를 적어줘');
+      return;
+    }
+    if (!cloudSyncAvailable) {
+      showPilotToast('클라우드·로그인이 없으면 서버 AI를 쓸 수 없어. Supabase를 켠 뒤 로그인해줘.');
+      return;
+    }
+    const token = get(authSession)?.access_token?.trim();
+    if (!token) {
+      showPilotToast('로그인이 필요해. 로그인한 뒤 다시 시도해줘.');
+      return;
+    }
+
+    agendaTreeBusy = true;
+    try {
+      const uid = getAuthUserId();
+      const newProj = createProject({
+        name: projectName.trim(),
+        author: projectAuthor.trim(),
+        start_date: projectStart,
+        end_date: projectEnd,
+        description: projectDesc.trim(),
+        owner_user_id: cloudSyncAvailable && uid ? uid : undefined
+      });
+      if (!newProj) {
+        alert('프로젝트 생성에 실패했습니다');
+        return;
+      }
+      if (cloudSyncAvailable && uid) {
+        const acl = await ensureOwnerAclRowForMyProject(newProj.id);
+        if (!acl.ok) {
+          alert(acl.message ?? '클라우드에 소유자(접근 목록)를 저장하지 못했어.');
+          return;
+        }
+        const { scheduleCloudFlush } = await import('$lib/supabase/workspacePush');
+        scheduleCloudFlush('new-project-agenda', 100);
+      }
+
+      const alreadyOpen = get(currentProject);
+      if (alreadyOpen && alreadyOpen.id !== newProj.id) {
+        pilotFlushPersistNow();
+      }
+      const rOpen = await trySelectProject(newProj);
+      if (!rOpen.ok) {
+        alert(rOpen.message ?? '프로젝트를 열 수 없습니다');
+        return;
+      }
+
+      const userAnthropicKey = readStoredUserAnthropicKey();
+      const agendaHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      };
+      if (userAnthropicKey) {
+        agendaHeaders[PLANNODE_USER_ANTHROPIC_KEY_HEADER] = userAnthropicKey;
+      }
+
+      const res = await fetch('/api/ai/agenda-to-tree', {
+        method: 'POST',
+        headers: agendaHeaders,
+        body: JSON.stringify({
+          agenda: projectDesc.trim(),
+          projectId: newProj.id,
+          projectName: newProj.name,
+          depth: 3
+        })
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.status === 503) {
+        showPilotToast('Supabase가 없어서 AI 호출을 할 수 없어.');
+        return;
+      }
+      if (res.status === 401) {
+        showPilotToast('세션이 만료됐어. 다시 로그인 후 시도해줘.');
+        return;
+      }
+      if (!res.ok) {
+        showPilotToast(j?.message ? String(j.message) : `AI 요청 실패 (${res.status})`);
+        return;
+      }
+      if (j?.code === 'NO_KEY' || j?.ok === false) {
+        showPilotToast(
+          j?.hint
+            ? String(j.hint)
+            : 'Anthropic 키가 없어. 서버 환경 변수나 프로젝트 모달의「모델API 등록」을 확인해줘.'
+        );
+        return;
+      }
+      const raw = String(j?.rawResponse ?? '');
+      if (!raw.trim() || j?.code === 'EMPTY') {
+        showPilotToast('AI가 빈 응답을 줬어. 아젠다를 조금 줄이거나 다시 시도해줘.');
+        return;
+      }
+
+      let parsed: ReturnType<typeof extractAndParseTree>;
+      try {
+        parsed = extractAndParseTree(raw, newProj.id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        showPilotToast(`트리 파싱 실패: ${msg}`);
+        return;
+      }
+
+      const mergedProject: Project = {
+        ...newProj,
+        description: projectDesc.trim(),
+        name: parsed.project.name?.trim() || newProj.name
+      };
+
+      if (get(nodes).length > 1) {
+        if (!confirm('이미 이 프로젝트에 노드가 있어. AI가 만든 트리로 덮어쓸까?')) {
+          showPilotToast('취소했어. 빈 프로젝트는 목록에서 지울 수 있어.');
+          return;
+        }
+      }
+
+      const merged = upsertImportedPlannodeTreeV1(mergedProject, parsed.nodes, { openAfter: true });
+      if (!merged) {
+        showPilotToast('생성된 트리를 저장하지 못했어.');
+        return;
+      }
+      if (cloudSyncAvailable && uid && !merged.owner_user_id) {
+        updateProjectMeta(merged.id, { owner_user_id: uid });
+      }
+      const latest = get(projects).find((p) => p.id === merged.id);
+      if (latest) {
+        const r2 = await trySelectProject(latest);
+        if (!r2.ok) showPilotToast(r2.message ?? '프로젝트를 열 수 없어.');
+      }
+
+      pilotSetNodeMapLayout(nodeMapLayoutDefaultForCreate);
+      writeNodeMapLayoutCreateDefault(nodeMapLayoutDefaultForCreate);
+
+      projectName = '';
+      projectAuthor = '';
+      projectStart = '';
+      projectEnd = '';
+      projectDesc = '';
+      await tick();
+      showPilotToast(`AI 노드 초안 반영 완료(${parsed.nodeCount}개 노드)`);
+      requestAnimationFrame(() => showProjectModal.set(false));
+    } catch (e) {
+      console.error('agenda tree error', e);
+      showPilotToast(e instanceof Error ? e.message : '오류가 났어.');
+    } finally {
+      agendaTreeBusy = false;
+    }
+  }
+
   function closeModal() {
+    showModelApiModal = false;
+    modelApiKeyDraft = '';
     showProjectModal.set(false);
   }
 
-  /** 프로젝트 모달: 모바일에서 스크롤바 대신 하단 힌트 */
+  /** 프로젝트 모달: 본문이 넘칠 때 하단 화살표로 아래 목록·초대 영역이 있음을 안내(모바일은 스크롤바 숨김 유지) */
   let projectModalEl: HTMLDivElement | undefined;
   let projectModalScrollHint = false;
-
-  function isProjectModalMobileViewport(): boolean {
-    if (typeof window === 'undefined') return false;
-    return window.matchMedia('(max-width: 900px)').matches;
-  }
 
   function syncProjectModalScrollHint() {
     const el = projectModalEl;
     if (!el || !get(showProjectModal)) {
-      projectModalScrollHint = false;
-      return;
-    }
-    if (!isProjectModalMobileViewport()) {
       projectModalScrollHint = false;
       return;
     }
@@ -951,6 +1179,8 @@
   $: if (!$showProjectModal) {
     projectDeletableById = {};
     deleteFlagsLoadGen++;
+    showModelApiModal = false;
+    modelApiKeyDraft = '';
   }
 
   function canShowProjectDelete(proj: Project): boolean {
@@ -1005,12 +1235,25 @@
     aclImportBusyKey = key;
     try {
       const r = await importSharedProjectFromWorkspace(inv.workspace_source_user_id, inv.project_id);
-      showPilotToast(r.message);
       if (r.ok) {
+        showPilotToast(r.message);
         await loadAclInvitesForModal();
         await tick();
         requestAnimationFrame(() => showProjectModal.set(false));
+        return;
       }
+      if (r.sliceMissing) {
+        const pr = await pruneStaleInviteAfterSliceMissing(inv);
+        if (pr.outcome === 'pruned') {
+          showPilotToast('클라우드에 없는 초대라서 목록에서 뺐어.');
+          invitePanelEpoch++;
+          await loadAclInvitesForModal();
+          return;
+        }
+        showPilotToast(pr.message ? `${r.message} (${pr.message})` : r.message);
+        return;
+      }
+      showPilotToast(r.message);
     } finally {
       aclImportBusyKey = '';
     }
@@ -1076,6 +1319,7 @@
         localCount: localProjectIds.length,
         email: $authUser?.email,
         loaded: result.loaded,
+        prunedStaleInvites: result.prunedStaleInvites,
         skipped: result.skipped,
         skippedAlreadyLocal: result.skippedAlreadyLocal,
         skippedNoWorkspaceSource: result.skippedNoWorkspaceSource,
@@ -1083,15 +1327,26 @@
       });
     }
 
+    if (result.prunedStaleInvites > 0) {
+      invitePanelEpoch++;
+      void loadAclInvitesForModal();
+    }
+
     if (result.loaded > 0) {
       showPilotToast(`초대받은 프로젝트 ${result.loaded}개를 불러왔어 ✓`);
     }
+    if (result.prunedStaleInvites > 0 && result.errors.length === 0 && result.loaded === 0) {
+      showPilotToast(`더 이상 없는 초대 ${result.prunedStaleInvites}건을 목록에서 정리했어.`);
+    } else if (result.prunedStaleInvites > 0 && (result.loaded > 0 || result.errors.length > 0)) {
+      showPilotToast(`끊긴 초대 ${result.prunedStaleInvites}건을 목록에서 뺐어.`);
+    }
     if (result.errors.length > 0) {
       const errMsg = result.errors.map((e) => `${e.projectId}: ${e.message}`).join('; ');
+      const capped = errMsg.length > 220 ? `${errMsg.slice(0, 220)}…` : errMsg;
       if (import.meta.env.DEV) {
         console.warn('[autoLoadInvitedProjects] errors:', errMsg);
       }
-      showPilotToast(`프로젝트 불러오기 실패: ${errMsg}`);
+      showPilotToast(`프로젝트 불러오기 실패: ${capped}`);
     }
   }
 
@@ -1302,6 +1557,10 @@
   on:mousedown={onToolbarMenusOutside}
   on:resize={syncProjectModalScrollHint}
 />
+
+{#if showBadgeImportMappingOverlay}
+  <BadgeImportMappingOverlay />
+{/if}
 
 <div id="root">
   <!-- SvelteKit 주입 props — 템플릿에서 참조해야 unused export 경고 없음 -->
@@ -2002,14 +2261,27 @@
                 aria-label="종료일"
               />
             </div>
+            <label class="proj-req-label" for="proj-req-detail">프로젝트 요구사항 상세입력</label>
             <textarea
-              class="fi"
+              id="proj-req-detail"
+              class="fi proj-req-textarea"
               bind:value={projectDesc}
-              rows="2"
-              style="resize:vertical"
-              placeholder="설명"
-              aria-label="설명"
+              rows="5"
+              style="resize:vertical;min-height:10rem"
+              placeholder="서비스 목적, 사용자, 핵심 기능, 제약 등을 자유롭게 적어줘. AI가 노드 트리 초안을 만든다."
+              aria-label="프로젝트 요구사항 상세입력"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="true"
             ></textarea>
+            <button
+              type="button"
+              class="bcr bcr-agenda-tree"
+              disabled={agendaTreeBusy}
+              on:click={handleAgendaTreeGenerate}
+            >
+              {agendaTreeBusy ? 'AI 트리 생성 중…' : '요구사항으로 AI 노드 초안'}
+            </button>
             <div class="proj-layout-row" role="group" aria-label="새 프로젝트 노드맵 배치">
               <button
                 type="button"
@@ -2034,14 +2306,24 @@
                 하위분포 보기
               </button>
             </div>
-            <button
-              type="button"
-              class="bcr bcr-badge-settings"
-              id="BBS"
-              on:click={() => (showBadgePoolModal = true)}
-            >
-              표준 배지 설정
-            </button>
+            <div class="proj-badge-model-row" role="group" aria-label="배지·API 설정">
+              <button
+                type="button"
+                class="bcr bcr-badge-settings"
+                id="BBS"
+                on:click={() => (showBadgePoolModal = true)}
+              >
+                표준 배지 설정
+              </button>
+              <button
+                type="button"
+                class="bcr bcr-model-api"
+                id="BMA"
+                on:click={openModelApiModal}
+              >
+                모델API 등록
+              </button>
+            </div>
             <button type="button" class="bcr bcr-create-project" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
             <div class="proj-json-import">
               <input
@@ -2131,7 +2413,7 @@
                         void handleProjectSelect(proj);
                       }}
                     >
-                      <div class="pi" style:background={$currentProject?.id === proj.id ? '#6b4ef6' : '#ede9fe'}>📁</div>
+                      <div class="pi" style:background={$currentProject?.id === proj.id ? '#631EED' : '#ede9fe'}>📁</div>
                       <div class="pif">
                         <div class="pm-title-wrap" data-pm-title-pid={proj.id}>
                           {#if modalEditingProjectId === proj.id}
@@ -2278,6 +2560,46 @@
         </div>
       </div>
     {/if}
+
+    {#if showModelApiModal}
+      <div class="mbg" role="presentation" on:click|self={() => (showModelApiModal = false)}>
+        <div
+          class="mo mo-wide model-api-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="model-api-title"
+        >
+          <div class="pm-proj-head">
+            <h3 id="model-api-title" style="margin:0">모델 API 등록</h3>
+            <button type="button" class="mcl" on:click={() => (showModelApiModal = false)}>✕</button>
+          </div>
+          <div class="model-api-body">
+            <p class="model-api-warn">
+              이 브라우저에만 저장돼. XSS나 남의 기기에서는 노출될 수 있어—공용 PC에서는 저장하지 마.
+            </p>
+            {#if hasStoredAnthropicKey}
+              <p class="model-api-status">저장된 키가 있어. 아래에 새로 넣으면 덮어써.</p>
+            {/if}
+            <label class="model-api-label" for="model-api-key-input">Anthropic API 키</label>
+            <input
+              id="model-api-key-input"
+              class="fi model-api-input"
+              type="password"
+              bind:value={modelApiKeyDraft}
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="sk-ant-api03-…"
+              aria-label="Anthropic API 키"
+            />
+            <div class="model-api-actions">
+              <button type="button" class="bcr" on:click={saveModelApiKey}>저장</button>
+              <button type="button" class="bcr bcr-model-api-clear" on:click={clearModelApiKey}>지우기</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -2298,7 +2620,13 @@
   #root {
     width: 100vw;
     height: 100vh;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family:
+      'Pretendard',
+      'Noto Sans KR',
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      sans-serif;
   }
 
   #R {
@@ -2386,7 +2714,7 @@
   }
 
   .tb-menu-reveal:focus-visible {
-    outline: 2px solid #6b61f6;
+    outline: 2px solid #631EED;
     outline-offset: 3px;
   }
 
@@ -2489,7 +2817,7 @@
   .logo {
     font-size: 13px;
     font-weight: 700;
-    color: #6b4ef6;
+    color: #631EED;
     white-space: nowrap;
   }
 
@@ -2542,7 +2870,7 @@
   }
 
   input.pntag.pntag-input:focus {
-    outline: 2px solid #6b61f6;
+    outline: 2px solid #631EED;
     outline-offset: 1px;
   }
 
@@ -2717,14 +3045,14 @@
   }
 
   .tb-output-btn:focus-visible {
-    outline: 2px solid #6b4ef6;
+    outline: 2px solid #631EED;
     outline-offset: 2px;
   }
 
   .tb-output-btn[aria-expanded='true'] {
     border-color: #a89ef0;
     background: #f5f3ff;
-    box-shadow: inset 0 1px 2px rgba(107, 78, 246, 0.08);
+    box-shadow: inset 0 1px 2px rgba(99, 30, 237, 0.08);
   }
 
   .tb-output-label {
@@ -2775,16 +3103,16 @@
 
   .tb-output-menu-item:hover {
     background: #f5f3ff;
-    color: #5b3fd9;
+    color: #5519D4;
   }
 
   .tb-output-menu-item--prd {
     background: #f0ecff;
-    color: #6b4ef6;
+    color: #631EED;
   }
 
   .tb-output-menu-item--prd:hover {
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
   }
 
@@ -2829,7 +3157,7 @@
   }
 
   .tb-view-btn:focus-visible {
-    outline: 2px solid #6b4ef6;
+    outline: 2px solid #631EED;
     outline-offset: 2px;
   }
 
@@ -2841,7 +3169,7 @@
   .tb-view-label {
     flex: 0 1 auto;
     text-align: left;
-    color: #6b4ef6;
+    color: #631EED;
   }
 
   .tb-view-caret {
@@ -2884,12 +3212,12 @@
 
   .tb-view-menu-item:hover {
     background: #f5f3ff;
-    color: #5b3fd9;
+    color: #5519D4;
   }
 
   .tb-view-menu-item--on {
     background: #f0ecff;
-    color: #6b4ef6;
+    color: #631EED;
   }
 
   /* 보기 드롭다운 — 모두보기(맞춤)·자동정렬 (pilot #BFT #BAR) */
@@ -2933,7 +3261,7 @@
   }
 
   .tb-viewport-btn:focus-visible {
-    outline: 2px solid #6b4ef6;
+    outline: 2px solid #631EED;
     outline-offset: 2px;
   }
 
@@ -2987,7 +3315,7 @@
 
   .tb-viewport-menu-item:hover {
     background: #f5f3ff;
-    color: #5b3fd9;
+    color: #5519D4;
   }
 
   .pilot-wire-sinks {
@@ -3011,8 +3339,8 @@
   }
 
   #BAC {
-    border: 1.5px solid #6b4ef6;
-    color: #6b4ef6;
+    border: 1.5px solid #631EED;
+    color: #631EED;
     background: #f0ecff;
   }
 
@@ -3032,7 +3360,7 @@
     cursor: pointer;
     font-family: inherit;
     border: none;
-    color: #6b4ef6;
+    color: #631EED;
     background: #f5f3ff;
     outline: none;
     transition: background 0.15s ease, color 0.15s ease;
@@ -3040,7 +3368,7 @@
 
   #BJI.proj-json-import-btn:hover {
     background: #ede9fe;
-    color: #5b3fd9;
+    color: #5519D4;
   }
 
   #BJI.proj-json-import-btn:focus,
@@ -3053,7 +3381,7 @@
     height: 32px;
     border-radius: 8px;
     border: none;
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
     font-size: 20px;
     font-weight: 700;
@@ -3074,7 +3402,7 @@
     min-height: var(--tb-user-avatar-size);
     border-radius: 50%;
     border: 2px solid #e8e4de;
-    background: linear-gradient(145deg, #8b7af0 0%, #5b3fd9 100%);
+    background: linear-gradient(145deg, #9b7af5 0%, #5519d4 100%);
     color: #fff;
     padding: 0;
     display: flex;
@@ -3184,8 +3512,8 @@
 
   .acct-input:focus {
     outline: none;
-    border-color: #6b4ef6;
-    box-shadow: 0 0 0 2px rgba(107, 78, 246, 0.2);
+    border-color: #631EED;
+    box-shadow: 0 0 0 2px rgba(99, 30, 237, 0.2);
   }
 
   .acct-err {
@@ -3219,14 +3547,14 @@
   }
 
   .acct-btn-primary {
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
-    border-color: #5b3fd9;
+    border-color: #5519D4;
     margin-top: 8px;
   }
 
   .acct-btn-primary:hover:not(:disabled) {
-    background: #5b3fd9;
+    background: #5519D4;
   }
 
   .acct-btn-danger {
@@ -3346,12 +3674,12 @@
     z-index: 2;
   }
   :global(.cp0) {
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
   }
   :global(.cp1) {
     background: #f0ecff;
-    color: #6b4ef6;
+    color: #631EED;
     border: 1px solid #d4caff;
   }
   :global(.cp2) {
@@ -3394,12 +3722,12 @@
     box-shadow: none !important;
   }
   :global(.cp-depth-strip .cp-depth-cell.cp0) {
-    background: rgba(107, 78, 246, 0.92);
+    background: rgba(99, 30, 237, 0.92);
     color: #fff;
   }
   :global(.cp-depth-strip .cp-depth-cell.cp1) {
     background: rgba(240, 236, 255, 0.92);
-    color: #6b4ef6;
+    color: #631EED;
   }
   :global(.cp-depth-strip .cp-depth-cell.cp2) {
     background: rgba(243, 240, 255, 0.85);
@@ -3435,7 +3763,7 @@
   }
   :global(.nd:hover) {
     z-index: 30;
-    outline-color: rgba(107, 78, 246, 0.38);
+    outline-color: rgba(99, 30, 237, 0.38);
   }
   :global(.nw .node-collapse-btn),
   :global(.nw .pb2) {
@@ -3446,7 +3774,7 @@
     overflow: visible;
   }
   :global(.nd.sel) {
-    outline: 2px solid rgba(107, 78, 246, 0.65);
+    outline: 2px solid rgba(99, 30, 237, 0.65);
   }
   :global(.nd.msel) {
     outline: 2px solid rgba(225, 29, 72, 0.55);
@@ -3549,7 +3877,7 @@
   :global(.nn-tooltip-t) {
     font-size: 9px;
     font-weight: 700;
-    color: #6b4ef6;
+    color: #631EED;
     padding: 6px 9px 4px;
     letter-spacing: 0.02em;
   }
@@ -3612,7 +3940,7 @@
   :global(.nds-tooltip-t) {
     font-size: 9px;
     font-weight: 700;
-    color: #6b4ef6;
+    color: #631EED;
     padding: 6px 9px 4px;
     letter-spacing: 0.02em;
   }
@@ -3716,7 +4044,7 @@
     height: 20px;
     border-radius: 50%;
     border: none;
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
     font-size: 14px;
     font-weight: 700;
@@ -3725,7 +4053,7 @@
     align-items: center;
     justify-content: center;
     z-index: 6;
-    box-shadow: 0 2px 5px rgba(107, 78, 246, 0.35);
+    box-shadow: 0 2px 5px rgba(99, 30, 237, 0.35);
   }
   :global(.pb2.pb2-drop) {
     box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.45);
@@ -3790,10 +4118,10 @@
   }
   .mmvp {
     position: absolute;
-    border: 2px solid #6b4ef6;
+    border: 2px solid #631EED;
     border-radius: 2px;
     pointer-events: none;
-    background: rgba(107, 78, 246, 0.06);
+    background: rgba(99, 30, 237, 0.06);
   }
   .cw-bottom-bar {
     position: relative;
@@ -3866,11 +4194,11 @@
   }
   .cw-presence-avatar:hover {
     border-color: #b8aff0;
-    box-shadow: 0 0 0 2px rgba(107, 78, 246, 0.12);
+    box-shadow: 0 0 0 2px rgba(99, 30, 237, 0.12);
   }
   .cw-presence-avatar--on {
-    border-color: #6b4ef6;
-    box-shadow: 0 0 0 2px rgba(107, 78, 246, 0.2);
+    border-color: #631EED;
+    box-shadow: 0 0 0 2px rgba(99, 30, 237, 0.2);
   }
   .cw-presence-letter {
     line-height: 1;
@@ -4010,10 +4338,9 @@
       font-size: 12px;
       min-width: 34px;
     }
+    /* PC 전용 단축키 안내 — 모바일에서 숨김 */
     .zc-hint {
-      font-size: 11px;
-      line-height: 1.35;
-      color: #666;
+      display: none;
     }
   }
 
@@ -4035,7 +4362,7 @@
   .prd-header {
     margin-bottom: 20px;
     padding-bottom: 16px;
-    border-bottom: 2px solid #6b4ef6;
+    border-bottom: 2px solid #631EED;
   }
   .prd-header-row {
     display: flex;
@@ -4052,7 +4379,7 @@
     border-radius: 6px;
     border: 1px solid #c4b8fc;
     background: #f5f2ff;
-    color: #5b3fd9;
+    color: #5519D4;
     cursor: pointer;
     white-space: nowrap;
   }
@@ -4088,7 +4415,7 @@
     background: #f0ecff;
     padding: 2px 6px;
     border-radius: 4px;
-    color: #5b3fd9;
+    color: #5519D4;
   }
   .prd-section-hint {
     font-size: 11px;
@@ -4541,7 +4868,7 @@
   }
   .ai-btn:hover {
     border-color: #b8aff0;
-    box-shadow: 0 2px 8px rgba(107, 78, 246, 0.1);
+    box-shadow: 0 2px 8px rgba(99, 30, 237, 0.1);
   }
   .ai-btn-icon {
     font-size: 18px;
@@ -4580,7 +4907,7 @@
     font-size: 11px;
     font-weight: 600;
     color: #fff;
-    background: #6b4ef6;
+    background: #631EED;
     border: none;
     border-radius: 8px;
     cursor: pointer;
@@ -4680,10 +5007,10 @@
   .prd-section h2 {
     font-size: 14px;
     font-weight: 700;
-    color: #6b4ef6;
+    color: #631EED;
     margin-bottom: 8px;
     padding-left: 10px;
-    border-left: 3px solid #6b4ef6;
+    border-left: 3px solid #631EED;
   }
 
   :global(.mbg) {
@@ -4866,7 +5193,7 @@
     padding: 10px;
     border-radius: 9px;
     border: none;
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
     font-size: 13px;
     font-weight: 700;
@@ -4876,14 +5203,107 @@
 
   /** 표준 배지 — 보더 없이 면색만 (프로젝트 모달) */
   .bcr-badge-settings {
-    margin-bottom: 8px;
+    margin-bottom: 0;
     border: none;
     background: #f3f1ff;
-    color: #5b21b6;
+    color: #2C155A;
   }
 
   .bcr-badge-settings:hover {
     background: #e8e4ff;
+  }
+
+  .bcr-model-api {
+    margin-bottom: 0;
+    border: none;
+    background: #f3f1ff;
+    color: #2C155A;
+  }
+
+  .bcr-model-api:hover {
+    background: #e8e4ff;
+  }
+
+  .proj-badge-model-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .proj-badge-model-row .bcr {
+    flex: 1;
+    min-width: min(100%, 140px);
+    width: auto;
+  }
+
+  @media (max-width: 560px) {
+    .proj-badge-model-row {
+      flex-direction: column;
+    }
+    .proj-badge-model-row .bcr {
+      width: 100%;
+      min-height: 44px;
+    }
+  }
+
+  .model-api-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-top: 4px;
+  }
+
+  .model-api-warn {
+    font-size: 12px;
+    line-height: 1.45;
+    color: #666;
+  }
+
+  .model-api-status {
+    font-size: 12px;
+    color: #2c155a;
+    font-weight: 600;
+  }
+
+  .model-api-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #2c155a;
+  }
+
+  .model-api-input {
+    width: 100%;
+    font-size: 14px;
+  }
+
+  @media (max-width: 560px) {
+    .model-api-input {
+      font-size: 16px;
+      min-height: 44px;
+    }
+  }
+
+  .model-api-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .model-api-actions .bcr {
+    flex: 1;
+    min-width: min(100%, 120px);
+    width: auto;
+  }
+
+  .bcr-model-api-clear {
+    background: #faf9f7;
+    color: #2c155a;
+    border: 1px solid #e0dbd4;
+  }
+
+  .bcr-model-api-clear:hover {
+    background: #f0ece6;
   }
 
   /** 프로젝트 생성 — 주요 CTA: 세로 +20%(누적)·폰트 +30% */
@@ -4911,7 +5331,7 @@
     font-weight: 700;
     cursor: pointer;
     background: #e6e4ff;
-    color: #5b21b6;
+    color: #2C155A;
     transition:
       background 0.15s ease,
       color 0.15s ease;
@@ -4932,7 +5352,7 @@
   }
 
   .nm-create-opt:focus-visible {
-    outline: 2px solid #6b4ef6;
+    outline: 2px solid #631EED;
     outline-offset: 2px;
   }
 
@@ -4985,6 +5405,26 @@
     display: flex;
     flex-direction: column;
     gap: 15px; /* was 10px → 1.5× */
+  }
+
+  .proj-req-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #444;
+    margin: 0 0 -6px;
+  }
+
+  .proj-req-textarea {
+    line-height: 1.45;
+  }
+
+  .bcr-agenda-tree {
+    margin-top: -4px;
+  }
+
+  .bcr-agenda-tree:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
   }
 
   .acl-err {
@@ -5231,7 +5671,7 @@
     padding: 2px 7px;
     border-radius: 6px;
     background: #ede9fe;
-    color: #5b21b6;
+    color: #2C155A;
     flex-shrink: 0;
   }
 
@@ -5286,7 +5726,7 @@
   }
 
   .pn-edit-input:focus {
-    outline: 2px solid #6b61f6;
+    outline: 2px solid #631EED;
     outline-offset: 1px;
   }
 
@@ -5301,7 +5741,7 @@
   }
 
   .pcard.pcard-acp .pn2 {
-    color: #6b4ef6;
+    color: #631EED;
   }
 
   .pm2 {
@@ -5311,7 +5751,7 @@
 
   .ct {
     font-size: 10px;
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
     padding: 2px 7px;
     border-radius: 10px;
@@ -5359,11 +5799,5 @@
 
   .pm-scroll-hint-ico {
     display: block;
-  }
-
-  @media (min-width: 901px) {
-    .pm-scroll-hint-wrap {
-      display: none !important;
-    }
   }
 </style>

@@ -222,7 +222,7 @@
   .bpm-chip {
     border: 1.5px solid #c4b5fd;
     background: #faf5ff;
-    color: #5b21b6;
+    color: #2C155A;
     font-size: 11px;
     font-weight: 600;
     padding: 4px 8px;
@@ -281,7 +281,7 @@
     font-family: inherit;
   }
   .bpm-btn-primary {
-    background: #6b4ef6;
+    background: #631EED;
     color: #fff;
   }
   .bpm-btn-primary:hover {
