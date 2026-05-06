@@ -145,27 +145,44 @@ function hintsFromTreeImportExtras(meta: NodeMetadata): string[] {
 }
 
 function keywordHints(hay: string, name: string, desc: string): string[] {
-  const t = `${hay}\n${name}\n${desc}`.toLowerCase();
+  const raw = `${hay}\n${name}\n${desc}`;
+  const t = raw.toLowerCase();
   const out: string[] = [];
+  /** `\b`는 ECMAScript에서 ASCII 단어에만 안정적이라 한글 토큰은 부분 문자열로 검사한다. */
+  const ko = (subs: string[]) => subs.some((s) => raw.includes(s));
+
   const push = (tok: string, re: RegExp) => {
     if (re.test(t)) out.push(tok);
   };
-  push('PAYMENT', /\b(stripe|toss|checkout|billing|payment|\bpg\b|결제|청구|유료)\b/i);
-  push('AUTH', /\b(auth|oauth|jwt|login|session|인증|로그인|권한)\b/i);
-  push('REALTIME', /\b(realtime|websocket|\bws\b|supabase\s*realtime|live|실시간|구독)\b/i);
-  push('API', /\b(api|rest|graphql|grpc|openapi|endpoint|rpc|웹훅)\b/i);
-  push('TDD', /\b(tdd|unit\s*test|테스트\s*주도|단위\s*테스트)\b/i);
+
+  if (
+    /\b(stripe|toss|checkout|billing|payment)\b/i.test(t) ||
+    /\bpg\b/i.test(t) ||
+    ko(['결제', '청구', '유료'])
+  ) {
+    out.push('PAYMENT');
+  }
+  if (/\b(auth|oauth|jwt|login|session)\b/i.test(t) || ko(['인증', '로그인', '권한'])) out.push('AUTH');
+  if (
+    /\b(realtime|websocket|\bws\b|supabase\s*realtime|live)\b/i.test(t) ||
+    ko(['실시간', '구독'])
+  ) {
+    out.push('REALTIME');
+  }
+  if (/\b(api|rest|graphql|grpc|openapi|endpoint|rpc)\b/i.test(t) || ko(['웹훅'])) out.push('API');
+  if (/\b(tdd|unit\s*test)\b/i.test(t) || ko(['테스트 주도', '단위 테스트'])) out.push('TDD');
   push('CRUD', /\bcrud\b/i);
-  push('FORM', /\b(form|입력\s*폼|validation|유효성)\b/i);
-  push('LIST', /\b(list|listing|pagination|목록|페이지네이션)\b/i);
-  push('MODAL', /\b(modal|dialog|popup|바텀시트|드로어)\b/i);
-  push('NAVI', /\b(navigation|gnb|lnb|sidebar|내비|메뉴)\b/i);
-  push('MEDIA', /\b(upload|image|video|미디어|업로드)\b/i);
-  push('AI', /\b(llm|gpt|claude|genai|generative|ai\s*기능)\b/i);
-  push('MOBILE', /\b(mobile|ios|android|responsive|모바일)\b/i);
-  push('I18N', /\b(i18n|l10n|locale|다국어|번역)\b/i);
+  if (/\b(form|validation)\b/i.test(t) || ko(['입력 폼', '유효성'])) out.push('FORM');
+  if (/\b(list|listing|pagination)\b/i.test(t) || ko(['목록', '페이지네이션'])) out.push('LIST');
+  if (/\b(modal|dialog|popup)\b/i.test(t) || ko(['바텀시트', '드로어'])) out.push('MODAL');
+  if (/\b(navigation|gnb|lnb|sidebar)\b/i.test(t) || ko(['내비', '메뉴'])) out.push('NAVI');
+  if (/\b(upload|image|video)\b/i.test(t) || ko(['미디어', '업로드'])) out.push('MEDIA');
+  push('AI', /\b(llm|gpt|claude|genai|generative)\b/i);
+  if (ko(['ai 기능', 'AI 기능'])) out.push('AI');
+  if (/\b(mobile|ios|android|responsive)\b/i.test(t) || ko(['모바일'])) out.push('MOBILE');
+  if (/\b(i18n|l10n|locale)\b/i.test(t) || ko(['다국어', '번역'])) out.push('I18N');
   push('MVP', /\bmvp\b/i);
-  push('USP', /\b(usp|차별|differentiation)\b/i);
+  if (/\b(usp|differentiation)\b/i.test(t) || ko(['차별'])) out.push('USP');
   return out;
 }
 
