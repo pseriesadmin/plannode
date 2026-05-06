@@ -232,6 +232,23 @@ export function loadProjectsFromLocalStorage() {
   }
 }
 
+/**
+ * 명시 로그아웃 시(M2-SESSION-SNAPSHOT NOW-42): `CURRENT_PROJECT_KEY` 제거 + 열린 프로젝트·노드 비움.
+ * 재로그인 시 `loadProjectsFromLocalStorage`는 목록만 채우고 자동 `selectProject`가 되지 않음(빈 캔버스).
+ * 브라우저 **새로고침**(로그인 유지)에서는 키가 남아 있으면 기존처럼 복원된다.
+ */
+export function clearSessionProjectSelectionForLogout(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(CURRENT_PROJECT_KEY);
+  } catch {
+    /* ignore */
+  }
+  currentProject.set(null);
+  nodes.set([]);
+  activeView.set('tree');
+}
+
 // 프로젝트 선택 (노드를 먼저 반영한 뒤 currentProject를 설정 — 파일럿 브리지 구독 순서)
 export function selectProject(project: Project | null) {
   if (!project) {
@@ -259,7 +276,7 @@ export function selectProject(project: Project | null) {
     if (arr.length > 0) {
       nodes.set(arr);
     } else {
-      const rootNode = makeRootNode(project);
+      const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project));
       const nodeList = [rootNode];
       nodes.set(nodeList);
       localStorage.setItem(NODES_KEY_PREFIX + project.id, JSON.stringify(nodeList));
@@ -267,7 +284,7 @@ export function selectProject(project: Project | null) {
     }
   } catch (e) {
     console.error('Failed to load nodes:', e);
-    const rootNode = makeRootNode(project);
+    const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project));
     nodes.set([rootNode]);
   }
 
@@ -291,7 +308,7 @@ export function createProject(projectData: Omit<Project, 'id' | 'created_at' | '
     updated_at: new Date().toISOString()
   };
 
-  const rootNode = makeRootNode(newProject);
+  const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(newProject));
 
   projects.update((p) => {
     const updated = [...p, newProject];
@@ -522,6 +539,35 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
   touchProjectUpdatedAt(projectId);
 }
 
+/**
+ * NOW-44 워크스페이스 되돌리기: 스냅샷 노드 배열로 교체(현재 열린 프로젝트 id 일치 시만).
+ * 파일럿 갱신은 `nodes` 스토어 구독이 처리한다.
+ */
+export function replaceProjectNodesFromHistory(projectId: string, list: Node[]): boolean {
+  if (typeof window === 'undefined') return false;
+  const cur = get(currentProject);
+  if (!cur || cur.id !== projectId || !Array.isArray(list)) return false;
+
+  const prevSnap = get(nodes);
+  const prevSameProject =
+    prevSnap.length === 0 || prevSnap.every((n) => (n.project_id ?? projectId) === projectId);
+  const prevIds = new Set(prevSnap.map((n) => n.id));
+  const nextIds = new Set(list.map((n) => n.id));
+  const removed = prevSameProject ? [...prevIds].filter((id) => !nextIds.has(id)) : [];
+  if (removed.length) {
+    registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
+  }
+
+  try {
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
+  } catch {
+    return false;
+  }
+  nodes.set(list);
+  touchProjectUpdatedAt(projectId);
+  return true;
+}
+
 // 노드 추가 (호출자가 id를 넘기면 유지)
 export function addNode(nodeData: Omit<Node, 'created_at' | 'updated_at'> & { id?: string }) {
   if (typeof window === 'undefined') return null;
@@ -699,6 +745,92 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
     }
   }
   return { projects: [...plist], nodesByProject };
+}
+
+/** 로그아웃 직전 1회 스냅(M2-SESSION-SNAPSHOT NOW-41): `gatherWorkspaceBundle` + 선택 AI 탭 텍스트. 클라우드 upsert와 별도 `localStorage` 단일 키. */
+export const LOGOUT_SESSION_SNAPSHOT_KEY = 'plannode_logout_bundle_snapshot_v1';
+const LOGOUT_AI_TEXT_MAX = 80_000;
+
+export type LogoutSessionSnapshotV1 = {
+  v: 1;
+  at: string;
+  current_project_id: string | null;
+  /** F2-5: 세션 `#ai-result` 본문 스냅(비-SSoT·GATE B) */
+  ai_result_text?: string;
+  bundle: WorkspaceBundle;
+};
+
+/**
+ * PRD 초안·명세·IA는 번들 내 프로젝트/노드에 이미 포함된다(`prd_section_drafts`, 노드 필드, `metadata.iaGrid`).
+ */
+export function captureLogoutSessionSnapshot(opts?: { aiResultText?: string | null }): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const bundle = gatherWorkspaceBundle();
+    const rawAi = opts?.aiResultText;
+    const aiTrim = rawAi != null && String(rawAi).trim() ? String(rawAi).trim().slice(0, LOGOUT_AI_TEXT_MAX) : undefined;
+    const snap: LogoutSessionSnapshotV1 = {
+      v: 1,
+      at: new Date().toISOString(),
+      current_project_id: get(currentProject)?.id ?? null,
+      ai_result_text: aiTrim,
+      bundle
+    };
+    localStorage.setItem(LOGOUT_SESSION_SNAPSHOT_KEY, JSON.stringify(snap));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** NOW-43: 파싱된 로그아웃 세션 스냅 또는 null */
+export function readLogoutSessionSnapshotV1(): LogoutSessionSnapshotV1 | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOGOUT_SESSION_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw) as Partial<LogoutSessionSnapshotV1>;
+    if (j?.v !== 1 || !j.bundle || !Array.isArray(j.bundle.projects)) return null;
+    const nbp = j.bundle.nodesByProject;
+    if (!nbp || typeof nbp !== 'object' || Array.isArray(nbp)) return null;
+    return j as LogoutSessionSnapshotV1;
+  } catch {
+    return null;
+  }
+}
+
+/** NOW-43: 불러오기 합의 완료 후 재표시 방지 */
+export function clearLogoutSessionSnapshot(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(LOGOUT_SESSION_SNAPSHOT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function extractProjectSliceFromBundle(
+  bundle: WorkspaceBundle,
+  projectId: string
+): { project: Project | null; nodes: Node[] } {
+  const project = bundle.projects.find((p) => p.id === projectId) ?? null;
+  const raw = bundle.nodesByProject[projectId];
+  return { project, nodes: Array.isArray(raw) ? raw : [] };
+}
+
+/** NOW-43: 로그아웃 스냅에 담긴 프로젝트 슬라이스를 로컬에 적용 후 클라우드 푸시 대기 가능 */
+export function applyLogoutSnapshotProjectToLocal(
+  snapshot: LogoutSessionSnapshotV1,
+  projectId: string,
+  fallbackMeta: Project
+): void {
+  const { project: metaFromBundle, nodes } = extractProjectSliceFromBundle(snapshot.bundle, projectId);
+  const meta = metaFromBundle ?? fallbackMeta;
+  upsertImportedPlannodeTreeV1(meta, nodes, {
+    openAfter: false,
+    markDirty: true,
+    preserveRemoteUpdatedAt: true
+  });
 }
 
 /** 클라우드에서 받은 묶음으로 로컬·스토어 전면 교체 (현재 선택 해제) */
