@@ -204,8 +204,9 @@ function layoutOriginX() {
   }
   return 28;
 }
-/** 노드맵 배치 선호 — `nodes` SSoT 아님 · localStorage 키 plan-output P-4.5 */
-const NODE_MAP_LAYOUT_LS = 'plannode.nodeMapLayout';
+/** 노드맵 배치 선호 — `nodes` SSoT 아님 · 프로젝트 id별 `NODE_MAP_LAYOUT_MAP_LS`(레거시 전역 키는 1회 마이그레이션) */
+const NODE_MAP_LAYOUT_LS_LEGACY = 'plannode.nodeMapLayout';
+const NODE_MAP_LAYOUT_MAP_LS = 'plannode.nodeMapLayout.v1';
 
 let R_, CW, CV, EG, SG, CTX, PM, ES, TST;
 let scale = 0.85,
@@ -265,21 +266,25 @@ let getAccessToken = null;
 let getPlanProjectId = null;
 let persistTimer = null;
 
-/** 실행 취소(Undo): 노드 전체 스냅샷 스택 (최근 작업만 복원) */
+/** Undo·Redo: 노드 전체 스냅샷 스택. 각 스택 최대 UNDO_MAX개(메모리 한도) — 연속 Undo/Redo는 이 길이를 넘기지 않음 */
 const UNDO_MAX = 40;
 let undoStack = [];
+/** Undo 직후 되돌린 상태를 다시 적용하기 위한 스택 (최대 길이 UNDO_MAX) */
+let redoStack = [];
 let applyingUndo = false;
 /** addChild 직후 첫 showEdit「저장」은 addChild에서 이미 undo 스냅을 쌓았으므로 중복 push 방지 */
 const skipFirstEditSaveUndo = new Set();
 
 function clearUndoStack() {
   undoStack = [];
+  redoStack = [];
   skipFirstEditSaveUndo.clear();
 }
 
 function pushUndoSnapshot() {
   if (syncing || applyingUndo || !curP) return;
   try {
+    redoStack = [];
     undoStack.push({ nodes: JSON.parse(JSON.stringify(nodes)), nc });
     if (undoStack.length > UNDO_MAX) undoStack.shift();
   } catch (_) {}
@@ -293,6 +298,10 @@ function undoLast() {
   const snap = undoStack.pop();
   applyingUndo = true;
   try {
+    try {
+      redoStack.push({ nodes: JSON.parse(JSON.stringify(nodes)), nc });
+      if (redoStack.length > UNDO_MAX) redoStack.shift();
+    } catch (_) {}
     nodes = JSON.parse(JSON.stringify(snap.nodes));
     nc = snap.nc;
     syncNcFromNodes();
@@ -303,8 +312,39 @@ function undoLast() {
     clearRelinkHold();
     render();
     toast('실행 취소 ✓');
+    schedulePersist();
   } catch (_) {
     toast('되돌리기 실패');
+  } finally {
+    applyingUndo = false;
+  }
+}
+
+function redoLast() {
+  if (syncing || applyingUndo || !curP || !redoStack.length) {
+    if (!syncing && !applyingUndo) toast('다시 실행할 작업이 없어');
+    return;
+  }
+  const snap = redoStack.pop();
+  applyingUndo = true;
+  try {
+    try {
+      undoStack.push({ nodes: JSON.parse(JSON.stringify(nodes)), nc });
+      if (undoStack.length > UNDO_MAX) undoStack.shift();
+    } catch (_) {}
+    nodes = JSON.parse(JSON.stringify(snap.nodes));
+    nc = snap.nc;
+    syncNcFromNodes();
+    if (selId && !find(selId)) selId = null;
+    multiSel.clear();
+    selectionBox = null;
+    clearRelinkArm();
+    clearRelinkHold();
+    render();
+    toast('다시 실행 ✓');
+    schedulePersist();
+  } catch (_) {
+    toast('다시 실행 실패');
   } finally {
     applyingUndo = false;
   }
@@ -1683,23 +1723,83 @@ function bld(nid, col, r) {
   return row;
 }
 
-function loadNodeMapLayoutPreference() {
+function readLayoutMap() {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(NODE_MAP_LAYOUT_MAP_LS);
+    if (!raw) return {};
+    const o = JSON.parse(raw);
+    if (typeof o !== 'object' || o === null || Array.isArray(o)) return {};
+    return o;
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeLayoutMap(map) {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(NODE_MAP_LAYOUT_MAP_LS, JSON.stringify(map));
+    }
+  } catch (_) {}
+}
+
+let legacyLayoutMigrated = false;
+function migrateLegacyLayoutIfNeeded() {
   if (typeof localStorage === 'undefined') return;
+  if (legacyLayoutMigrated) return;
+  legacyLayoutMigrated = true;
   try {
-    const v = localStorage.getItem(NODE_MAP_LAYOUT_LS);
-    if (v === 'topdown' || v === 'right') nodeMapLayoutMode = v;
+    const leg = localStorage.getItem(NODE_MAP_LAYOUT_LS_LEGACY);
+    if (leg !== 'topdown' && leg !== 'right') return;
+    const raw = localStorage.getItem('plannode_projects_v3');
+    if (!raw) {
+      localStorage.removeItem(NODE_MAP_LAYOUT_LS_LEGACY);
+      return;
+    }
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || !arr.length) {
+      localStorage.removeItem(NODE_MAP_LAYOUT_LS_LEGACY);
+      return;
+    }
+    const map = readLayoutMap();
+    for (const p of arr) {
+      if (p && typeof p.id === 'string' && map[p.id] == null) map[p.id] = leg;
+    }
+    writeLayoutMap(map);
+    localStorage.removeItem(NODE_MAP_LAYOUT_LS_LEGACY);
   } catch (_) {}
 }
-function saveNodeMapLayoutPreference() {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(NODE_MAP_LAYOUT_LS, nodeMapLayoutMode);
-  } catch (_) {}
-}
+
 function dispatchNodeMapLayoutEvent() {
   try {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('plannode-node-map-layout', { detail: { mode: nodeMapLayoutMode } }));
     }
+  } catch (_) {}
+}
+
+/** 현재 열 프로젝트 id 기준으로 배치 모드 복원 · 프로젝트 전환 시 hydrate/openProj에서 호출 */
+function loadNodeMapLayoutForProject(projectId) {
+  if (!projectId) return;
+  migrateLegacyLayoutIfNeeded();
+  const map = readLayoutMap();
+  const v = map[projectId];
+  if (v === 'topdown' || v === 'right') {
+    nodeMapLayoutMode = v;
+  } else {
+    nodeMapLayoutMode = 'right';
+  }
+  dispatchNodeMapLayoutEvent();
+}
+
+function saveNodeMapLayoutPreference() {
+  try {
+    if (typeof localStorage === 'undefined' || !curP?.id) return;
+    migrateLegacyLayoutIfNeeded();
+    const map = readLayoutMap();
+    map[curP.id] = nodeMapLayoutMode;
+    writeLayoutMap(map);
   } catch (_) {}
 }
 function applyNodeMapLayout(mode) {
@@ -2301,6 +2401,14 @@ function showEdit(n) {
             .slice(0, 10);
           target.num = numIn || defaultNumForNode(target);
           applyBadgeSetToNode(target, working);
+          const san = sanitizeNodeBadgesForTreeV1({
+            badges: target.badges ?? [],
+            metadata: target.metadata,
+            name: target.name,
+            description: target.description
+          });
+          target.badges = san.badges;
+          target.metadata = san.metadata !== undefined ? san.metadata : {};
           nodes = [...nodes];
           render();
           toast('저장됨(이 기기) · 클라우드 자동 반영');
@@ -2730,6 +2838,7 @@ function getDemoNodes(pid) {
 
 function openProj(p, delegateProjectModal) {
   curP = p;
+  loadNodeMapLayoutForProject(p.id);
   clearUndoStack();
   if (!delegateProjectModal && PM) PM.style.display = 'none';
   const pnt = document.getElementById('PNT');
@@ -2809,7 +2918,7 @@ export function initPlannode(opts = {}) {
     return null;
   }
 
-  loadNodeMapLayoutPreference();
+  migrateLegacyLayoutIfNeeded();
 
   if (CTX) {
     CTX.addEventListener('click', onCtxClick);
@@ -2906,6 +3015,14 @@ export function initPlannode(opts = {}) {
     }
     undoLast();
   });
+  const bre = document.getElementById('BRE');
+  wireBtn(bre, () => {
+    if (!curP) {
+      toast('프로젝트를 먼저 선택해줘');
+      return;
+    }
+    redoLast();
+  });
   const onGlobalKeyDown = (e) => {
     if (e.key === 'Escape' && (relinkArm || relinkDragActive)) {
       const t = e.target;
@@ -2917,17 +3034,34 @@ export function initPlannode(opts = {}) {
       toast('노드 붙이기 취소');
       return;
     }
-    /** Win Ctrl+Z / Mac ⌘Z — 코드 레이아웃 호환(KeyZ), IME·일부 브라우저 대비 */
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+    /** 다시 실행: Ctrl+Shift+Z / ⌘⇧Z 또는 Ctrl+Y / ⌘Y */
     const isZ =
       e.code === 'KeyZ' ||
       String(e.key || '')
         .toLowerCase()
         .trim() === 'z';
+    const isY =
+      e.code === 'KeyY' ||
+      String(e.key || '')
+        .toLowerCase()
+        .trim() === 'y';
+    const redoChordShiftZ = isZ && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey;
+    const redoChordY = isY && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
+    if (redoChordShiftZ || redoChordY) {
+      if (!curP) return;
+      e.preventDefault();
+      e.stopPropagation();
+      redoLast();
+      return;
+    }
+
+    /** Win Ctrl+Z / Mac ⌘Z — 코드 레이아웃 호환(KeyZ), IME·일부 브라우저 대비 */
     const undoChord =
       isZ && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
     if (!undoChord) return;
-    const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (!curP) return;
     e.preventDefault();
     e.stopPropagation();
@@ -3274,6 +3408,7 @@ export function initPlannode(opts = {}) {
         const prevPid = curP?.id ?? null;
         const projectChanged = prevPid !== project.id;
         curP = project;
+        loadNodeMapLayoutForProject(project.id);
         if (pilotNodes?.length) {
           nodes = pilotNodes.map((n) => ({
             ...n,
