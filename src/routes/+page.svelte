@@ -428,9 +428,12 @@
   /**
    * 모달 프로젝트 목록: null = ACL 필터 미적용(로컬 전부 표시) · 배열 = `canAccessProject` 통과한 것만
    * 클라우드 설정 시(+ 로그인) 목록 행은 서버 **`plannode_workspace.projects_json`** 정본을 우선하고 로컬 전용 id만 뒤에 붙인다(NOW-70~72).
+   * 동기화 중에는 이전 배열을 유지(stale-while-revalidate) — `[]`로 비우면 목록이 잠깐 사라져 보인다.
    */
   let projectsForModal: Project[] | null = null;
   let modalProjectListToken = 0;
+  /** 모달 목록을 마지막으로 채운 계정 — 바뀌면 한 번 `null`로 두어 이전 사용자 목록이 남지 않게 함 */
+  let projectsForModalAuthUid: string | null = null;
 
   async function syncProjectsForModalList() {
     const token = ++modalProjectListToken;
@@ -439,6 +442,7 @@
     if (!isAclEnforced()) {
       if (token !== modalProjectListToken) return;
       projectsForModal = null;
+      projectsForModalAuthUid = null;
       return;
     }
     const uid = getAuthUserId();
@@ -446,11 +450,15 @@
     if (!uid || !em) {
       if (token !== modalProjectListToken) return;
       projectsForModal = null;
+      projectsForModalAuthUid = null;
       return;
     }
 
     if (token !== modalProjectListToken) return;
-    projectsForModal = [];
+    if (projectsForModalAuthUid !== uid) {
+      projectsForModal = null;
+      projectsForModalAuthUid = uid;
+    }
 
     const plist = get(projects);
     let mergedList: Project[];
@@ -1320,8 +1328,13 @@
       if (r.ok) {
         showPilotToast(r.message);
         await loadAclInvitesForModal();
-        await tick();
-        requestAnimationFrame(() => showProjectModal.set(false));
+        const latest = get(projects).find((p) => p.id === inv.project_id);
+        if (latest) {
+          await finalizeProjectOpen(latest);
+        } else {
+          await tick();
+          requestAnimationFrame(() => showProjectModal.set(false));
+        }
         return;
       }
       if (r.sliceMissing) {
@@ -1588,10 +1601,15 @@
           if (presenceProjectId !== atSubscribe) return;
           const emails = rows.map((r) => r.email).filter(Boolean);
           const proj = get(currentProject);
+          if (!proj || proj.id !== atSubscribe) return;
+          const ownerOk = await isCurrentUserProjectOwner(proj);
+          if (presenceProjectId !== atSubscribe) return;
           const wsSrc = proj?.cloud_workspace_source_user_id ?? null;
           /** 멤버 ACL 조회에 소유자 이메일이 없을 때도 Presence에 소유자 uid 표시 */
           const presenceAlwaysShow = wsSrc && wsSrc !== uid ? [wsSrc] : [];
-          await subscribeProjectPresence(atSubscribe, uid, email, emails, presenceAlwaysShow);
+          /** 소유자: 필터 없음(모든 온라인 피어 표시, RLS로 이미 격리) · 공유자: ACL 이메일만(ACL 조회 실패 시에도 빈 배열 → Realtime 피어는 유지) */
+          const presenceAllowedEmails = ownerOk ? [] : emails;
+          await subscribeProjectPresence(atSubscribe, uid, email, presenceAllowedEmails, presenceAlwaysShow);
         })();
       }
     } else if (presenceProjectId !== '') {
@@ -1631,8 +1649,16 @@
   }
 
   onMount(() => {
+    /** mountPilotBridge 안에서 동기 hydrate → render → maybeEmitNodeSelect 가 먼저 나갈 수 있음 — 리스너를 먼저 둔다 */
+    const onNodeSelectPresence = (ev: Event) => {
+      const d = (ev as CustomEvent<{ nodeId?: string | null }>).detail;
+      updateMySelectedNode(d?.nodeId ?? null);
+    };
+    window.addEventListener('plannode-node-select', onNodeSelectPresence);
+
     const { destroy } = mountPilotBridge();
     pilotReady = true;
+
     pilotSetActiveView($activeView);
     nodeMapLayoutDefaultForCreate = readNodeMapLayoutCreateDefault();
 
@@ -1679,12 +1705,6 @@
       }
     };
     window.addEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
-
-    const onNodeSelectPresence = (ev: Event) => {
-      const d = (ev as CustomEvent<{ nodeId?: string | null }>).detail;
-      updateMySelectedNode(d?.nodeId ?? null);
-    };
-    window.addEventListener('plannode-node-select', onNodeSelectPresence);
 
     const onPilotToast = (ev: Event) => {
       const msg = (ev as CustomEvent<{ message?: string }>).detail?.message;

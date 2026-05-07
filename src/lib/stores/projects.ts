@@ -212,30 +212,12 @@ export function loadProjectsFromLocalStorage() {
     console.error('Failed to load projects:', e);
     projects.set([]);
   }
-
-  // 현재 열린 프로젝트 복원
-  try {
-    const currentStored = localStorage.getItem(CURRENT_PROJECT_KEY);
-    if (currentStored) {
-      const currentProj = JSON.parse(currentStored) as Project | null;
-      if (currentProj) {
-        // 프로젝트가 여전히 목록에 있는지 확인
-        const plist = get(projects);
-        const exists = plist.some((p) => p.id === currentProj.id);
-        if (exists) {
-          selectProject(currentProj);
-        }
-      }
-    }
-  } catch (e) {
-    console.error('Failed to restore current project:', e);
-  }
 }
 
 /**
  * 명시 로그아웃 시(M2-SESSION-SNAPSHOT NOW-42): `CURRENT_PROJECT_KEY` 제거 + 열린 프로젝트·노드 비움.
- * 재로그인 시 `loadProjectsFromLocalStorage`는 목록만 채우고 자동 `selectProject`가 되지 않음(빈 캔버스).
- * 브라우저 **새로고침**(로그인 유지)에서는 키가 남아 있으면 기존처럼 복원된다.
+ * `loadProjectsFromLocalStorage`는 프로젝트 목록만 채우며, 부트 시 `plannode_current_project_v3`로
+ * 자동 `selectProject` 하지 않는다(로그인·새로고침 모두 빈 캔버스 시작 — 모달에서 명시 선택).
  */
 export function clearSessionProjectSelectionForLogout(): void {
   if (typeof window === 'undefined') return;

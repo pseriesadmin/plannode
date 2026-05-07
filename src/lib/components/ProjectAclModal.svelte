@@ -11,7 +11,7 @@
     repairProjectAclWorkspaceSources,
     type AclRow
   } from '$lib/supabase/projectAcl';
-  import { MAX_SHARED_COLLABORATORS } from '$lib/plannodeCollabLimits';
+  import { MAX_SHARED_COLLABORATORS, MAX_PROJECT_ACCESS_ACCOUNTS } from '$lib/plannodeCollabLimits';
   import { getAuthUserId } from '$lib/stores/authSession';
   import { isAclReloadHelpMessage } from '$lib/supabase/aclErrors';
 
@@ -132,14 +132,23 @@
     {#if canManage && (rows.length > 0 || project.owner_user_id)}
       <div class="add">
         <span class="lb">이메일 등록</span>
-        <p class="cap-hint">멤버(소유자 제외)는 최대 {MAX_SHARED_COLLABORATORS}명까지 등록할 수 있어. 동시에 작업으로 표시되는 다른 계정도 이 범위 안에서만 보여.</p>
+        <p class="cap-hint">소유자를 포함 최대 {MAX_PROJECT_ACCESS_ACCOUNTS}개 계정 공유 가능.</p>
         <div class="row">
-          <input class="in" type="email" placeholder="동료@example.com" bind:value={newEmail} disabled={shareCapReached} />
+          <div class="in-wrap">
+            <input
+              class="in"
+              class:in--capped={shareCapReached}
+              type="email"
+              placeholder="동료@example.com"
+              bind:value={newEmail}
+              disabled={shareCapReached}
+            />
+            {#if shareCapReached}
+              <span class="cap-inline" aria-live="polite">공유계정 제한</span>
+            {/if}
+          </div>
           <button type="button" class="bcr sm" disabled={busy || !newEmail.trim() || shareCapReached} on:click={() => void onAdd()}>추가</button>
         </div>
-        {#if shareCapReached}
-          <p class="cap-warn">멤버 상한({MAX_SHARED_COLLABORATORS}명)에 도달했어. 새로 초대하려면 기존 멤버를 제거해줘.</p>
-        {/if}
       </div>
     {/if}
 
@@ -284,22 +293,39 @@
     color: #666;
     line-height: 1.45;
   }
-  .cap-warn {
-    margin: 8px 0 0;
-    font-size: 11px;
-    color: #b45309;
-    line-height: 1.45;
-  }
   .row {
     display: flex;
     gap: 8px;
+    align-items: stretch;
+  }
+  .in-wrap {
+    position: relative;
+    flex: 1;
+    min-width: 0;
   }
   .in {
-    flex: 1;
+    width: 100%;
+    box-sizing: border-box;
     padding: 8px 10px;
     border-radius: 8px;
     border: 1px solid #ccc;
     font-size: 13px;
+  }
+  .in.in--capped {
+    padding-right: 100px;
+    border-color: #fcd34d;
+    background: #fffbeb;
+  }
+  .cap-inline {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 11px;
+    font-weight: 700;
+    color: #b45309;
+    pointer-events: none;
+    white-space: nowrap;
   }
   .bcr {
     padding: 10px 14px;

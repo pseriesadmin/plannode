@@ -2387,6 +2387,7 @@ function addChild(pid) {
   };
   nodes = [...nodes, nn];
   skipFirstEditSaveUndo.add(nn.id);
+  selId = nn.id;
   render();
   // 모달을 즉시 표시 (RAF 이중 호출 제거)
   setTimeout(() => showEdit(nn), 50);
@@ -2985,6 +2986,13 @@ export function initPlannode(opts = {}) {
   };
   window.addEventListener('plannode-presence-update', onPresencePeersCanvasUpdate);
   disposers.push(() => window.removeEventListener('plannode-presence-update', onPresencePeersCanvasUpdate));
+
+  const onPresenceSubscribed = () => {
+    lastEmittedSelIdForPresence = undefined;
+    maybeEmitNodeSelect();
+  };
+  window.addEventListener('plannode-presence-subscribed', onPresenceSubscribed);
+  disposers.push(() => window.removeEventListener('plannode-presence-subscribed', onPresenceSubscribed));
 
   const vSpec = document.getElementById('V-SPEC');
   if (vSpec) {
