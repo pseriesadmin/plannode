@@ -21,6 +21,7 @@ import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
 import { PLANNODETREE_EXPORT_ROOT_VERSION } from '$lib/plannodeTreeV1';
+import { slugExportName } from '$lib/ai/iaGridCsvExport';
 import {
   unionNodeBoundsAndViewport,
   computeMinimapViewBox,
@@ -1630,18 +1631,6 @@ function dlFile(c, t, f) {
   }
 }
 
-/** 다운로드 파일명용 (OS 금지 문자 제거) */
-function slugExportName(name) {
-  const s = String(name || 'plannode')
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
-  return s || 'plannode';
-}
-
 /** Svelte 측 하이브리드 클라우드 자동 저장 트리거 */
 function emitAutoCloudSync(reason) {
   try {
@@ -3146,6 +3135,7 @@ export function initPlannode(opts = {}) {
     }
     const slug = slugExportName(curP.name);
     const md = `# ${curP.name} — Feature Map\n작성자: ${curP.author} | 기간: ${curP.start_date} ~ ${curP.end_date}\n\n---\n\n${nodes.filter((n) => !n.parent_id).flatMap((r) => toMdLine(r)).join('\n')}`;
+    /* PRD M4 F4-1 Feature Map MD */
     dlFile(md, 'text/markdown;charset=utf-8', `${slug}-feature-map.md`);
     toast('MD 다운로드 완료 ✓');
     emitAutoCloudSync('md-export');
@@ -3157,7 +3147,8 @@ export function initPlannode(opts = {}) {
     }
     const slug = slugExportName(curP.name);
     const prd = buildPrdMarkdownMerged(curP, nodes, curP.prd_section_drafts);
-    dlFile(prd, 'text/markdown;charset=utf-8', `${slug}-prd-v20.md`);
+    /* PRD M4 F4-2 PRD 본문(v2.0 구조) — 파일명은 슬러그-prd.md */
+    dlFile(prd, 'text/markdown;charset=utf-8', `${slug}-prd.md`);
     toast('PRD 다운로드 완료 ✓');
     emitAutoCloudSync('prd-export');
   });

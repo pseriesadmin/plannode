@@ -104,6 +104,7 @@
   } from '$lib/pilot/pilotBridge';
   import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
   import type { IAExportIntent } from '$lib/ai/iaExportRunner';
+  import { slugExportName } from '$lib/ai/iaGridCsvExport';
   import type { PageData } from './$types';
   import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
   import { plannodeUpdateLogNewestFirst } from '$lib/plannodeUpdateLog';
@@ -632,11 +633,23 @@
     tree: '노드',
     prd: 'PRD',
     spec: '기능명세',
-    ia: 'IA(정보구조)',
-    ai: 'AI 분석'
+    ia: '정보 구조(IA)',
+    ai: 'AI 분석(LLM)'
+  };
+
+  /** PRD §5 · F2-4 vs F2-5 — 짧은 라벨은 위, 긴 설명은 title(툴팁) */
+  const VIEW_MENU_TITLES: Record<'tree' | 'prd' | 'spec' | 'ia' | 'ai', string> = {
+    tree: '노드 트리 캔버스에서 편집 (F2-1)',
+    prd: 'PRD 문서 보기 (F2-2)',
+    spec: '기능명세 그리드 보기 (F2-3)',
+    ia: '정보 구조(Information Architecture) — 트리에서 도출하는 문서·보내기 (F2-4, LLM과 구분)',
+    ai: 'LLM으로 기획문서·분석 보조 (F2-5) — IA 탭과 별도'
   };
 
   $: viewMenuLabel = VIEW_MENU_LABELS[$activeView];
+
+  /** PRD M4 —보내기 메뉴 툴팁용 (파일럿 저장 파일명과 동일 슬러그) */
+  $: outputFileSlug = $currentProject?.name ? slugExportName($currentProject.name) : '';
 
   function closeViewMenu() {
     showViewMenu = false;
@@ -1858,7 +1871,7 @@
               class="tb-view-btn"
               aria-haspopup="menu"
               aria-expanded={showViewMenu}
-              title="화면 전환"
+              title="화면 전환 — 정보 구조(IA)와 AI 분석(LLM)은 역할이 다릅니다"
               on:click={() => {
                 const next = !showViewMenu;
                 showViewMenu = next;
@@ -1878,31 +1891,36 @@
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'tree'}
+                  title={VIEW_MENU_TITLES.tree}
                   on:click={() => pickView('tree')}>노드</button>
                 <button
                   type="button"
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'prd'}
+                  title={VIEW_MENU_TITLES.prd}
                   on:click={() => pickView('prd')}>PRD</button>
                 <button
                   type="button"
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'spec'}
+                  title={VIEW_MENU_TITLES.spec}
                   on:click={() => pickView('spec')}>기능명세</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-view-menu-item"
                 class:tb-view-menu-item--on={$activeView === 'ia'}
-                on:click={() => pickView('ia')}>IA(정보구조)</button>
+                title={VIEW_MENU_TITLES.ia}
+                on:click={() => pickView('ia')}>정보 구조(IA)</button>
                 <button
                   type="button"
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'ai'}
-                  on:click={() => pickView('ai')}>AI 분석</button>
+                  title={VIEW_MENU_TITLES.ai}
+                  on:click={() => pickView('ai')}>AI 분석(LLM)</button>
               </div>
             {/if}
           </div>
@@ -1958,7 +1976,7 @@
             class="tb-output-btn"
             aria-haspopup="menu"
             aria-expanded={showOutputMenu}
-            title="마크다운·PRD·JSON 보내기"
+            title="기능 맵·PRD·JSON 보내기 + IA/와이어 초안으로 이동"
             on:click={() => {
               const next = !showOutputMenu;
               showOutputMenu = next;
@@ -1977,26 +1995,42 @@
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
-                title="기능 맵 마크다운 파일로 저장"
+                title={outputFileSlug
+                  ? `기능 맵 마크다운 — 저장: ${outputFileSlug}-feature-map.md (PRD F4-1)`
+                  : '기능 맵 마크다운 파일로 저장'}
                 on:click={() => triggerPilotOutput('BMD')}>MD</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item tb-output-menu-item--prd"
-                title="PRD 표준 가이드 v2.0 구조 마크다운으로 저장"
+                title={outputFileSlug
+                  ? `PRD v2.0 구조 마크다운 — 저장: ${outputFileSlug}-prd.md (PRD F4-2)`
+                  : 'PRD 표준 가이드 v2.0 구조 마크다운으로 저장'}
                 on:click={() => triggerPilotOutput('BPR')}>PRD</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
-                title="노드 트리 JSON (백업·재가져오기용)"
+                title={outputFileSlug
+                  ? `plannode.tree v1 JSON — 저장: ${outputFileSlug}-plannode-tree.json`
+                  : '노드 트리 JSON (백업·재가져오기용)'}
                 on:click={() => triggerPilotOutput('BJN')}>JSON</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
-                title="화면 구조를 마크다운 파일로 저장 (와이어프레임)"
-                on:click={() => goIaFromOutput('SCREEN_LIST')}>와이어프레임</button>
+                title={outputFileSlug
+                  ? `IA 탭으로 이동 후 초안 실행 — 저장 시 권장: ${outputFileSlug}-ia.md (PRD F4-3)`
+                  : '정보 구조(IA) 탭으로 이동 후 메뉴·계층 초안 실행 (F2-4)'}
+                on:click={() => goIaFromOutput('IA_STRUCTURE')}>정보 구조(IA)</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="tb-output-menu-item"
+                title={outputFileSlug
+                  ? `IA 탭에서 화면 목록 초안 — 저장 시 권장: ${outputFileSlug}-wireframes.md (PRD F4-4)`
+                  : 'IA 탭에서 화면 목록·와이어 키트 초안 (F2-4·F4-4 방향)'}
+                on:click={() => goIaFromOutput('SCREEN_LIST')}>화면·와이어 목록</button>
             </div>
           {/if}
         </div>
@@ -2327,8 +2361,8 @@
 
       <div class="view" class:active={$activeView === 'ai'} id="V-AI">
         <div class="ai-inner">
-          <div class="ai-title">AI 분석</div>
-          <div class="ai-sub">현재 기능 트리를 분석해서 개발 가이드를 생성해</div>
+          <div class="ai-title">AI 분석(LLM)</div>
+          <div class="ai-sub">현재 기능 트리를 바탕으로 <strong>LLM</strong> 프롬프트·답을 만듭니다. 내비·화면 구조 문서는 <strong>정보 구조(IA)</strong> 탭이에요.</div>
           <div class="ai-impl-hint" aria-live="polite">
             {#if $authLoading}
               <p class="ai-impl-hint__line">로그인 여부 확인 중…</p>
@@ -2352,10 +2386,10 @@
               <div class="ai-btn-title">PRD 완성본 생성</div>
               <div class="ai-btn-desc">기능 트리 → 완전한 PRD 문서</div>
             </button>
-            <button type="button" class="ai-btn" id="ai-wireframe">
+            <button type="button" class="ai-btn" id="ai-wireframe" title="F2-5 LLM — IA 탭의 구조 산출과 별개">
               <div class="ai-btn-icon">🖼</div>
-              <div class="ai-btn-title">와이어프레임 / 화면 설계</div>
-              <div class="ai-btn-desc">UX·화면·컴포넌트 흐름, 구현·시안 작성용 프롬프트</div>
+              <div class="ai-btn-title">와이어·화면 (LLM)</div>
+              <div class="ai-btn-desc">UX·화면 흐름용 프롬프트 — 골격은 트리·IA 탭이 우선이에요</div>
             </button>
             <button type="button" class="ai-btn" id="ai-miss">
               <div class="ai-btn-icon">🔍</div>
