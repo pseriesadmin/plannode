@@ -13,6 +13,13 @@ export type PlannodeUpdateLogEntry = {
 };
 
 export const PLANNODE_UPDATE_LOG: PlannodeUpdateLogEntry[] = [
+  {
+    id: 'collab-share-limit-presence-peers-2026-05-07',
+    at: '2026-05-07',
+    title: '공유 멤버 상한(소유자 포함 5계정)·Presence 아바타·ACL 동기',
+    body:
+      '프로젝트 공유는 소유자를 포함해 최대 5개 계정까지예요. 비소유자 멤버는 최대 4명이며, `plannodeCollabLimits` 상수와 공유계정 설정 모달·`projectAcl` 클라이언트 검사가 같은 기준을 씁니다. 상한에 도달하면 이메일 입력과 「추가」가 비활성되고, 입력란 안에 「공유계정 제한」 안내가 보여요.\n\nSupabase에는 `plannode_project_acl_max_members_v2.sql`로 비소유자 행 수를 insert 전에 막는 트리거를 적용할 수 있어요(운영 DB에는 SQL Editor에서 새 스크립트만 실행).\n\nRealtime Presence에서는 같은 사용자 키에 쌓인 presence 메타 배열을 병합해, 공유자 화면에서 원격 `selected_node_id`가 끝까지 `null`로만 보이던 경우를 줄였어요. 메인 페이지에서 피어를 `window`와 이벤트로 넘기고, 파일럿은 구독 직후 선택을 다시 보내고 `plannode-presence-update` 때 트리를 그려 노드 카드에 아바타가 맞게 붙어요.'
+  },
   /** 하네스 B-0E-R 필드 예: id · at · title … · body (아래) — 가이드 `.cursor/plans/harness-workflow_final.md` B-0E-R */
   {
     id: 'feature-xyz-2026-05-07',
