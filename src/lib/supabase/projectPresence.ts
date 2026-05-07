@@ -7,6 +7,8 @@ import { MAX_CONCURRENT_PRESENCE_OTHERS } from '$lib/plannodeCollabLimits';
 export type ProjectPresencePeer = {
   user_id: string;
   email: string;
+  /** 원격 사용자가 파일럿에서 선택 중인 노드 id (없으면 null) */
+  selected_node_id?: string | null;
 };
 
 export const projectPresencePeers = writable<ProjectPresencePeer[]>([]);
@@ -16,6 +18,9 @@ export const projectPresenceSelectedEmail = writable<string | null>(null);
 
 let channel: RealtimeChannel | null = null;
 let subscribedProjectId: string | null = null;
+let myPresenceUserId = '';
+let myPresenceEmail: string | null = null;
+let mySelectedNodeId: string | null = null;
 
 /** 첫 presence sync는 기존 접속자 전부를 "신규"로 치지 않음 */
 let presenceFirstSync = true;
@@ -24,16 +29,26 @@ let presenceJoinDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function peerFromMeta(raw: unknown): ProjectPresencePeer | null {
   if (!raw || typeof raw !== 'object') return null;
-  const m = raw as { user_id?: string; email?: string };
+  const m = raw as { user_id?: string; email?: string; selected_node_id?: string | null };
   const user_id = String(m.user_id ?? '').trim();
   if (!user_id) return null;
-  return { user_id, email: normalizeAclEmail(String(m.email ?? '')) };
+  const sidRaw = m.selected_node_id;
+  const selected_node_id =
+    sidRaw != null && String(sidRaw).trim() ? String(sidRaw).trim() : null;
+  return {
+    user_id,
+    email: normalizeAclEmail(String(m.email ?? '')),
+    selected_node_id
+  };
 }
 
 export function unsubscribeProjectPresence() {
   projectPresenceSelectedEmail.set(null);
   projectPresencePeers.set([]);
   projectPresencePeersOverflow.set(0);
+  myPresenceUserId = '';
+  myPresenceEmail = null;
+  mySelectedNodeId = null;
   subscribedProjectId = null;
   presenceFirstSync = true;
   presenceLastPeerUserIds = new Set();
@@ -49,6 +64,18 @@ export function unsubscribeProjectPresence() {
 
 export function toggleProjectPresencePeerEmail(email: string) {
   projectPresenceSelectedEmail.update((cur) => (cur === email ? null : email));
+}
+
+/** 파일럿 노드 선택 시 Presence track 갱신 — 트리 뷰 협업 표시용 */
+export function updateMySelectedNode(nodeId: string | null): void {
+  const next = nodeId && String(nodeId).trim() ? String(nodeId).trim() : null;
+  mySelectedNodeId = next;
+  if (!channel) return;
+  void channel.track({
+    user_id: myPresenceUserId,
+    email: normalizeAclEmail(String(myPresenceEmail ?? '')),
+    selected_node_id: mySelectedNodeId
+  });
 }
 
 /**
@@ -70,6 +97,9 @@ export async function subscribeProjectPresence(
 
   unsubscribeProjectPresence();
   subscribedProjectId = projectId;
+  myPresenceUserId = myUserId;
+  myPresenceEmail = myEmail;
+  mySelectedNodeId = null;
 
   const allowedSet =
     allowedEmails.length > 0 ? new Set(allowedEmails.map((e) => normalizeAclEmail(e))) : null;
@@ -131,7 +161,8 @@ export async function subscribeProjectPresence(
     if (status === 'SUBSCRIBED') {
       await ch.track({
         user_id: myUserId,
-        email: normalizeAclEmail(String(myEmail ?? ''))
+        email: normalizeAclEmail(String(myEmail ?? '')),
+        selected_node_id: mySelectedNodeId
       });
     }
   });

@@ -81,7 +81,9 @@
     projectPresencePeers,
     projectPresencePeersOverflow,
     projectPresenceSelectedEmail,
-    toggleProjectPresencePeerEmail
+    toggleProjectPresencePeerEmail,
+    updateMySelectedNode,
+    type ProjectPresencePeer
   } from '$lib/supabase/projectPresence';
   import { getAuthUserId, getAuthEmail, signOutEverywhere, authUser, authLoading, authSession } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
@@ -549,6 +551,23 @@
       t.style.display = 'none';
       pilotToastTimer = undefined;
     }, 2800);
+  }
+
+  /** plan-output P-3·B: 포커스·가시성으로 양방향 동기가 돌 수 있음을 세션당 1회 안내(GP-12 최소). */
+  const SYNC_FOCUS_HINT_SS_KEY = 'plannode_sync_focus_hint_v1';
+
+  function maybeShowCloudSyncFocusHint(): void {
+    if (!cloudSyncAvailable) return;
+    try {
+      if (sessionStorage.getItem(SYNC_FOCUS_HINT_SS_KEY)) return;
+      sessionStorage.setItem(SYNC_FOCUS_HINT_SS_KEY, '1');
+    } catch {
+      return;
+    }
+    showPilotToast('다른 창·탭으로 갔다가 돌아오면 클라우드 동기를 다시 불러와요.');
+    if (import.meta.env.DEV) {
+      console.debug('[Plannode] Cloud sync runs on tab/window return or timer (P-3·B).');
+    }
   }
 
   function triggerJsonImport() {
@@ -1575,6 +1594,14 @@
     return /[a-zA-Z가-힣0-9]/.test(ch) ? ch.toUpperCase() : '?';
   }
 
+  /** 파일럿 노드 카드 오버레이 — `plannodePilot.render`가 읽음
+   *  pilotReady 가드: 파일럿 리스너가 등록된 이후에만 이벤트 발행 */
+  $: if (pilotReady && typeof window !== 'undefined') {
+    (window as Window & { __plannodePresencePeers?: ProjectPresencePeer[] }).__plannodePresencePeers =
+      $projectPresencePeers;
+    window.dispatchEvent(new CustomEvent('plannode-presence-update'));
+  }
+
   async function handleLogout() {
     let aiPeek = '';
     try {
@@ -1640,19 +1667,40 @@
     };
     window.addEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
 
+    const onNodeSelectPresence = (ev: Event) => {
+      const d = (ev as CustomEvent<{ nodeId?: string | null }>).detail;
+      updateMySelectedNode(d?.nodeId ?? null);
+    };
+    window.addEventListener('plannode-node-select', onNodeSelectPresence);
+
     const onPilotToast = (ev: Event) => {
       const msg = (ev as CustomEvent<{ message?: string }>).detail?.message;
       if (msg) showPilotToast(msg);
     };
     window.addEventListener('plannode-pilot-toast', onPilotToast);
 
+    let sawHiddenSinceMount = false;
+    let sawWindowBlurSinceMount = false;
+
     const onVis = () => {
       if (document.visibilityState === 'hidden') {
+        sawHiddenSinceMount = true;
         if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
         void flushCloudWorkspaceNow('visibility-hidden');
+      } else if (document.visibilityState === 'visible' && sawHiddenSinceMount) {
+        maybeShowCloudSyncFocusHint();
       }
     };
     document.addEventListener('visibilitychange', onVis);
+
+    const onWinBlur = () => {
+      sawWindowBlurSinceMount = true;
+    };
+    const onWinFocus = () => {
+      if (sawWindowBlurSinceMount) maybeShowCloudSyncFocusHint();
+    };
+    window.addEventListener('blur', onWinBlur);
+    window.addEventListener('focus', onWinFocus);
 
     const onPageHide = () => {
       if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
@@ -1678,8 +1726,11 @@
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
       window.removeEventListener('plannode-modal-project-list-sync', onModalListSync);
       window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
+      window.removeEventListener('plannode-node-select', onNodeSelectPresence);
       window.removeEventListener('plannode-pilot-toast', onPilotToast);
       document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('blur', onWinBlur);
+      window.removeEventListener('focus', onWinFocus);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('beforeunload', onBeforeUnload);
       pilotReady = false;

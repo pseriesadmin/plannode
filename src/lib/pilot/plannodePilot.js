@@ -838,6 +838,7 @@ function armRelinkCard(n) {
   clearRelinkHold();
   relinkArm = { mode: 'single', nodeIds: [n.id] };
   selId = n.id;
+  maybeEmitNodeSelect();
   relinkSuppressClick = true;
   setTimeout(() => {
     relinkSuppressClick = false;
@@ -860,6 +861,7 @@ function armRelinkChildrenGroup(anchorId) {
   clearRelinkHold();
   relinkArm = { mode: 'children', anchorId };
   selId = anchorId;
+  maybeEmitNodeSelect();
   toast('하위 노드만 이동 — 앵커는 그대로, 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소', {
     persistRelink: true
   });
@@ -912,7 +914,7 @@ function applyRelinkDrop(newParentId) {
   }
   clearRelinkArm();
   render();
-  schedulePersist();
+  flushPersistNow();
   emitAutoCloudSync('node-relink');
   toast('노드 연결을 바꿨어 · 순서·분류번호 자동 반영됨');
 }
@@ -1887,6 +1889,36 @@ function nodeTopdownPlusCenterY(n) {
   return nodeBottomY(n) + (TOPDOWN_PB2_BELOW_NW - TOPDOWN_PB2_H / 2);
 }
 
+/** @type {string | null | undefined} */
+let lastEmittedSelIdForPresence;
+
+function getPresencePeersForPilot() {
+  try {
+    if (typeof window === 'undefined') return [];
+    const raw = window.__plannodePresencePeers;
+    return Array.isArray(raw) ? raw : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function presenceAvatarLetter(email) {
+  const e = String(email ?? '').trim();
+  if (!e) return '?';
+  const ch = e[0];
+  return /[a-zA-Z가-힣0-9]/.test(ch) ? ch.toUpperCase() : '?';
+}
+
+function maybeEmitNodeSelect() {
+  if (lastEmittedSelIdForPresence === selId) return;
+  lastEmittedSelIdForPresence = selId;
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('plannode-node-select', { detail: { nodeId: selId } }));
+    }
+  } catch (_) {}
+}
+
 function render() {
   clearSmartGuides();
   lm = {};
@@ -1957,14 +1989,28 @@ function render() {
     w.className = 'nw';
     w.id = 'nw-' + n.id;
     w.style.cssText = `left:${pos.x}px;top:${pos.y}px`;
+    const peersPresence = getPresencePeersForPilot();
+    let presenceConflict = false;
+    for (let pi = 0; pi < peersPresence.length; pi++) {
+      const pr = peersPresence[pi];
+      const sid = pr && pr.selected_node_id ? String(pr.selected_node_id).trim() : '';
+      if (sid === n.id && selId === n.id) {
+        presenceConflict = true;
+        break;
+      }
+    }
     const nd = document.createElement('div');
     nd.className =
       'nd' +
       (d === 0 ? ' rnd' : '') +
       (selId === n.id ? ' sel' : '') +
       (multiSel.has(n.id) ? ' msel' : '') +
-      (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '');
+      (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '') +
+      (presenceConflict ? ' nd--conflict' : '');
     nd.id = 'nd-' + n.id;
+    if (presenceConflict) {
+      nd.style.boxShadow = '0 0 0 2px rgba(239, 68, 68, 0.88)';
+    }
     const cardBadgeFlat = flattenBadgeSet(getBadgeSetFromNodeInput(n));
     const bgs = cardBadgeFlat
       .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
@@ -2045,6 +2091,21 @@ function render() {
     }
     const na = nd.querySelector('#na-' + n.id);
     if (n.parent_id) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
+    nd.style.position = 'relative';
+    for (let ai = 0; ai < peersPresence.length; ai++) {
+      const pr = peersPresence[ai];
+      const psid = pr && pr.selected_node_id ? String(pr.selected_node_id).trim() : '';
+      if (psid !== n.id) continue;
+      const av = document.createElement('div');
+      av.className = 'np-avatar';
+      av.setAttribute('aria-hidden', 'true');
+      const em = pr.email ? String(pr.email).trim() : '';
+      av.title = em ? `\u26a0 ${em} 편집 중` : '\u26a0 다른 사용자 편집 중';
+      av.textContent = presenceAvatarLetter(em);
+      av.style.cssText =
+        'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;width:28px;height:28px;border-radius:50%;background:rgba(99,102,241,0.92);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.25);border:2px solid rgba(255,255,255,.85)';
+      nd.appendChild(av);
+    }
     w.appendChild(nd);
     if (nodeHasAnyChild(n.id)) {
       const cb = document.createElement('button');
@@ -2185,6 +2246,7 @@ function render() {
   if (curView === 'prd') buildPRD();
   if (curView === 'spec') buildSpec();
   schedulePersist();
+  maybeEmitNodeSelect();
 }
 
 function drawEdges() {
@@ -2303,6 +2365,7 @@ function sDrag(e, n, isShiftPressed) {
     document.removeEventListener('pointercancel', up);
     const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(ids);
     render();
+    flushPersistNow();
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
   };
   document.addEventListener('pointermove', mv);
@@ -2927,6 +2990,13 @@ export function initPlannode(opts = {}) {
   document.addEventListener('click', onDocClickCtx);
   disposers.push(() => document.removeEventListener('click', onDocClickCtx));
 
+  const onPresencePeersCanvasUpdate = () => {
+    // Presence 업데이트: 트리 뷰일 때 무조건 render — 아바타 추가/제거 모두 처리
+    if (curView === 'tree') render();
+  };
+  window.addEventListener('plannode-presence-update', onPresencePeersCanvasUpdate);
+  disposers.push(() => window.removeEventListener('plannode-presence-update', onPresencePeersCanvasUpdate));
+
   const vSpec = document.getElementById('V-SPEC');
   if (vSpec) {
     const specIn = (ev) => onSpecGridInput(ev);
@@ -3437,6 +3507,7 @@ export function initPlannode(opts = {}) {
           clearRelinkArm();
           clearRelinkHold();
           selId = null;
+          lastEmittedSelIdForPresence = undefined;
           collapsedNodeIds.clear();
         }
         if (selId && !find(selId)) selId = null;
@@ -3458,6 +3529,8 @@ export function initPlannode(opts = {}) {
         clearUndoStack();
         curP = null;
         nodes = [];
+        selId = null;
+        lastEmittedSelIdForPresence = undefined;
         collapsedNodeIds.clear();
         if (ES) ES.style.display = 'flex';
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
