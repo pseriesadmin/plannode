@@ -2166,41 +2166,41 @@
                 >
                   히스토리
                 </button>
-                <button
-                  type="button"
-                  class="cw-release-note-btn"
-                  title="릴리스 노트 — 버전별 변경·기능 보완 요약"
-                  aria-label="Release note — 릴리스 노트 열기"
-                  on:click={openPlannodeUpdateModal}
+              {/if}
+              <button
+                type="button"
+                class="cw-release-note-btn"
+                title="릴리스 노트 — 버전별 변경·기능 보완 요약"
+                aria-label="Release note — 릴리스 노트 열기"
+                on:click={openPlannodeUpdateModal}
+              >
+                Release
+              </button>
+              {#if $currentProject && postLogoutOpenPair && postLogoutOpenPair.projectId === $currentProject.id}
+                <div
+                  class="cw-postlogout-toggle"
+                  role="group"
+                  aria-label="로그아웃 직전 저장본과 최신 열기 전환"
                 >
-                  Release
-                </button>
-                {#if postLogoutOpenPair && postLogoutOpenPair.projectId === $currentProject.id}
-                  <div
-                    class="cw-postlogout-toggle"
-                    role="group"
-                    aria-label="로그아웃 직전 저장본과 최신 열기 전환"
+                  <button
+                    type="button"
+                    class="cw-snapshot-hist-btn"
+                    title="로그아웃 직전에 저장된 트리로 바꿉니다."
+                    disabled={!postLogoutOpenPair.atLatest}
+                    on:click={postLogoutOpenToLogoutTree}
                   >
-                    <button
-                      type="button"
-                      class="cw-snapshot-hist-btn"
-                      title="로그아웃 직전에 저장된 트리로 바꿉니다."
-                      disabled={!postLogoutOpenPair.atLatest}
-                      on:click={postLogoutOpenToLogoutTree}
-                    >
-                      실행 취소
-                    </button>
-                    <button
-                      type="button"
-                      class="cw-snapshot-hist-btn"
-                      title="최신(클라우드·로컬 병합)으로 열었던 트리로 다시 돌아갑니다."
-                      disabled={postLogoutOpenPair.atLatest}
-                      on:click={postLogoutOpenToLatestTree}
-                    >
-                      다시 실행
-                    </button>
-                  </div>
-                {/if}
+                    실행 취소
+                  </button>
+                  <button
+                    type="button"
+                    class="cw-snapshot-hist-btn"
+                    title="최신(클라우드·로컬 병합)으로 열었던 트리로 다시 돌아갑니다."
+                    disabled={postLogoutOpenPair.atLatest}
+                    on:click={postLogoutOpenToLatestTree}
+                  >
+                    다시 실행
+                  </button>
+                </div>
               {/if}
               {#if cloudSyncAvailable && $currentProject}
                 <div
