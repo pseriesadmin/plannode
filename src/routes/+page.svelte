@@ -15,8 +15,18 @@
     deleteProject,
     registerPendingWorkspaceDeletion,
     getPendingWorkspaceDeletionIds,
-    mergeModalListCloudCanon
+    mergeModalListCloudCanon,
+    captureLogoutSessionSnapshot,
+    clearSessionProjectSelectionForLogout,
+    readLogoutSessionSnapshotV1,
+    clearLogoutSessionSnapshot,
+    extractProjectSliceFromBundle,
+    mergeWorkspaceBundleFromCloudRemote,
+    loadProjectNodesFromLocalStorage,
+    projectWorkspaceNodesJsonSnapshot,
+    replaceProjectNodesFromHistory
   } from '$lib/stores/projects';
+  import type { LogoutSessionSnapshotV1 } from '$lib/stores/projects';
   import {
     captureNodeSnapshot,
     listNodeSnapshots,
@@ -35,8 +45,13 @@
     outlinePlainTextToPlannodeTreeV1,
     parseMarkdownFileForProjectImport
   } from '$lib/outlineToPlannodeTreeV1';
-  import { supabase, type Project } from '$lib/supabase/client';
-  import { isSupabaseCloudConfigured, fetchOwnWorkspaceProjectMetasForModal } from '$lib/supabase/sync';
+  import { supabase, type Project, type Node } from '$lib/supabase/client';
+  import {
+    isSupabaseCloudConfigured,
+    fetchOwnWorkspaceProjectMetasForModal,
+    fetchOwnWorkspaceBundleFresh,
+    mergeSharedProjectSliceFromCloudIfApplicable
+  } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
   import { startCloudBackgroundSync, stopCloudBackgroundSync } from '$lib/supabase/cloudBackgroundSync';
   import { cloudSyncBadge } from '$lib/stores/workspaceDirty';
@@ -55,6 +70,7 @@
     pruneStaleInviteAfterSliceMissing,
     autoLoadInvitedProjects,
     fetchProjectAcl,
+    fetchProjectSliceFromCloud,
     isCurrentUserProjectOwner,
     deleteAllAclRowsForProjectIfOwner,
     type AclInviteSummary
@@ -65,7 +81,9 @@
     projectPresencePeers,
     projectPresencePeersOverflow,
     projectPresenceSelectedEmail,
-    toggleProjectPresencePeerEmail
+    toggleProjectPresencePeerEmail,
+    updateMySelectedNode,
+    type ProjectPresencePeer
   } from '$lib/supabase/projectPresence';
   import { getAuthUserId, getAuthEmail, signOutEverywhere, authUser, authLoading, authSession } from '$lib/stores/authSession';
   import ProjectAclModal from '$lib/components/ProjectAclModal.svelte';
@@ -86,8 +104,10 @@
   } from '$lib/pilot/pilotBridge';
   import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
   import type { IAExportIntent } from '$lib/ai/iaExportRunner';
+  import { slugExportName } from '$lib/ai/iaGridCsvExport';
   import type { PageData } from './$types';
   import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
+  import { plannodeUpdateLogNewestFirst } from '$lib/plannodeUpdateLog';
 
   /** SvelteKit이 주입 — 미선언 시 콘솔 "unknown prop" 경고 */
   export let data: PageData;
@@ -98,8 +118,8 @@
   let projectStart = '';
   let projectEnd = '';
   let projectDesc = '';
-  /** 요구사항(아젠다) → AI 트리 생성 중 — 중복 클릭 방지 */
-  let agendaTreeBusy = false;
+  /** 프로젝트 생성(+선택적 AI 트리) 처리 중 — 중복 클릭 방지 */
+  let projectCreateBusy = false;
 
   /** 프로젝트 관리 모달 안 — 표준 배지 풀(localStorage) */
   let showBadgePoolModal = false;
@@ -163,10 +183,48 @@
   /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
   let showSnapshotHistoryModal = false;
   let snapshotListVersion = 0;
+
+  /** M2-UPDATE-CHANGELOG: Plannode 릴리스 노트 모달 */
+  let showPlannodeUpdateModal = false;
+  let updateLogOpenId: string | null = null;
+
+  $: updateLogRows = plannodeUpdateLogNewestFirst();
+
+  function openPlannodeUpdateModal() {
+    updateLogOpenId = null;
+    showPlannodeUpdateModal = true;
+  }
+
+  function closePlannodeUpdateModal() {
+    showPlannodeUpdateModal = false;
+    updateLogOpenId = null;
+  }
+
+  function toggleUpdateLogAccordion(id: string) {
+    updateLogOpenId = updateLogOpenId === id ? null : id;
+  }
+
   $: snapshotRows = (() => {
     snapshotListVersion;
     return $currentProject ? [...listNodeSnapshots($currentProject.id)].reverse() : [];
   })();
+
+  /** 로그아웃 스냅과 불일치해 연 직후: 최신(병합) 트리 ↔ 로그아웃 직전 트리 전환 (모달 없음) */
+  let postLogoutOpenPair: {
+    projectId: string;
+    logoutNodes: Node[];
+    latestNodes: Node[];
+    atLatest: boolean;
+  } | null = null;
+
+  $: if (postLogoutOpenPair && $currentProject && $currentProject.id !== postLogoutOpenPair.projectId) {
+    postLogoutOpenPair = null;
+  }
+
+  function projectInLogoutSnapshot(snap: LogoutSessionSnapshotV1, projectId: string): boolean {
+    if (snap.bundle.projects.some((p) => p.id === projectId)) return true;
+    return Object.prototype.hasOwnProperty.call(snap.bundle.nodesByProject, projectId);
+  }
 
   function refreshSnapshotList() {
     snapshotListVersion++;
@@ -192,10 +250,38 @@
 
   function formatSnapshotReason(r: StoredNodeSnapshot['reason']): string {
     if (r === 'presence_peer') return '동시 접속';
-    if (r === 'pre_pull') return '클라우드 반영 직전';
+    if (r === 'pre_pull') return '클라우드·병합 반영 직전';
+    if (r === 'import') return '파일 가져오기·AI 덮어쓰기 직전';
     return '수동';
   }
 
+  async function restoreSnapshotToWorkspace(s: StoredNodeSnapshot) {
+    const p = $currentProject;
+    if (!p) return;
+    if (
+      !confirm(
+        '이 스냅샷 시점의 노드 트리로 바꿀까요? (상단 되돌리기·Ctrl+Z는 캔버스 편집만 되돌립니다. 기능명세 그리드 미저장분은 먼저 반영해 주세요.)'
+      )
+    ) {
+      return;
+    }
+    pilotFlushPersistNow();
+    const pid = p.id;
+    const list = JSON.parse(JSON.stringify(s.nodes)) as Node[];
+    for (const n of list) {
+      if (n && typeof n === 'object') n.project_id = n.project_id ?? pid;
+    }
+    const ok = replaceProjectNodesFromHistory(pid, list);
+    if (ok) {
+      refreshSnapshotList();
+      await tick();
+      pilotRefreshPrdView();
+      showPilotToast('워크스페이스 스냅샷으로 되돌렸어.');
+      showSnapshotHistoryModal = false;
+    } else {
+      showPilotToast('되돌리기에 실패했어.');
+    }
+  }
   const PRD_BLOCKS: { key: PrdSectionKey; title: string; hint: string }[] = [
     {
       key: 's1',
@@ -342,9 +428,12 @@
   /**
    * 모달 프로젝트 목록: null = ACL 필터 미적용(로컬 전부 표시) · 배열 = `canAccessProject` 통과한 것만
    * 클라우드 설정 시(+ 로그인) 목록 행은 서버 **`plannode_workspace.projects_json`** 정본을 우선하고 로컬 전용 id만 뒤에 붙인다(NOW-70~72).
+   * 동기화 중에는 이전 배열을 유지(stale-while-revalidate) — `[]`로 비우면 목록이 잠깐 사라져 보인다.
    */
   let projectsForModal: Project[] | null = null;
   let modalProjectListToken = 0;
+  /** 모달 목록을 마지막으로 채운 계정 — 바뀌면 한 번 `null`로 두어 이전 사용자 목록이 남지 않게 함 */
+  let projectsForModalAuthUid: string | null = null;
 
   async function syncProjectsForModalList() {
     const token = ++modalProjectListToken;
@@ -353,6 +442,7 @@
     if (!isAclEnforced()) {
       if (token !== modalProjectListToken) return;
       projectsForModal = null;
+      projectsForModalAuthUid = null;
       return;
     }
     const uid = getAuthUserId();
@@ -360,11 +450,15 @@
     if (!uid || !em) {
       if (token !== modalProjectListToken) return;
       projectsForModal = null;
+      projectsForModalAuthUid = null;
       return;
     }
 
     if (token !== modalProjectListToken) return;
-    projectsForModal = [];
+    if (projectsForModalAuthUid !== uid) {
+      projectsForModal = null;
+      projectsForModalAuthUid = uid;
+    }
 
     const plist = get(projects);
     let mergedList: Project[];
@@ -468,11 +562,28 @@
     }, 2800);
   }
 
+  /** plan-output P-3·B: 포커스·가시성으로 양방향 동기가 돌 수 있음을 세션당 1회 안내(GP-12 최소). */
+  const SYNC_FOCUS_HINT_SS_KEY = 'plannode_sync_focus_hint_v1';
+
+  function maybeShowCloudSyncFocusHint(): void {
+    if (!cloudSyncAvailable) return;
+    try {
+      if (sessionStorage.getItem(SYNC_FOCUS_HINT_SS_KEY)) return;
+      sessionStorage.setItem(SYNC_FOCUS_HINT_SS_KEY, '1');
+    } catch {
+      return;
+    }
+    showPilotToast('다른 창·탭으로 갔다가 돌아오면 클라우드 동기를 다시 불러와요.');
+    if (import.meta.env.DEV) {
+      console.debug('[Plannode] Cloud sync runs on tab/window return or timer (P-3·B).');
+    }
+  }
+
   function triggerJsonImport() {
     jsonImportInput?.click();
   }
 
-  /** pilot이 `#BMD` `#BPR` `#BJN` `#BFT` `#BFA` `#BAR` `#BUN`(sink)에 연결 — UI는 드롭다운·툴바에서 동일 요소에 click 위임 */
+  /** pilot이 `#BMD` `#BPR` `#BJN` `#BFT` `#BFA` `#BAR` `#BUN` `#BRE`(sink)에 연결 — UI는 드롭다운·툴바에서 동일 요소에 click 위임 */
   let showOutputMenu = false;
   let outputMenuWrapEl: HTMLDivElement | undefined;
 
@@ -514,6 +625,15 @@
     el.click();
   }
 
+  function triggerPilotRedo() {
+    const el = document.getElementById('BRE');
+    if (!(el instanceof HTMLElement)) {
+      showPilotToast('다시 실행이 아직 연결 안 됐어. 새로고침 후 다시 시도해줘.');
+      return;
+    }
+    el.click();
+  }
+
   let showViewMenu = false;
   let viewMenuWrapEl: HTMLDivElement | undefined;
 
@@ -521,11 +641,23 @@
     tree: '노드',
     prd: 'PRD',
     spec: '기능명세',
-    ia: 'IA(정보구조)',
-    ai: 'AI 분석'
+    ia: '정보 구조(IA)',
+    ai: 'AI 분석(LLM)'
+  };
+
+  /** PRD §5 · F2-4 vs F2-5 — 짧은 라벨은 위, 긴 설명은 title(툴팁) */
+  const VIEW_MENU_TITLES: Record<'tree' | 'prd' | 'spec' | 'ia' | 'ai', string> = {
+    tree: '노드 트리 캔버스에서 편집 (F2-1)',
+    prd: 'PRD 문서 보기 (F2-2)',
+    spec: '기능명세 그리드 보기 (F2-3)',
+    ia: '정보 구조(Information Architecture) — 트리에서 도출하는 문서·보내기 (F2-4, LLM과 구분)',
+    ai: 'LLM으로 기획문서·분석 보조 (F2-5) — IA 탭과 별도'
   };
 
   $: viewMenuLabel = VIEW_MENU_LABELS[$activeView];
+
+  /** PRD M4 —보내기 메뉴 툴팁용 (파일럿 저장 파일명과 동일 슬러그) */
+  $: outputFileSlug = $currentProject?.name ? slugExportName($currentProject.name) : '';
 
   function closeViewMenu() {
     showViewMenu = false;
@@ -820,6 +952,9 @@
       showPilotToast('가져오기를 취소했어.');
       return;
     }
+    if (exists) {
+      captureNodeSnapshot(parsed.project.id, loadProjectNodesFromLocalStorage(parsed.project.id), 'import');
+    }
 
     showBadgeImportMappingOverlay = true;
     await tick();
@@ -866,122 +1001,13 @@
     }
   }
 
-  async function handleProjectCreate() {
-    if (!projectName || !projectAuthor || !projectStart || !projectEnd) {
-      alert('필수 항목을 입력해주세요');
-      return;
-    }
-
-    try {
-      const uid = getAuthUserId();
-      const newProj = createProject({
-        name: projectName,
-        author: projectAuthor,
-        start_date: projectStart,
-        end_date: projectEnd,
-        description: projectDesc,
-        owner_user_id: cloudSyncAvailable && uid ? uid : undefined
-      });
-
-      if (!newProj) {
-        alert('프로젝트 생성에 실패했습니다');
-        return;
-      }
-
-      if (cloudSyncAvailable && uid) {
-        const acl = await ensureOwnerAclRowForMyProject(newProj.id);
-        if (!acl.ok) {
-          alert(acl.message ?? '클라우드에 소유자(접근 목록)를 저장하지 못했어. SQL·RLS를 확인한 뒤 다시 시도해줘.');
-        } else {
-          const { scheduleCloudFlush } = await import('$lib/supabase/workspacePush');
-          scheduleCloudFlush('new-project-acl', 100);
-        }
-      }
-
-      /** 다른 프로젝트가 열려 있으면 지연 persist 전에 전환하면 이전 캔버스가 저장되지 않음 — 엎어쓰기처럼 보임 */
-      const alreadyOpen = get(currentProject);
-      if (alreadyOpen && alreadyOpen.id !== newProj.id) {
-        pilotFlushPersistNow();
-      }
-
-      const r = await trySelectProject(newProj);
-      if (!r.ok) {
-        alert(r.message ?? '프로젝트를 열 수 없습니다');
-        return;
-      }
-
-      pilotSetNodeMapLayout(nodeMapLayoutDefaultForCreate);
-      writeNodeMapLayoutCreateDefault(nodeMapLayoutDefaultForCreate);
-
-      projectName = '';
-      projectAuthor = '';
-      projectStart = '';
-      projectEnd = '';
-      projectDesc = '';
-      await tick();
-      requestAnimationFrame(() => showProjectModal.set(false));
-    } catch (e) {
-      console.error('Project creation error:', e);
-      alert('프로젝트 생성 중 오류가 발생했습니다: ' + (e instanceof Error ? e.message : String(e)));
-    }
-  }
-
-  /** NOW-35: 요구사항 텍스트로 AI plannode.tree 생성 → upsert → 캔버스 동기 (PRD M6 · M1 F1-1 · F2-5) */
-  async function handleAgendaTreeGenerate() {
-    if (agendaTreeBusy) return;
-    if (!projectName?.trim() || !projectAuthor?.trim() || !projectStart || !projectEnd) {
-      alert('이름·작성자·시작일·종료일을 먼저 입력해줘');
-      return;
-    }
-    if (!projectDesc?.trim()) {
-      alert('프로젝트 요구사항 상세 입력에 아젠다를 적어줘');
-      return;
-    }
-    if (!cloudSyncAvailable) {
-      showPilotToast('클라우드·로그인이 없으면 서버 AI를 쓸 수 없어. Supabase를 켠 뒤 로그인해줘.');
-      return;
-    }
+  /** 생성 직후: 요구사항이 있고 클라우드·세션이 있으면 `/api/ai/agenda-to-tree` → 파싱·배지 살규화·upsert (기존 단독 버튼과 동일 파이프라인) */
+  async function tryApplyAgendaAiTreeAfterCreate(newProj: Project, agendaTrimmed: string) {
     const token = get(authSession)?.access_token?.trim();
-    if (!token) {
-      showPilotToast('로그인이 필요해. 로그인한 뒤 다시 시도해줘.');
-      return;
-    }
+    if (!cloudSyncAvailable || !token) return;
 
-    agendaTreeBusy = true;
     try {
       const uid = getAuthUserId();
-      const newProj = createProject({
-        name: projectName.trim(),
-        author: projectAuthor.trim(),
-        start_date: projectStart,
-        end_date: projectEnd,
-        description: projectDesc.trim(),
-        owner_user_id: cloudSyncAvailable && uid ? uid : undefined
-      });
-      if (!newProj) {
-        alert('프로젝트 생성에 실패했습니다');
-        return;
-      }
-      if (cloudSyncAvailable && uid) {
-        const acl = await ensureOwnerAclRowForMyProject(newProj.id);
-        if (!acl.ok) {
-          alert(acl.message ?? '클라우드에 소유자(접근 목록)를 저장하지 못했어.');
-          return;
-        }
-        const { scheduleCloudFlush } = await import('$lib/supabase/workspacePush');
-        scheduleCloudFlush('new-project-agenda', 100);
-      }
-
-      const alreadyOpen = get(currentProject);
-      if (alreadyOpen && alreadyOpen.id !== newProj.id) {
-        pilotFlushPersistNow();
-      }
-      const rOpen = await trySelectProject(newProj);
-      if (!rOpen.ok) {
-        alert(rOpen.message ?? '프로젝트를 열 수 없습니다');
-        return;
-      }
-
       const userAnthropicKey = readStoredUserAnthropicKey();
       const agendaHeaders: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -995,7 +1021,7 @@
         method: 'POST',
         headers: agendaHeaders,
         body: JSON.stringify({
-          agenda: projectDesc.trim(),
+          agenda: agendaTrimmed,
           projectId: newProj.id,
           projectName: newProj.name,
           depth: 3
@@ -1039,7 +1065,7 @@
 
       const mergedProject: Project = {
         ...newProj,
-        description: projectDesc.trim(),
+        description: agendaTrimmed,
         name: parsed.project.name?.trim() || newProj.name
       };
 
@@ -1048,6 +1074,7 @@
           showPilotToast('취소했어. 빈 프로젝트는 목록에서 지울 수 있어.');
           return;
         }
+        captureNodeSnapshot(newProj.id, get(nodes), 'import');
       }
 
       const merged = upsertImportedPlannodeTreeV1(mergedProject, parsed.nodes, { openAfter: true });
@@ -1067,19 +1094,82 @@
       pilotSetNodeMapLayout(nodeMapLayoutDefaultForCreate);
       writeNodeMapLayoutCreateDefault(nodeMapLayoutDefaultForCreate);
 
+      const { scheduleCloudFlush } = await import('$lib/supabase/workspacePush');
+      scheduleCloudFlush('new-project-agenda', 100);
+
+      showPilotToast(`AI 노드 초안 반영 완료(${parsed.nodeCount}개 노드)`);
+    } catch (e) {
+      console.error('agenda tree apply', e);
+      showPilotToast(e instanceof Error ? e.message : '오류가 났어.');
+    }
+  }
+
+  async function handleProjectCreate() {
+    if (projectCreateBusy) return;
+    if (!projectName || !projectAuthor || !projectStart || !projectEnd) {
+      alert('필수 항목을 입력해주세요');
+      return;
+    }
+
+    projectCreateBusy = true;
+    try {
+      const uid = getAuthUserId();
+      const agendaTrimmed = projectDesc?.trim() ?? '';
+      const newProj = createProject({
+        name: projectName,
+        author: projectAuthor,
+        start_date: projectStart,
+        end_date: projectEnd,
+        description: projectDesc,
+        owner_user_id: cloudSyncAvailable && uid ? uid : undefined
+      });
+
+      if (!newProj) {
+        alert('프로젝트 생성에 실패했습니다');
+        return;
+      }
+
+      if (cloudSyncAvailable && uid) {
+        const acl = await ensureOwnerAclRowForMyProject(newProj.id);
+        if (!acl.ok) {
+          alert(acl.message ?? '클라우드에 소유자(접근 목록)를 저장하지 못했어. SQL·RLS를 확인한 뒤 다시 시도해줘.');
+        } else {
+          const { scheduleCloudFlush } = await import('$lib/supabase/workspacePush');
+          scheduleCloudFlush('new-project-acl', 100);
+        }
+      }
+
+      /** 다른 프로젝트가 열려 있으면 지연 persist 전에 전환하면 이전 캔버스가 저장되지 않음 — 엎어쓰기처럼 보임 */
+      const alreadyOpen = get(currentProject);
+      if (alreadyOpen && alreadyOpen.id !== newProj.id) {
+        pilotFlushPersistNow();
+      }
+
+      const r = await trySelectProject(newProj);
+      if (!r.ok) {
+        alert(r.message ?? '프로젝트를 열 수 없습니다');
+        return;
+      }
+
+      pilotSetNodeMapLayout(nodeMapLayoutDefaultForCreate);
+      writeNodeMapLayoutCreateDefault(nodeMapLayoutDefaultForCreate);
+
+      if (agendaTrimmed) {
+        await tryApplyAgendaAiTreeAfterCreate(newProj, agendaTrimmed);
+      }
+
       projectName = '';
       projectAuthor = '';
       projectStart = '';
       projectEnd = '';
       projectDesc = '';
       await tick();
-      showPilotToast(`AI 노드 초안 반영 완료(${parsed.nodeCount}개 노드)`);
       requestAnimationFrame(() => showProjectModal.set(false));
     } catch (e) {
-      console.error('agenda tree error', e);
-      showPilotToast(e instanceof Error ? e.message : '오류가 났어.');
+      console.error('Project creation error:', e);
+      alert('프로젝트 생성 중 오류가 발생했습니다: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
-      agendaTreeBusy = false;
+      projectCreateBusy = false;
     }
   }
 
@@ -1238,8 +1328,13 @@
       if (r.ok) {
         showPilotToast(r.message);
         await loadAclInvitesForModal();
-        await tick();
-        requestAnimationFrame(() => showProjectModal.set(false));
+        const latest = get(projects).find((p) => p.id === inv.project_id);
+        if (latest) {
+          await finalizeProjectOpen(latest);
+        } else {
+          await tick();
+          requestAnimationFrame(() => showProjectModal.set(false));
+        }
         return;
       }
       if (r.sliceMissing) {
@@ -1259,7 +1354,29 @@
     }
   }
 
-  async function handleProjectSelect(proj: Project) {
+  function postLogoutOpenToLogoutTree() {
+    const p = get(currentProject);
+    if (!postLogoutOpenPair || !p || postLogoutOpenPair.projectId !== p.id || !postLogoutOpenPair.atLatest) return;
+    pilotFlushPersistNow();
+    const list = JSON.parse(JSON.stringify(postLogoutOpenPair.logoutNodes)) as Node[];
+    replaceProjectNodesFromHistory(postLogoutOpenPair.projectId, list);
+    postLogoutOpenPair = { ...postLogoutOpenPair, atLatest: false };
+    void tick().then(() => pilotRefreshPrdView());
+    showPilotToast('로그아웃 직전 트리로 바꿨어. (실행 취소)');
+  }
+
+  function postLogoutOpenToLatestTree() {
+    const p = get(currentProject);
+    if (!postLogoutOpenPair || !p || postLogoutOpenPair.projectId !== p.id || postLogoutOpenPair.atLatest) return;
+    pilotFlushPersistNow();
+    const list = JSON.parse(JSON.stringify(postLogoutOpenPair.latestNodes)) as Node[];
+    replaceProjectNodesFromHistory(postLogoutOpenPair.projectId, list);
+    postLogoutOpenPair = { ...postLogoutOpenPair, atLatest: true };
+    void tick().then(() => pilotRefreshPrdView());
+    showPilotToast('최신 반영 트리로 돌렸어. (다시 실행)');
+  }
+
+  async function finalizeProjectOpen(proj: Project) {
     const r = await trySelectProject(proj);
     if (!r.ok) {
       showPilotToast(r.message ?? '접근할 수 없어.');
@@ -1267,6 +1384,90 @@
     }
     await tick();
     requestAnimationFrame(() => showProjectModal.set(false));
+  }
+
+  async function handleProjectSelect(proj: Project) {
+    if (postLogoutOpenPair && postLogoutOpenPair.projectId !== proj.id) {
+      postLogoutOpenPair = null;
+    }
+
+    const snap = readLogoutSessionSnapshotV1();
+    if (!snap || !projectInLogoutSnapshot(snap, proj.id)) {
+      if (postLogoutOpenPair?.projectId === proj.id) postLogoutOpenPair = null;
+      await finalizeProjectOpen(proj);
+      return;
+    }
+
+    const { nodes: logoutNodes } = extractProjectSliceFromBundle(snap.bundle, proj.id);
+    const localNodes = loadProjectNodesFromLocalStorage(proj.id);
+    const logoutHash = projectWorkspaceNodesJsonSnapshot(logoutNodes);
+    const localHash = projectWorkspaceNodesJsonSnapshot(localNodes);
+    const sameLocal = logoutHash === localHash;
+
+    let sameRemoteVsLogout = true;
+    if (cloudSyncAvailable) {
+      const uid = getAuthUserId();
+      const sharedSrc = proj.cloud_workspace_source_user_id;
+      if (sharedSrc && uid && sharedSrc !== uid) {
+        const slice = await fetchProjectSliceFromCloud(sharedSrc, proj.id);
+        const rn = slice?.nodes ?? null;
+        if (rn != null) {
+          sameRemoteVsLogout = logoutHash === projectWorkspaceNodesJsonSnapshot(rn);
+        }
+      } else {
+        const bundle = await fetchOwnWorkspaceBundleFresh();
+        if (bundle) {
+          const raw = bundle.nodesByProject[proj.id];
+          const rn = Array.isArray(raw) ? raw : [];
+          sameRemoteVsLogout = logoutHash === projectWorkspaceNodesJsonSnapshot(rn);
+        }
+      }
+    }
+
+    if (sameLocal && sameRemoteVsLogout) {
+      if (postLogoutOpenPair?.projectId === proj.id) postLogoutOpenPair = null;
+      await finalizeProjectOpen(proj);
+      return;
+    }
+
+    const localNodesBefore = loadProjectNodesFromLocalStorage(proj.id);
+    captureNodeSnapshot(proj.id, localNodesBefore, 'pre_pull');
+
+    if (cloudSyncAvailable) {
+      const uid = getAuthUserId();
+      const sharedSrc = proj.cloud_workspace_source_user_id;
+      if (sharedSrc && uid && sharedSrc !== uid) {
+        await mergeSharedProjectSliceFromCloudIfApplicable(proj);
+      } else {
+        const bundle = await fetchOwnWorkspaceBundleFresh();
+        if (bundle) mergeWorkspaceBundleFromCloudRemote(bundle);
+      }
+    }
+
+    const latestNodes = loadProjectNodesFromLocalStorage(proj.id);
+    const pid = proj.id;
+    const logoutCopy = JSON.parse(JSON.stringify(logoutNodes)) as Node[];
+    const latestCopy = JSON.parse(JSON.stringify(latestNodes)) as Node[];
+    for (const n of logoutCopy) n.project_id = n.project_id ?? pid;
+    for (const n of latestCopy) n.project_id = n.project_id ?? pid;
+
+    clearLogoutSessionSnapshot();
+
+    postLogoutOpenPair = {
+      projectId: pid,
+      logoutNodes: logoutCopy,
+      latestNodes: latestCopy,
+      atLatest: true
+    };
+
+    const latestProj = get(projects).find((p) => p.id === pid) ?? proj;
+    await finalizeProjectOpen(latestProj);
+
+    showPilotToast(
+      cloudSyncAvailable
+        ? '프로젝트를 최신(클라우드·로컬 병합)으로 열었어. 실행 취소·다시 실행으로 로그아웃 직전 트리와 바꿀 수 있어.'
+        : '이 기기 저장본으로 열었어. 실행 취소·다시 실행으로 로그아웃 직전 트리와 바꿀 수 있어.'
+    );
   }
 
   function openAclForCurrentProject() {
@@ -1400,10 +1601,15 @@
           if (presenceProjectId !== atSubscribe) return;
           const emails = rows.map((r) => r.email).filter(Boolean);
           const proj = get(currentProject);
+          if (!proj || proj.id !== atSubscribe) return;
+          const ownerOk = await isCurrentUserProjectOwner(proj);
+          if (presenceProjectId !== atSubscribe) return;
           const wsSrc = proj?.cloud_workspace_source_user_id ?? null;
           /** 멤버 ACL 조회에 소유자 이메일이 없을 때도 Presence에 소유자 uid 표시 */
           const presenceAlwaysShow = wsSrc && wsSrc !== uid ? [wsSrc] : [];
-          await subscribeProjectPresence(atSubscribe, uid, email, emails, presenceAlwaysShow);
+          /** 소유자: 필터 없음(모든 온라인 피어 표시, RLS로 이미 격리) · 공유자: ACL 이메일만(ACL 조회 실패 시에도 빈 배열 → Realtime 피어는 유지) */
+          const presenceAllowedEmails = ownerOk ? [] : emails;
+          await subscribeProjectPresence(atSubscribe, uid, email, presenceAllowedEmails, presenceAlwaysShow);
         })();
       }
     } else if (presenceProjectId !== '') {
@@ -1419,15 +1625,40 @@
     return /[a-zA-Z가-힣0-9]/.test(ch) ? ch.toUpperCase() : '?';
   }
 
+  /** 파일럿 노드 카드 오버레이 — `plannodePilot.render`가 읽음
+   *  pilotReady 가드: 파일럿 리스너가 등록된 이후에만 이벤트 발행 */
+  $: if (pilotReady && typeof window !== 'undefined') {
+    (window as Window & { __plannodePresencePeers?: ProjectPresencePeer[] }).__plannodePresencePeers =
+      $projectPresencePeers;
+    window.dispatchEvent(new CustomEvent('plannode-presence-update'));
+  }
+
   async function handleLogout() {
+    let aiPeek = '';
+    try {
+      const el = typeof document !== 'undefined' ? document.getElementById('ai-result') : null;
+      if (el?.textContent?.trim()) aiPeek = el.textContent.trim();
+    } catch {
+      /* ignore */
+    }
+    captureLogoutSessionSnapshot({ aiResultText: aiPeek || undefined });
+    clearSessionProjectSelectionForLogout();
     const ok = await flushCloudWorkspaceNow('logout');
     if (!ok) showPilotToast('클라우드에 마지막 저장이 안 됐어. 다시 로그인한 뒤 잠시 기다리면 자동으로 올라가.');
     await signOutEverywhere();
   }
 
   onMount(() => {
+    /** mountPilotBridge 안에서 동기 hydrate → render → maybeEmitNodeSelect 가 먼저 나갈 수 있음 — 리스너를 먼저 둔다 */
+    const onNodeSelectPresence = (ev: Event) => {
+      const d = (ev as CustomEvent<{ nodeId?: string | null }>).detail;
+      updateMySelectedNode(d?.nodeId ?? null);
+    };
+    window.addEventListener('plannode-node-select', onNodeSelectPresence);
+
     const { destroy } = mountPilotBridge();
     pilotReady = true;
+
     pilotSetActiveView($activeView);
     nodeMapLayoutDefaultForCreate = readNodeMapLayoutCreateDefault();
 
@@ -1481,13 +1712,28 @@
     };
     window.addEventListener('plannode-pilot-toast', onPilotToast);
 
+    let sawHiddenSinceMount = false;
+    let sawWindowBlurSinceMount = false;
+
     const onVis = () => {
       if (document.visibilityState === 'hidden') {
+        sawHiddenSinceMount = true;
         if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
         void flushCloudWorkspaceNow('visibility-hidden');
+      } else if (document.visibilityState === 'visible' && sawHiddenSinceMount) {
+        maybeShowCloudSyncFocusHint();
       }
     };
     document.addEventListener('visibilitychange', onVis);
+
+    const onWinBlur = () => {
+      sawWindowBlurSinceMount = true;
+    };
+    const onWinFocus = () => {
+      if (sawWindowBlurSinceMount) maybeShowCloudSyncFocusHint();
+    };
+    window.addEventListener('blur', onWinBlur);
+    window.addEventListener('focus', onWinFocus);
 
     const onPageHide = () => {
       if (pilotHasPendingGridPersist()) pilotFlushPersistNow();
@@ -1513,8 +1759,11 @@
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
       window.removeEventListener('plannode-modal-project-list-sync', onModalListSync);
       window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
+      window.removeEventListener('plannode-node-select', onNodeSelectPresence);
       window.removeEventListener('plannode-pilot-toast', onPilotToast);
       document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('blur', onWinBlur);
+      window.removeEventListener('focus', onWinFocus);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('beforeunload', onBeforeUnload);
       pilotReady = false;
@@ -1552,6 +1801,10 @@
     if (showViewportMenu && e.key === 'Escape') {
       e.preventDefault();
       closeViewportMenu();
+    }
+    if (showPlannodeUpdateModal && e.key === 'Escape') {
+      e.preventDefault();
+      closePlannodeUpdateModal();
     }
   }}
   on:mousedown={onToolbarMenusOutside}
@@ -1638,7 +1891,7 @@
               class="tb-view-btn"
               aria-haspopup="menu"
               aria-expanded={showViewMenu}
-              title="화면 전환"
+              title="화면 전환 — 정보 구조(IA)와 AI 분석(LLM)은 역할이 다릅니다"
               on:click={() => {
                 const next = !showViewMenu;
                 showViewMenu = next;
@@ -1658,31 +1911,36 @@
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'tree'}
+                  title={VIEW_MENU_TITLES.tree}
                   on:click={() => pickView('tree')}>노드</button>
                 <button
                   type="button"
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'prd'}
+                  title={VIEW_MENU_TITLES.prd}
                   on:click={() => pickView('prd')}>PRD</button>
                 <button
                   type="button"
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'spec'}
+                  title={VIEW_MENU_TITLES.spec}
                   on:click={() => pickView('spec')}>기능명세</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-view-menu-item"
                 class:tb-view-menu-item--on={$activeView === 'ia'}
-                on:click={() => pickView('ia')}>IA(정보구조)</button>
+                title={VIEW_MENU_TITLES.ia}
+                on:click={() => pickView('ia')}>정보 구조(IA)</button>
                 <button
                   type="button"
                   role="menuitem"
                   class="tb-view-menu-item"
                   class:tb-view-menu-item--on={$activeView === 'ai'}
-                  on:click={() => pickView('ai')}>AI 분석</button>
+                  title={VIEW_MENU_TITLES.ai}
+                  on:click={() => pickView('ai')}>AI 분석(LLM)</button>
               </div>
             {/if}
           </div>
@@ -1730,13 +1988,15 @@
           </div>
         <button type="button" class="tb-undo-btn" title="실행 취소 (Ctrl+Z / ⌘Z)" on:click={() => triggerPilotUndo()}
           >↩</button>
+        <button type="button" class="tb-redo-btn" title="다시 실행 (Ctrl+Shift+Z / ⌘⇧Z · Ctrl+Y)" on:click={() => triggerPilotRedo()}
+          >↪</button>
         <div class="tb-output-wrap" bind:this={outputMenuWrapEl}>
           <button
             type="button"
             class="tb-output-btn"
             aria-haspopup="menu"
             aria-expanded={showOutputMenu}
-            title="마크다운·PRD·JSON 보내기"
+            title="기능 맵·PRD·JSON 보내기 + IA/와이어 초안으로 이동"
             on:click={() => {
               const next = !showOutputMenu;
               showOutputMenu = next;
@@ -1755,26 +2015,42 @@
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
-                title="기능 맵 마크다운 파일로 저장"
+                title={outputFileSlug
+                  ? `기능 맵 마크다운 — 저장: ${outputFileSlug}-feature-map.md (PRD F4-1)`
+                  : '기능 맵 마크다운 파일로 저장'}
                 on:click={() => triggerPilotOutput('BMD')}>MD</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item tb-output-menu-item--prd"
-                title="PRD 표준 가이드 v2.0 구조 마크다운으로 저장"
+                title={outputFileSlug
+                  ? `PRD v2.0 구조 마크다운 — 저장: ${outputFileSlug}-prd.md (PRD F4-2)`
+                  : 'PRD 표준 가이드 v2.0 구조 마크다운으로 저장'}
                 on:click={() => triggerPilotOutput('BPR')}>PRD</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
-                title="노드 트리 JSON (백업·재가져오기용)"
+                title={outputFileSlug
+                  ? `plannode.tree v1 JSON — 저장: ${outputFileSlug}-plannode-tree.json`
+                  : '노드 트리 JSON (백업·재가져오기용)'}
                 on:click={() => triggerPilotOutput('BJN')}>JSON</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
-                title="화면 구조를 마크다운 파일로 저장 (와이어프레임)"
-                on:click={() => goIaFromOutput('SCREEN_LIST')}>와이어프레임</button>
+                title={outputFileSlug
+                  ? `IA 탭으로 이동 후 초안 실행 — 저장 시 권장: ${outputFileSlug}-ia.md (PRD F4-3)`
+                  : '정보 구조(IA) 탭으로 이동 후 메뉴·계층 초안 실행 (F2-4)'}
+                on:click={() => goIaFromOutput('IA_STRUCTURE')}>정보 구조(IA)</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="tb-output-menu-item"
+                title={outputFileSlug
+                  ? `IA 탭에서 화면 목록 초안 — 저장 시 권장: ${outputFileSlug}-wireframes.md (PRD F4-4)`
+                  : 'IA 탭에서 화면 목록·와이어 키트 초안 (F2-4·F4-4 방향)'}
+                on:click={() => goIaFromOutput('SCREEN_LIST')}>화면·와이어 목록</button>
             </div>
           {/if}
         </div>
@@ -1783,6 +2059,7 @@
           <button type="button" id="BFA" class="pilot-wire-sink" tabindex="-1">모두접기</button>
           <button type="button" id="BAR" class="pilot-wire-sink" tabindex="-1">자동정렬</button>
           <button type="button" id="BUN" class="pilot-wire-sink" tabindex="-1">↩ 되돌리기</button>
+          <button type="button" id="BRE" class="pilot-wire-sink" tabindex="-1">↪ 다시 실행</button>
           <button type="button" id="BMD" class="pilot-wire-sink" tabindex="-1">MD</button>
           <button type="button" id="BPR" class="pilot-wire-sink" tabindex="-1">PRD</button>
           <button type="button" id="BJN" class="pilot-wire-sink" tabindex="-1">JSON</button>
@@ -1881,7 +2158,7 @@
                 <button
                   type="button"
                   class="cw-snapshot-hist-btn"
-                  title="로컬에 남긴 노드 트리 스냅샷 보기(비교 수치는 스냅샷 대비 현재)"
+                  title="워크스페이스 되돌리기 — 병합·가져오기 등 직전에 저장된 노드 목록으로 복원합니다. 상단 「되돌리기」(Ctrl+Z)는 같은 세션 안 캔버스 편집만 되돌립니다."
                   on:click={() => {
                     refreshSnapshotList();
                     showSnapshotHistoryModal = true;
@@ -1889,6 +2166,41 @@
                 >
                   히스토리
                 </button>
+              {/if}
+              <button
+                type="button"
+                class="cw-release-note-btn"
+                title="릴리스 노트 — 버전별 변경·기능 보완 요약"
+                aria-label="Release note — 릴리스 노트 열기"
+                on:click={openPlannodeUpdateModal}
+              >
+                Release
+              </button>
+              {#if $currentProject && postLogoutOpenPair && postLogoutOpenPair.projectId === $currentProject.id}
+                <div
+                  class="cw-postlogout-toggle"
+                  role="group"
+                  aria-label="로그아웃 직전 저장본과 최신 열기 전환"
+                >
+                  <button
+                    type="button"
+                    class="cw-snapshot-hist-btn"
+                    title="로그아웃 직전에 저장된 트리로 바꿉니다."
+                    disabled={!postLogoutOpenPair.atLatest}
+                    on:click={postLogoutOpenToLogoutTree}
+                  >
+                    실행 취소
+                  </button>
+                  <button
+                    type="button"
+                    class="cw-snapshot-hist-btn"
+                    title="최신(클라우드·로컬 병합)으로 열었던 트리로 다시 돌아갑니다."
+                    disabled={postLogoutOpenPair.atLatest}
+                    on:click={postLogoutOpenToLatestTree}
+                  >
+                    다시 실행
+                  </button>
+                </div>
               {/if}
               {#if cloudSyncAvailable && $currentProject}
                 <div
@@ -2069,8 +2381,8 @@
 
       <div class="view" class:active={$activeView === 'ai'} id="V-AI">
         <div class="ai-inner">
-          <div class="ai-title">AI 분석</div>
-          <div class="ai-sub">현재 기능 트리를 분석해서 개발 가이드를 생성해</div>
+          <div class="ai-title">AI 분석(LLM)</div>
+          <div class="ai-sub">현재 기능 트리를 바탕으로 <strong>LLM</strong> 프롬프트·답을 만듭니다. 내비·화면 구조 문서는 <strong>정보 구조(IA)</strong> 탭이에요.</div>
           <div class="ai-impl-hint" aria-live="polite">
             {#if $authLoading}
               <p class="ai-impl-hint__line">로그인 여부 확인 중…</p>
@@ -2094,10 +2406,10 @@
               <div class="ai-btn-title">PRD 완성본 생성</div>
               <div class="ai-btn-desc">기능 트리 → 완전한 PRD 문서</div>
             </button>
-            <button type="button" class="ai-btn" id="ai-wireframe">
+            <button type="button" class="ai-btn" id="ai-wireframe" title="F2-5 LLM — IA 탭의 구조 산출과 별개">
               <div class="ai-btn-icon">🖼</div>
-              <div class="ai-btn-title">와이어프레임 / 화면 설계</div>
-              <div class="ai-btn-desc">UX·화면·컴포넌트 흐름, 구현·시안 작성용 프롬프트</div>
+              <div class="ai-btn-title">와이어·화면 (LLM)</div>
+              <div class="ai-btn-desc">UX·화면 흐름용 프롬프트 — 골격은 트리·IA 탭이 우선이에요</div>
             </button>
             <button type="button" class="ai-btn" id="ai-miss">
               <div class="ai-btn-icon">🔍</div>
@@ -2190,16 +2502,58 @@
       />
     {/if}
 
+    {#if showPlannodeUpdateModal}
+      <div class="mbg" role="presentation" on:click|self={closePlannodeUpdateModal}>
+        <div class="mo mo-wide upd-log-modal" role="dialog" aria-modal="true" aria-labelledby="rel-note-title">
+          <div class="pm-proj-head">
+            <h3 id="rel-note-title" style="margin:0">Release note</h3>
+            <button type="button" class="mcl" on:click={closePlannodeUpdateModal}>✕</button>
+          </div>
+          <p class="upd-log-hint">최신순 릴리스 노트예요. 카드를 누르면 기능 보완 설명이 펼쳐져요.</p>
+          <ul class="upd-log-list">
+            {#each updateLogRows as row (row.id)}
+              <li class="upd-log-card">
+                <button
+                  type="button"
+                  class="upd-log-card-head"
+                  aria-expanded={updateLogOpenId === row.id}
+                  aria-controls="upd-log-body-{row.id}"
+                  id="upd-log-head-{row.id}"
+                  on:click={() => toggleUpdateLogAccordion(row.id)}
+                >
+                  <span class="upd-log-card-meta">{row.at}</span>
+                  <span class="upd-log-card-title">{row.title}</span>
+                  <span class="upd-log-chev" aria-hidden="true">{updateLogOpenId === row.id ? '▾' : '▸'}</span>
+                </button>
+                {#if updateLogOpenId === row.id}
+                  <div
+                    class="upd-log-card-body"
+                    id="upd-log-body-{row.id}"
+                    role="region"
+                    aria-labelledby="upd-log-head-{row.id}"
+                  >
+                    {row.body}
+                  </div>
+                {/if}
+              </li>
+            {:else}
+              <li class="upd-log-empty">등록된 업데이트가 아직 없어요.</li>
+            {/each}
+          </ul>
+        </div>
+      </div>
+    {/if}
+
     {#if showSnapshotHistoryModal && $currentProject}
       <div class="mbg" role="presentation" on:click|self={() => (showSnapshotHistoryModal = false)}>
         <div class="mo mo-wide snap-hist-modal" role="dialog" aria-modal="true" aria-labelledby="snap-hist-title">
           <div class="pm-proj-head">
-            <h3 id="snap-hist-title" style="margin:0">버전 히스토리 (로컬)</h3>
+            <h3 id="snap-hist-title" style="margin:0">워크스페이스 히스토리 (로컬)</h3>
             <button type="button" class="mcl" on:click={() => (showSnapshotHistoryModal = false)}>✕</button>
           </div>
           <p class="snap-hist-hint">
-            공유 프로젝트에서 <strong>상대 작업</strong>이 클라우드로 반영되기 직전·또는 다른 편집자가 접속한 시점의 트리
-            복제입니다. 아래 수치는 <strong>그 스냅샷 대비 지금 화면</strong>의 차이(노드 id 기준)입니다.
+            클라우드 병합·파일 가져오기 직전에 자동으로 저장된 노드 목록입니다. 한 항목을 선택해 <strong>트리 전체를 그 시점으로 복원</strong>할 수
+            있어요. 상단 「되돌리기」(Ctrl+Z)는 <strong>현재 세션 안에서의 캔버스 편집만</strong> 되돌립니다.
           </p>
           <div class="snap-hist-actions">
             <button type="button" class="bcr" on:click={onManualNodeSnapshot}>지금 상태 스냅샷 남기기</button>
@@ -2211,9 +2565,12 @@
                   {new Date(s.at).toLocaleString()} · {formatSnapshotReason(s.reason)}
                 </div>
                 <div class="snap-hist-row-sub">{snapshotDiffLine(s)}</div>
+                <button type="button" class="bcr snap-hist-restore-btn" on:click={() => void restoreSnapshotToWorkspace(s)}>
+                  이 스냅으로 트리 복원
+                </button>
               </li>
             {:else}
-              <li class="snap-hist-empty">아직 히스토리가 없어. 다른 편집자 접속이 감지되거나 위 버튼으로 남겨줘.</li>
+              <li class="snap-hist-empty">아직 스냅샷이 없어. 다른 편집자 접속·클라우드 병합·파일 덮어쓰기 등이 일어나거나 위 버튼으로 남길 수 있어.</li>
             {/each}
           </ul>
         </div>
@@ -2268,20 +2625,12 @@
               bind:value={projectDesc}
               rows="5"
               style="resize:vertical;min-height:10rem"
-              placeholder="서비스 목적, 사용자, 핵심 기능, 제약 등을 자유롭게 적어줘. AI가 노드 트리 초안을 만든다."
+              placeholder="목적·기능·제약 등(선택). 클라우드에 로그인된 경우 같은 「생성」으로 AI 트리 초안을 시도해요."
               aria-label="프로젝트 요구사항 상세입력"
               autocomplete="off"
               autocorrect="off"
               spellcheck="true"
             ></textarea>
-            <button
-              type="button"
-              class="bcr bcr-agenda-tree"
-              disabled={agendaTreeBusy}
-              on:click={handleAgendaTreeGenerate}
-            >
-              {agendaTreeBusy ? 'AI 트리 생성 중…' : '요구사항으로 AI 노드 초안'}
-            </button>
             <div class="proj-layout-row" role="group" aria-label="새 프로젝트 노드맵 배치">
               <button
                 type="button"
@@ -2324,7 +2673,14 @@
                 모델API 등록
               </button>
             </div>
-            <button type="button" class="bcr bcr-create-project" on:click={handleProjectCreate}>+ 프로젝트 생성</button>
+            <button
+              type="button"
+              class="bcr bcr-create-project"
+              disabled={projectCreateBusy}
+              on:click={handleProjectCreate}
+            >
+              {projectCreateBusy ? '처리 중…' : '+ 프로젝트 생성'}
+            </button>
             <div class="proj-json-import">
               <input
                 bind:this={jsonImportInput}
@@ -2995,7 +3351,8 @@
 
   #BAC,
   #BPN,
-  .tb-undo-btn {
+  .tb-undo-btn,
+  .tb-redo-btn {
     padding: 6px 12px;
     font-size: 12px;
     border-radius: 7px;
@@ -4241,6 +4598,126 @@
     border-color: #9b8fd8;
     background: #f0ecff;
   }
+  .cw-snapshot-hist-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .cw-release-note-btn {
+    flex-shrink: 0;
+    margin: 0;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.2;
+    font-family: inherit;
+    color: #8a8680;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    letter-spacing: 0.02em;
+  }
+  .cw-release-note-btn:hover {
+    color: #5c5854;
+    background: rgba(0, 0, 0, 0.04);
+  }
+  .cw-release-note-btn:focus-visible {
+    outline: 2px solid #631eed;
+    outline-offset: 2px;
+  }
+  .upd-log-modal .upd-log-hint {
+    font-size: 12px;
+    line-height: 1.45;
+    color: #555;
+    margin: 0 0 12px;
+  }
+  .upd-log-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: min(56vh, 440px);
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .upd-log-card {
+    border-bottom: 1px solid #ece8e2;
+  }
+  .upd-log-card:last-child {
+    border-bottom: none;
+  }
+  .upd-log-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    padding: 12px 4px;
+    margin: 0;
+    border: none;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+    color: #333;
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+  .upd-log-card-head:hover {
+    background: rgba(99, 30, 237, 0.04);
+  }
+  .upd-log-card-head:focus-visible {
+    outline: 2px solid #631eed;
+    outline-offset: -2px;
+  }
+  .upd-log-card-meta {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: #888;
+    min-width: 5.5rem;
+  }
+  .upd-log-card-title {
+    flex: 1 1 auto;
+    font-size: 13px;
+    font-weight: 600;
+    min-width: 0;
+  }
+  .upd-log-chev {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #631eed;
+    width: 1.25rem;
+    text-align: center;
+  }
+  .upd-log-card-body {
+    padding: 0 4px 14px 5.5rem;
+    font-size: 12px;
+    line-height: 1.55;
+    color: #444;
+    white-space: pre-wrap;
+  }
+  .upd-log-empty {
+    font-size: 12px;
+    color: #888;
+    padding: 12px 4px;
+  }
+  @media (max-width: 900px) {
+    .upd-log-card-body {
+      padding-left: 4px;
+    }
+    .upd-log-card-head {
+      flex-wrap: wrap;
+    }
+    .upd-log-card-meta {
+      width: 100%;
+      min-width: 0;
+    }
+  }
+  .cw-postlogout-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
   .snap-hist-modal .snap-hist-hint {
     font-size: 12px;
     line-height: 1.45;
@@ -4270,6 +4747,11 @@
     font-size: 11px;
     color: #666;
     margin-top: 4px;
+  }
+  .snap-hist-restore-btn {
+    margin-top: 8px;
+    font-size: 12px;
+    padding: 6px 10px;
   }
   .snap-hist-empty {
     font-size: 12px;
@@ -5416,15 +5898,6 @@
 
   .proj-req-textarea {
     line-height: 1.45;
-  }
-
-  .bcr-agenda-tree {
-    margin-top: -4px;
-  }
-
-  .bcr-agenda-tree:disabled {
-    opacity: 0.65;
-    cursor: not-allowed;
   }
 
   .acl-err {

@@ -212,24 +212,23 @@ export function loadProjectsFromLocalStorage() {
     console.error('Failed to load projects:', e);
     projects.set([]);
   }
+}
 
-  // 현재 열린 프로젝트 복원
+/**
+ * 명시 로그아웃 시(M2-SESSION-SNAPSHOT NOW-42): `CURRENT_PROJECT_KEY` 제거 + 열린 프로젝트·노드 비움.
+ * `loadProjectsFromLocalStorage`는 프로젝트 목록만 채우며, 부트 시 `plannode_current_project_v3`로
+ * 자동 `selectProject` 하지 않는다(로그인·새로고침 모두 빈 캔버스 시작 — 모달에서 명시 선택).
+ */
+export function clearSessionProjectSelectionForLogout(): void {
+  if (typeof window === 'undefined') return;
   try {
-    const currentStored = localStorage.getItem(CURRENT_PROJECT_KEY);
-    if (currentStored) {
-      const currentProj = JSON.parse(currentStored) as Project | null;
-      if (currentProj) {
-        // 프로젝트가 여전히 목록에 있는지 확인
-        const plist = get(projects);
-        const exists = plist.some((p) => p.id === currentProj.id);
-        if (exists) {
-          selectProject(currentProj);
-        }
-      }
-    }
-  } catch (e) {
-    console.error('Failed to restore current project:', e);
+    localStorage.removeItem(CURRENT_PROJECT_KEY);
+  } catch {
+    /* ignore */
   }
+  currentProject.set(null);
+  nodes.set([]);
+  activeView.set('tree');
 }
 
 // 프로젝트 선택 (노드를 먼저 반영한 뒤 currentProject를 설정 — 파일럿 브리지 구독 순서)
@@ -259,7 +258,7 @@ export function selectProject(project: Project | null) {
     if (arr.length > 0) {
       nodes.set(arr);
     } else {
-      const rootNode = makeRootNode(project);
+      const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project));
       const nodeList = [rootNode];
       nodes.set(nodeList);
       localStorage.setItem(NODES_KEY_PREFIX + project.id, JSON.stringify(nodeList));
@@ -267,7 +266,7 @@ export function selectProject(project: Project | null) {
     }
   } catch (e) {
     console.error('Failed to load nodes:', e);
-    const rootNode = makeRootNode(project);
+    const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project));
     nodes.set([rootNode]);
   }
 
@@ -291,7 +290,7 @@ export function createProject(projectData: Omit<Project, 'id' | 'created_at' | '
     updated_at: new Date().toISOString()
   };
 
-  const rootNode = makeRootNode(newProject);
+  const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(newProject));
 
   projects.update((p) => {
     const updated = [...p, newProject];
@@ -522,6 +521,35 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
   touchProjectUpdatedAt(projectId);
 }
 
+/**
+ * NOW-44 워크스페이스 되돌리기: 스냅샷 노드 배열로 교체(현재 열린 프로젝트 id 일치 시만).
+ * 파일럿 갱신은 `nodes` 스토어 구독이 처리한다.
+ */
+export function replaceProjectNodesFromHistory(projectId: string, list: Node[]): boolean {
+  if (typeof window === 'undefined') return false;
+  const cur = get(currentProject);
+  if (!cur || cur.id !== projectId || !Array.isArray(list)) return false;
+
+  const prevSnap = get(nodes);
+  const prevSameProject =
+    prevSnap.length === 0 || prevSnap.every((n) => (n.project_id ?? projectId) === projectId);
+  const prevIds = new Set(prevSnap.map((n) => n.id));
+  const nextIds = new Set(list.map((n) => n.id));
+  const removed = prevSameProject ? [...prevIds].filter((id) => !nextIds.has(id)) : [];
+  if (removed.length) {
+    registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
+  }
+
+  try {
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
+  } catch {
+    return false;
+  }
+  nodes.set(list);
+  touchProjectUpdatedAt(projectId);
+  return true;
+}
+
 // 노드 추가 (호출자가 id를 넘기면 유지)
 export function addNode(nodeData: Omit<Node, 'created_at' | 'updated_at'> & { id?: string }) {
   if (typeof window === 'undefined') return null;
@@ -701,6 +729,92 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
   return { projects: [...plist], nodesByProject };
 }
 
+/** 로그아웃 직전 1회 스냅(M2-SESSION-SNAPSHOT NOW-41): `gatherWorkspaceBundle` + 선택 AI 탭 텍스트. 클라우드 upsert와 별도 `localStorage` 단일 키. */
+export const LOGOUT_SESSION_SNAPSHOT_KEY = 'plannode_logout_bundle_snapshot_v1';
+const LOGOUT_AI_TEXT_MAX = 80_000;
+
+export type LogoutSessionSnapshotV1 = {
+  v: 1;
+  at: string;
+  current_project_id: string | null;
+  /** F2-5: 세션 `#ai-result` 본문 스냅(비-SSoT·GATE B) */
+  ai_result_text?: string;
+  bundle: WorkspaceBundle;
+};
+
+/**
+ * PRD 초안·명세·IA는 번들 내 프로젝트/노드에 이미 포함된다(`prd_section_drafts`, 노드 필드, `metadata.iaGrid`).
+ */
+export function captureLogoutSessionSnapshot(opts?: { aiResultText?: string | null }): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const bundle = gatherWorkspaceBundle();
+    const rawAi = opts?.aiResultText;
+    const aiTrim = rawAi != null && String(rawAi).trim() ? String(rawAi).trim().slice(0, LOGOUT_AI_TEXT_MAX) : undefined;
+    const snap: LogoutSessionSnapshotV1 = {
+      v: 1,
+      at: new Date().toISOString(),
+      current_project_id: get(currentProject)?.id ?? null,
+      ai_result_text: aiTrim,
+      bundle
+    };
+    localStorage.setItem(LOGOUT_SESSION_SNAPSHOT_KEY, JSON.stringify(snap));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** NOW-43: 파싱된 로그아웃 세션 스냅 또는 null */
+export function readLogoutSessionSnapshotV1(): LogoutSessionSnapshotV1 | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOGOUT_SESSION_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw) as Partial<LogoutSessionSnapshotV1>;
+    if (j?.v !== 1 || !j.bundle || !Array.isArray(j.bundle.projects)) return null;
+    const nbp = j.bundle.nodesByProject;
+    if (!nbp || typeof nbp !== 'object' || Array.isArray(nbp)) return null;
+    return j as LogoutSessionSnapshotV1;
+  } catch {
+    return null;
+  }
+}
+
+/** NOW-43: 불러오기 합의 완료 후 재표시 방지 */
+export function clearLogoutSessionSnapshot(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(LOGOUT_SESSION_SNAPSHOT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function extractProjectSliceFromBundle(
+  bundle: WorkspaceBundle,
+  projectId: string
+): { project: Project | null; nodes: Node[] } {
+  const project = bundle.projects.find((p) => p.id === projectId) ?? null;
+  const raw = bundle.nodesByProject[projectId];
+  return { project, nodes: Array.isArray(raw) ? raw : [] };
+}
+
+/** NOW-43: 로그아웃 스냅에 담긴 프로젝트 슬라이스를 로컬에 적용 후 클라우드 푸시 대기 가능 */
+export function applyLogoutSnapshotProjectToLocal(
+  snapshot: LogoutSessionSnapshotV1,
+  projectId: string,
+  fallbackMeta: Project
+): void {
+  const { project: metaFromBundle, nodes } = extractProjectSliceFromBundle(snapshot.bundle, projectId);
+  const meta = metaFromBundle ?? fallbackMeta;
+  upsertImportedPlannodeTreeV1(meta, nodes, {
+    openAfter: false,
+    markDirty: true,
+    preserveRemoteUpdatedAt: true
+  });
+}
+
 /** 클라우드에서 받은 묶음으로 로컬·스토어 전면 교체 (현재 선택 해제) */
 export function replaceWorkspaceFromBundle(bundle: WorkspaceBundle): void {
   if (typeof window === 'undefined') return;
@@ -805,6 +919,7 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
 /**
  * 동접·다기기: 원격 워크스페이스 스냅샷과 로컬 노드를 id 단위로 합침.
  * - remoteProjectMetaNewer: 프로젝트 메타가 원격이 더 최신 → 원격 목록에 없는 id는 삭제로 간주, 동일 id는 updated_at이 같거나 더 새로운 쪽(원격 동률 시 원격 우선).
+ *   **반환 배열의 평면 순서는 `remoteNodes`와 동일**하게 유지(형제 드래그 순서·파일럿 렌더 정합).
  * - 그렇지 않음: 로컬 메타가 같거나 더 최신 → 원격에서 더 새로운 updated_at인 노드만 흡수(로컬 전용 id·삭제 유지).
  * `suppressRecentDeletesProjectId`가 있으면 `registerRecentlyDeletedNodeIdsForCloudMerge`로 등록된 id는
  * **원격 메타가 더 최신이어도** 로컬에 없을 때는 넣지 않음(소유자 슬라이스가 merge 실패 등으로 옛 목록을 유지할 때 되살림 방지).
@@ -833,6 +948,13 @@ export function mergeNodeListsForCloud(
         byId.set(rn.id, rn);
       }
     }
+    /** 원격 스냅샷의 평면 배열 순서 유지 — 파일럿 형제 순서·레이아웃(`nodes.filter(parent_id)`)과 일치 */
+    const ordered: Node[] = [];
+    for (const rn of remoteNodes) {
+      const v = byId.get(rn.id);
+      if (v) ordered.push(v);
+    }
+    return ordered;
   } else {
     const suppress = recentDeleteIdsForCloudMerge(suppressRecentDeletesProjectId ?? null);
     for (const rn of remoteNodes) {
@@ -846,6 +968,22 @@ export function mergeNodeListsForCloud(
         byId.set(rn.id, rn);
       }
     }
+    /**
+     * 로컬 메타가 더 최신이어도 원격에 있는 노드들의 상대 순서를 앞에 두고,
+     * 로컬 전용 노드(원격에 없는 것)를 뒤에 붙인다.
+     * 파일럿은 nodes.filter(parent_id===…)의 배열 순서로 형제를 표시하므로
+     * 소유자가 바꾼 드래그 순서가 공유 계정에 올바르게 반영된다.
+     */
+    const remoteIdOrder = new Set(remoteNodes.map((x) => x.id));
+    const ordered: Node[] = [];
+    for (const rn of remoteNodes) {
+      const v = byId.get(rn.id);
+      if (v) ordered.push(v);
+    }
+    for (const [id, v] of byId) {
+      if (!remoteIdOrder.has(id)) ordered.push(v);
+    }
+    return ordered;
   }
   return [...byId.values()];
 }
@@ -863,11 +1001,9 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
 
 /**
  * 내 plannode_workspace 행 기준: 원격 번들과 로컬을 합침.
- * 프로젝트 updated_at 비교에 더해, 동일 프로젝트라도 노드별 updated_at으로 수정·추가를 흡수하고,
- * 원격 메타가 더 최신일 때만 원격 목록에 없는 노드를 삭제로 반영.
- *
- * **로컬 프로젝트가 더 새면** 노드 배열은 `mergeNodeListsForCloud`를 쓰지 않고 **로컬 스토리지 그대로** 둔다.
- * (업로드 직전 `mergeRemoteWorkspaceBeforeUpload`가 옛 `nodes_by_project_json`을 합치면서 삭제가 되살아나던 문제 방지)
+ * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
+ * - remoteProjectMetaNewer: 원격 목록에 없는 id를 삭제로 간주 + 동일 id는 updated_at 비교
+ * - !remoteProjectMetaNewer: 원격에서 더 새로운 노드만 흡수(로컬 전용 노드·순서 유지)
  */
 export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): number {
   if (typeof window === 'undefined') return 0;
@@ -885,10 +1021,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
     const lTime = local ? parseTs(local.updated_at) : -1;
     const remoteProjectMetaNewer = !local || rTime > lTime;
     const localNodes = local ? loadProjectNodesFromLocalStorage(project.id) : [];
-    const mergedNodes =
-      local && !remoteProjectMetaNewer
-        ? localNodes
-        : mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer, project.id);
+    /** 로컬 메타가 더 새더라도 노드 수준 LWW는 항상 수행 — 배지·순서 변경 반영 */
+    const mergedNodes = mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer, project.id);
     const keepSrc = local?.cloud_workspace_source_user_id ?? project.cloud_workspace_source_user_id;
 
     const mergedProject: Project = remoteProjectMetaNewer

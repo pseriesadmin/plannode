@@ -14,7 +14,8 @@ function csvCell(s: unknown): string {
   return t;
 }
 
-function slugExportName(name: string): string {
+/** PRD M4보내기·파일럿 MD/PRD/JSON과 동일 규칙 — 단일 슬러그 소스 */
+export function slugExportName(name: string): string {
   const s = String(name || 'plannode')
     .trim()
     .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-')

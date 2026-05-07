@@ -82,8 +82,10 @@ export async function canAccessProject(project: Project): Promise<boolean> {
   return !!data;
 }
 
-/** 선택 전 검사 후 selectProject — 레거시 첫 오픈 시 소유자 uid 로컬에 박지 않음(명시적 '소유자 등록'에서만) */
-export async function trySelectProject(project: Project): Promise<{ ok: boolean; message?: string }> {
+/** ACL·테이블 존재 검사만 — 캔버스 열기는 `trySelectProject` */
+export async function verifyProjectAccessForOpen(
+  project: Project
+): Promise<{ ok: boolean; message?: string }> {
   const n = await countAclRows(project.id);
   if (n === -2) {
     return {
@@ -101,6 +103,13 @@ export async function trySelectProject(project: Project): Promise<{ ok: boolean;
       message: '이 프로젝트에 접근할 권한이 없어. 소유자·플랫폼 마스터에게 이메일 등록을 요청해줘.'
     };
   }
+  return { ok: true };
+}
+
+/** 선택 전 검사 후 selectProject — 레거시 첫 오픈 시 소유자 uid 로컬에 박지 않음(명시적 '소유자 등록'에서만) */
+export async function trySelectProject(project: Project): Promise<{ ok: boolean; message?: string }> {
+  const v = await verifyProjectAccessForOpen(project);
+  if (!v.ok) return v;
   selectProject(project);
   return { ok: true };
 }
@@ -272,7 +281,7 @@ export async function pruneStaleInviteAfterSliceMissing(
   return { outcome: 'pruned' };
 }
 
-/** RPC: 소유자 워크스페이스에서 한 프로젝트만 가져와 로컬에 합침 후 ACL 통과 시 연다 */
+/** RPC: 소유자 워크스페이스에서 한 프로젝트만 가져와 로컬에 합침 후 ACL 통과 여부만 검사(캔버스 열기는 호출측) */
 export async function importSharedProjectFromWorkspace(
   workspaceSourceUserId: string,
   projectId: string
@@ -307,8 +316,8 @@ export async function importSharedProjectFromWorkspace(
   };
   const merged = upsertImportedPlannodeTreeV1(projectWithSrc, slice.nodes, { openAfter: false });
   if (!merged) return { ok: false, message: '로컬에 저장하지 못했어.' };
-  const r = await trySelectProject(merged);
-  if (!r.ok) return { ok: false, message: r.message ?? '열 권한이 없어.' };
+  const v = await verifyProjectAccessForOpen(merged);
+  if (!v.ok) return { ok: false, message: v.message ?? '열 권한이 없어.' };
   return { ok: true, message: `불러왔어: ${merged.name}` };
 }
 

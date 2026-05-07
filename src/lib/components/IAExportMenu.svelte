@@ -6,12 +6,14 @@
   import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
   import { isSupabaseCloudConfigured } from '$lib/supabase/env';
   import { runPlannodeIAExport, type IAExportIntent } from '$lib/ai/iaExportRunner';
+  import { slugExportName } from '$lib/ai/iaGridCsvExport';
 
   let loading: IAExportIntent | null = null;
   let resultText = '';
   let resultHint = '';
   let showModal = false;
   let modalEl: HTMLDivElement | undefined;
+  let lastRunIntent: IAExportIntent | null = null;
 
   function pilotToast(msg: string) {
     if (typeof window === 'undefined') return;
@@ -49,6 +51,7 @@
     const p = get(currentProject);
     const session = get(authSession);
     const token = session?.access_token ?? null;
+    lastRunIntent = intent;
     loading = intent;
     resultHint = '';
     resultText = '';
@@ -102,6 +105,58 @@
     }
   }
 
+  /** PRD M4 F4-3·F4-4 방향 — 슬러그-ia.md / 슬러그-wireframes.md 등 */
+  function downloadResultMd() {
+    if (!resultText.trim() || typeof document === 'undefined') return;
+    const p = get(currentProject);
+    if (!p?.name) {
+      pilotToast('프로젝트를 먼저 선택해줘.');
+      return;
+    }
+    const slug = slugExportName(p.name);
+    const intent = lastRunIntent ?? 'IA_STRUCTURE';
+    const nameByIntent: Record<IAExportIntent, string> = {
+      IA_STRUCTURE: `${slug}-ia.md`,
+      SCREEN_LIST: `${slug}-wireframes.md`,
+      FUNCTIONAL_SPEC: `${slug}-functional-spec.md`
+    };
+    const fname = nameByIntent[intent];
+    const blob = new Blob([resultText], { type: 'text/markdown;charset=utf-8' });
+    try {
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = u;
+      a.download = fname;
+      a.rel = 'noopener';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(u);
+      pilotToast(`${fname} 저장했어.`);
+      try {
+        window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'ia-md-export' } }));
+      } catch {
+        /* ignore */
+      }
+    } catch {
+      pilotToast('파일 저장이 막혔어. 다시 시도해줘.');
+    }
+  }
+
+  $: downloadFileHint =
+    $currentProject && lastRunIntent
+      ? (() => {
+          const s = slugExportName($currentProject.name);
+          const map: Record<IAExportIntent, string> = {
+            IA_STRUCTURE: `${s}-ia.md`,
+            SCREEN_LIST: `${s}-wireframes.md`,
+            FUNCTIONAL_SPEC: `${s}-functional-spec.md`
+          };
+          return `마크다운 파일로 저장 (${map[lastRunIntent]})`;
+        })()
+      : '마크다운 파일로 저장';
+
   $: if (showModal) {
     void tick().then(() => {
       modalEl?.querySelector<HTMLButtonElement>('.iax-copy')?.focus();
@@ -128,7 +183,7 @@
 
 <div class="iax">
   <p class="iax-lead">
-    <strong>문서 초안 (AI)</strong> — 아래 보기(IA / 기능명세)와 같은 열을 기준으로 표·다이어그램 초안을 뽑아요. 서버에 Claude가 있을 때만 자동 생성돼요.
+    <strong>IA·기능명세 열</strong> — 메뉴 계층·화면 목록·기능 표는 <strong>노드 트리·그리드</strong>를 기준으로 한 문서 초안이에요 (제품에서 말하는 <strong>정보 구조 IA</strong>는 LLM이 아니라 이 구조예요). 아래 버튼 중 서버에 Claude가 연결된 경우에만 자동 생성되고, 없으면 복사용 프롬프트로 대체돼요. <strong>캔버스의「AI 분석(LLM)」탭</strong>은 별도예요.
   </p>
   {#if !isSupabaseCloudConfigured()}
     <p class="iax-hint">Supabase가 꺼져 있으면 «복사용 프롬프트»만 써요 (서버 AI 없음).</p>
@@ -181,10 +236,11 @@
       aria-modal="true"
       aria-labelledby="iax-modal-title"
     >
-      <h3 id="iax-modal-title" class="iax-modal-h">문서 초안 (AI)</h3>
+      <h3 id="iax-modal-title" class="iax-modal-h">문서 초안 (서버 AI)</h3>
       <p class="iax-modal-sub">{resultHint}</p>
       <pre class="iax-pre" id="iax-result-text">{resultText}</pre>
       <div class="iax-modal-actions">
+        <button type="button" class="iax-dl" title={downloadFileHint} on:click={downloadResultMd}>마크다운 저장</button>
         <button type="button" class="iax-copy" on:click={copyResult}>복사</button>
         <button type="button" class="iax-close" on:click={closeModal}>닫기</button>
       </div>
@@ -312,6 +368,7 @@
     padding: 12px 20px 16px;
   }
   .iax-copy,
+  .iax-dl,
   .iax-close {
     padding: 8px 16px;
     border-radius: 8px;
@@ -319,6 +376,11 @@
     cursor: pointer;
     border: 1px solid #ccc;
     background: #fff;
+  }
+  .iax-dl {
+    border-color: #2d6a4f;
+    color: #1b4332;
+    background: #f0fdf4;
   }
   .iax-copy {
     border-color: #631EED;

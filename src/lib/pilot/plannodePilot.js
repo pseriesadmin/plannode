@@ -21,6 +21,7 @@ import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
 import { PLANNODETREE_EXPORT_ROOT_VERSION } from '$lib/plannodeTreeV1';
+import { slugExportName } from '$lib/ai/iaGridCsvExport';
 import {
   unionNodeBoundsAndViewport,
   computeMinimapViewBox,
@@ -204,8 +205,9 @@ function layoutOriginX() {
   }
   return 28;
 }
-/** 노드맵 배치 선호 — `nodes` SSoT 아님 · localStorage 키 plan-output P-4.5 */
-const NODE_MAP_LAYOUT_LS = 'plannode.nodeMapLayout';
+/** 노드맵 배치 선호 — `nodes` SSoT 아님 · 프로젝트 id별 `NODE_MAP_LAYOUT_MAP_LS`(레거시 전역 키는 1회 마이그레이션) */
+const NODE_MAP_LAYOUT_LS_LEGACY = 'plannode.nodeMapLayout';
+const NODE_MAP_LAYOUT_MAP_LS = 'plannode.nodeMapLayout.v1';
 
 let R_, CW, CV, EG, SG, CTX, PM, ES, TST;
 let scale = 0.85,
@@ -265,21 +267,25 @@ let getAccessToken = null;
 let getPlanProjectId = null;
 let persistTimer = null;
 
-/** 실행 취소(Undo): 노드 전체 스냅샷 스택 (최근 작업만 복원) */
+/** Undo·Redo: 노드 전체 스냅샷 스택. 각 스택 최대 UNDO_MAX개(메모리 한도) — 연속 Undo/Redo는 이 길이를 넘기지 않음 */
 const UNDO_MAX = 40;
 let undoStack = [];
+/** Undo 직후 되돌린 상태를 다시 적용하기 위한 스택 (최대 길이 UNDO_MAX) */
+let redoStack = [];
 let applyingUndo = false;
 /** addChild 직후 첫 showEdit「저장」은 addChild에서 이미 undo 스냅을 쌓았으므로 중복 push 방지 */
 const skipFirstEditSaveUndo = new Set();
 
 function clearUndoStack() {
   undoStack = [];
+  redoStack = [];
   skipFirstEditSaveUndo.clear();
 }
 
 function pushUndoSnapshot() {
   if (syncing || applyingUndo || !curP) return;
   try {
+    redoStack = [];
     undoStack.push({ nodes: JSON.parse(JSON.stringify(nodes)), nc });
     if (undoStack.length > UNDO_MAX) undoStack.shift();
   } catch (_) {}
@@ -293,6 +299,10 @@ function undoLast() {
   const snap = undoStack.pop();
   applyingUndo = true;
   try {
+    try {
+      redoStack.push({ nodes: JSON.parse(JSON.stringify(nodes)), nc });
+      if (redoStack.length > UNDO_MAX) redoStack.shift();
+    } catch (_) {}
     nodes = JSON.parse(JSON.stringify(snap.nodes));
     nc = snap.nc;
     syncNcFromNodes();
@@ -303,8 +313,39 @@ function undoLast() {
     clearRelinkHold();
     render();
     toast('실행 취소 ✓');
+    schedulePersist();
   } catch (_) {
     toast('되돌리기 실패');
+  } finally {
+    applyingUndo = false;
+  }
+}
+
+function redoLast() {
+  if (syncing || applyingUndo || !curP || !redoStack.length) {
+    if (!syncing && !applyingUndo) toast('다시 실행할 작업이 없어');
+    return;
+  }
+  const snap = redoStack.pop();
+  applyingUndo = true;
+  try {
+    try {
+      undoStack.push({ nodes: JSON.parse(JSON.stringify(nodes)), nc });
+      if (undoStack.length > UNDO_MAX) undoStack.shift();
+    } catch (_) {}
+    nodes = JSON.parse(JSON.stringify(snap.nodes));
+    nc = snap.nc;
+    syncNcFromNodes();
+    if (selId && !find(selId)) selId = null;
+    multiSel.clear();
+    selectionBox = null;
+    clearRelinkArm();
+    clearRelinkHold();
+    render();
+    toast('다시 실행 ✓');
+    schedulePersist();
+  } catch (_) {
+    toast('다시 실행 실패');
   } finally {
     applyingUndo = false;
   }
@@ -798,6 +839,7 @@ function armRelinkCard(n) {
   clearRelinkHold();
   relinkArm = { mode: 'single', nodeIds: [n.id] };
   selId = n.id;
+  maybeEmitNodeSelect();
   relinkSuppressClick = true;
   setTimeout(() => {
     relinkSuppressClick = false;
@@ -820,6 +862,7 @@ function armRelinkChildrenGroup(anchorId) {
   clearRelinkHold();
   relinkArm = { mode: 'children', anchorId };
   selId = anchorId;
+  maybeEmitNodeSelect();
   toast('하위 노드만 이동 — 앵커는 그대로, 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소', {
     persistRelink: true
   });
@@ -872,7 +915,7 @@ function applyRelinkDrop(newParentId) {
   }
   clearRelinkArm();
   render();
-  schedulePersist();
+  flushPersistNow();
   emitAutoCloudSync('node-relink');
   toast('노드 연결을 바꿨어 · 순서·분류번호 자동 반영됨');
 }
@@ -1588,18 +1631,6 @@ function dlFile(c, t, f) {
   }
 }
 
-/** 다운로드 파일명용 (OS 금지 문자 제거) */
-function slugExportName(name) {
-  const s = String(name || 'plannode')
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
-  return s || 'plannode';
-}
-
 /** Svelte 측 하이브리드 클라우드 자동 저장 트리거 */
 function emitAutoCloudSync(reason) {
   try {
@@ -1683,23 +1714,83 @@ function bld(nid, col, r) {
   return row;
 }
 
-function loadNodeMapLayoutPreference() {
+function readLayoutMap() {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(NODE_MAP_LAYOUT_MAP_LS);
+    if (!raw) return {};
+    const o = JSON.parse(raw);
+    if (typeof o !== 'object' || o === null || Array.isArray(o)) return {};
+    return o;
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeLayoutMap(map) {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(NODE_MAP_LAYOUT_MAP_LS, JSON.stringify(map));
+    }
+  } catch (_) {}
+}
+
+let legacyLayoutMigrated = false;
+function migrateLegacyLayoutIfNeeded() {
   if (typeof localStorage === 'undefined') return;
+  if (legacyLayoutMigrated) return;
+  legacyLayoutMigrated = true;
   try {
-    const v = localStorage.getItem(NODE_MAP_LAYOUT_LS);
-    if (v === 'topdown' || v === 'right') nodeMapLayoutMode = v;
+    const leg = localStorage.getItem(NODE_MAP_LAYOUT_LS_LEGACY);
+    if (leg !== 'topdown' && leg !== 'right') return;
+    const raw = localStorage.getItem('plannode_projects_v3');
+    if (!raw) {
+      localStorage.removeItem(NODE_MAP_LAYOUT_LS_LEGACY);
+      return;
+    }
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || !arr.length) {
+      localStorage.removeItem(NODE_MAP_LAYOUT_LS_LEGACY);
+      return;
+    }
+    const map = readLayoutMap();
+    for (const p of arr) {
+      if (p && typeof p.id === 'string' && map[p.id] == null) map[p.id] = leg;
+    }
+    writeLayoutMap(map);
+    localStorage.removeItem(NODE_MAP_LAYOUT_LS_LEGACY);
   } catch (_) {}
 }
-function saveNodeMapLayoutPreference() {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(NODE_MAP_LAYOUT_LS, nodeMapLayoutMode);
-  } catch (_) {}
-}
+
 function dispatchNodeMapLayoutEvent() {
   try {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('plannode-node-map-layout', { detail: { mode: nodeMapLayoutMode } }));
     }
+  } catch (_) {}
+}
+
+/** 현재 열 프로젝트 id 기준으로 배치 모드 복원 · 프로젝트 전환 시 hydrate/openProj에서 호출 */
+function loadNodeMapLayoutForProject(projectId) {
+  if (!projectId) return;
+  migrateLegacyLayoutIfNeeded();
+  const map = readLayoutMap();
+  const v = map[projectId];
+  if (v === 'topdown' || v === 'right') {
+    nodeMapLayoutMode = v;
+  } else {
+    nodeMapLayoutMode = 'right';
+  }
+  dispatchNodeMapLayoutEvent();
+}
+
+function saveNodeMapLayoutPreference() {
+  try {
+    if (typeof localStorage === 'undefined' || !curP?.id) return;
+    migrateLegacyLayoutIfNeeded();
+    const map = readLayoutMap();
+    map[curP.id] = nodeMapLayoutMode;
+    writeLayoutMap(map);
   } catch (_) {}
 }
 function applyNodeMapLayout(mode) {
@@ -1787,6 +1878,36 @@ function nodeTopdownPlusCenterY(n) {
   return nodeBottomY(n) + (TOPDOWN_PB2_BELOW_NW - TOPDOWN_PB2_H / 2);
 }
 
+/** @type {string | null | undefined} */
+let lastEmittedSelIdForPresence;
+
+function getPresencePeersForPilot() {
+  try {
+    if (typeof window === 'undefined') return [];
+    const raw = window.__plannodePresencePeers;
+    return Array.isArray(raw) ? raw : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function presenceAvatarLetter(email) {
+  const e = String(email ?? '').trim();
+  if (!e) return '?';
+  const ch = e[0];
+  return /[a-zA-Z가-힣0-9]/.test(ch) ? ch.toUpperCase() : '?';
+}
+
+function maybeEmitNodeSelect() {
+  if (lastEmittedSelIdForPresence === selId) return;
+  lastEmittedSelIdForPresence = selId;
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('plannode-node-select', { detail: { nodeId: selId } }));
+    }
+  } catch (_) {}
+}
+
 function render() {
   clearSmartGuides();
   lm = {};
@@ -1857,14 +1978,28 @@ function render() {
     w.className = 'nw';
     w.id = 'nw-' + n.id;
     w.style.cssText = `left:${pos.x}px;top:${pos.y}px`;
+    const peersPresence = getPresencePeersForPilot();
+    let presenceConflict = false;
+    for (let pi = 0; pi < peersPresence.length; pi++) {
+      const pr = peersPresence[pi];
+      const sid = pr && pr.selected_node_id ? String(pr.selected_node_id).trim() : '';
+      if (sid === n.id && selId === n.id) {
+        presenceConflict = true;
+        break;
+      }
+    }
     const nd = document.createElement('div');
     nd.className =
       'nd' +
       (d === 0 ? ' rnd' : '') +
       (selId === n.id ? ' sel' : '') +
       (multiSel.has(n.id) ? ' msel' : '') +
-      (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '');
+      (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '') +
+      (presenceConflict ? ' nd--conflict' : '');
     nd.id = 'nd-' + n.id;
+    if (presenceConflict) {
+      nd.style.boxShadow = '0 0 0 2px rgba(239, 68, 68, 0.88)';
+    }
     const cardBadgeFlat = flattenBadgeSet(getBadgeSetFromNodeInput(n));
     const bgs = cardBadgeFlat
       .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
@@ -1945,6 +2080,21 @@ function render() {
     }
     const na = nd.querySelector('#na-' + n.id);
     if (n.parent_id) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
+    nd.style.position = 'relative';
+    for (let ai = 0; ai < peersPresence.length; ai++) {
+      const pr = peersPresence[ai];
+      const psid = pr && pr.selected_node_id ? String(pr.selected_node_id).trim() : '';
+      if (psid !== n.id) continue;
+      const av = document.createElement('div');
+      av.className = 'np-avatar';
+      av.setAttribute('aria-hidden', 'true');
+      const em = pr.email ? String(pr.email).trim() : '';
+      av.title = em ? `\u26a0 ${em} 편집 중` : '\u26a0 다른 사용자 편집 중';
+      av.textContent = presenceAvatarLetter(em);
+      av.style.cssText =
+        'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;width:28px;height:28px;border-radius:50%;background:rgba(99,102,241,0.92);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.25);border:2px solid rgba(255,255,255,.85)';
+      nd.appendChild(av);
+    }
     w.appendChild(nd);
     if (nodeHasAnyChild(n.id)) {
       const cb = document.createElement('button');
@@ -2085,6 +2235,7 @@ function render() {
   if (curView === 'prd') buildPRD();
   if (curView === 'spec') buildSpec();
   schedulePersist();
+  maybeEmitNodeSelect();
 }
 
 function drawEdges() {
@@ -2203,6 +2354,7 @@ function sDrag(e, n, isShiftPressed) {
     document.removeEventListener('pointercancel', up);
     const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(ids);
     render();
+    flushPersistNow();
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
   };
   document.addEventListener('pointermove', mv);
@@ -2235,6 +2387,7 @@ function addChild(pid) {
   };
   nodes = [...nodes, nn];
   skipFirstEditSaveUndo.add(nn.id);
+  selId = nn.id;
   render();
   // 모달을 즉시 표시 (RAF 이중 호출 제거)
   setTimeout(() => showEdit(nn), 50);
@@ -2301,6 +2454,14 @@ function showEdit(n) {
             .slice(0, 10);
           target.num = numIn || defaultNumForNode(target);
           applyBadgeSetToNode(target, working);
+          const san = sanitizeNodeBadgesForTreeV1({
+            badges: target.badges ?? [],
+            metadata: target.metadata,
+            name: target.name,
+            description: target.description
+          });
+          target.badges = san.badges;
+          target.metadata = san.metadata !== undefined ? san.metadata : {};
           nodes = [...nodes];
           render();
           toast('저장됨(이 기기) · 클라우드 자동 반영');
@@ -2730,6 +2891,7 @@ function getDemoNodes(pid) {
 
 function openProj(p, delegateProjectModal) {
   curP = p;
+  loadNodeMapLayoutForProject(p.id);
   clearUndoStack();
   if (!delegateProjectModal && PM) PM.style.display = 'none';
   const pnt = document.getElementById('PNT');
@@ -2809,7 +2971,7 @@ export function initPlannode(opts = {}) {
     return null;
   }
 
-  loadNodeMapLayoutPreference();
+  migrateLegacyLayoutIfNeeded();
 
   if (CTX) {
     CTX.addEventListener('click', onCtxClick);
@@ -2817,6 +2979,20 @@ export function initPlannode(opts = {}) {
   }
   document.addEventListener('click', onDocClickCtx);
   disposers.push(() => document.removeEventListener('click', onDocClickCtx));
+
+  const onPresencePeersCanvasUpdate = () => {
+    // Presence 업데이트: 트리 뷰일 때 무조건 render — 아바타 추가/제거 모두 처리
+    if (curView === 'tree') render();
+  };
+  window.addEventListener('plannode-presence-update', onPresencePeersCanvasUpdate);
+  disposers.push(() => window.removeEventListener('plannode-presence-update', onPresencePeersCanvasUpdate));
+
+  const onPresenceSubscribed = () => {
+    lastEmittedSelIdForPresence = undefined;
+    maybeEmitNodeSelect();
+  };
+  window.addEventListener('plannode-presence-subscribed', onPresenceSubscribed);
+  disposers.push(() => window.removeEventListener('plannode-presence-subscribed', onPresenceSubscribed));
 
   const vSpec = document.getElementById('V-SPEC');
   if (vSpec) {
@@ -2906,6 +3082,14 @@ export function initPlannode(opts = {}) {
     }
     undoLast();
   });
+  const bre = document.getElementById('BRE');
+  wireBtn(bre, () => {
+    if (!curP) {
+      toast('프로젝트를 먼저 선택해줘');
+      return;
+    }
+    redoLast();
+  });
   const onGlobalKeyDown = (e) => {
     if (e.key === 'Escape' && (relinkArm || relinkDragActive)) {
       const t = e.target;
@@ -2917,17 +3101,34 @@ export function initPlannode(opts = {}) {
       toast('노드 붙이기 취소');
       return;
     }
-    /** Win Ctrl+Z / Mac ⌘Z — 코드 레이아웃 호환(KeyZ), IME·일부 브라우저 대비 */
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+    /** 다시 실행: Ctrl+Shift+Z / ⌘⇧Z 또는 Ctrl+Y / ⌘Y */
     const isZ =
       e.code === 'KeyZ' ||
       String(e.key || '')
         .toLowerCase()
         .trim() === 'z';
+    const isY =
+      e.code === 'KeyY' ||
+      String(e.key || '')
+        .toLowerCase()
+        .trim() === 'y';
+    const redoChordShiftZ = isZ && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey;
+    const redoChordY = isY && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
+    if (redoChordShiftZ || redoChordY) {
+      if (!curP) return;
+      e.preventDefault();
+      e.stopPropagation();
+      redoLast();
+      return;
+    }
+
+    /** Win Ctrl+Z / Mac ⌘Z — 코드 레이아웃 호환(KeyZ), IME·일부 브라우저 대비 */
     const undoChord =
       isZ && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
     if (!undoChord) return;
-    const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (!curP) return;
     e.preventDefault();
     e.stopPropagation();
@@ -2942,6 +3143,7 @@ export function initPlannode(opts = {}) {
     }
     const slug = slugExportName(curP.name);
     const md = `# ${curP.name} — Feature Map\n작성자: ${curP.author} | 기간: ${curP.start_date} ~ ${curP.end_date}\n\n---\n\n${nodes.filter((n) => !n.parent_id).flatMap((r) => toMdLine(r)).join('\n')}`;
+    /* PRD M4 F4-1 Feature Map MD */
     dlFile(md, 'text/markdown;charset=utf-8', `${slug}-feature-map.md`);
     toast('MD 다운로드 완료 ✓');
     emitAutoCloudSync('md-export');
@@ -2953,7 +3155,8 @@ export function initPlannode(opts = {}) {
     }
     const slug = slugExportName(curP.name);
     const prd = buildPrdMarkdownMerged(curP, nodes, curP.prd_section_drafts);
-    dlFile(prd, 'text/markdown;charset=utf-8', `${slug}-prd-v20.md`);
+    /* PRD M4 F4-2 PRD 본문(v2.0 구조) — 파일명은 슬러그-prd.md */
+    dlFile(prd, 'text/markdown;charset=utf-8', `${slug}-prd.md`);
     toast('PRD 다운로드 완료 ✓');
     emitAutoCloudSync('prd-export');
   });
@@ -3274,6 +3477,7 @@ export function initPlannode(opts = {}) {
         const prevPid = curP?.id ?? null;
         const projectChanged = prevPid !== project.id;
         curP = project;
+        loadNodeMapLayoutForProject(project.id);
         if (pilotNodes?.length) {
           nodes = pilotNodes.map((n) => ({
             ...n,
@@ -3302,6 +3506,7 @@ export function initPlannode(opts = {}) {
           clearRelinkArm();
           clearRelinkHold();
           selId = null;
+          lastEmittedSelIdForPresence = undefined;
           collapsedNodeIds.clear();
         }
         if (selId && !find(selId)) selId = null;
@@ -3323,6 +3528,8 @@ export function initPlannode(opts = {}) {
         clearUndoStack();
         curP = null;
         nodes = [];
+        selId = null;
+        lastEmittedSelIdForPresence = undefined;
         collapsedNodeIds.clear();
         if (ES) ES.style.display = 'flex';
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());

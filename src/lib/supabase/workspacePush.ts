@@ -54,6 +54,10 @@ export function scheduleCloudFlush(reason: string, delayMs = 500): void {
 /**
  * 자동 동기화: (1) 로컬 더티면 업로드 + 공유 프로젝트는 소유자 행에 merge RPC
  * (2) 내 워크스페이스·공유 슬라이스를 서버 기준으로 LWW 풀
+ *
+ * **RISK 2 완화(동기화 순서):** pullOwnWorkspaceIfChanged 전에 로컬 더티 확정 플러시.
+ * 업로드 중 네트워크 지연 시 pullOwnWorkspaceIfChanged가 옛 스냅샷(더티 상태의 로컬 변경 전)을
+ * 읽는 것을 방지하고, 항상 서버 최신 메타를 기준으로 병합하도록 보장한다.
  */
 export async function runBidirectionalCloudSync(reason: string): Promise<void> {
   if (!browser || !isSupabaseCloudConfigured()) return;
@@ -65,6 +69,13 @@ export async function runBidirectionalCloudSync(reason: string): Promise<void> {
       const r = await uploadWorkspaceToCloud();
       if (!r.ok && import.meta.env.DEV) {
         console.warn('[runBidirectionalCloudSync]', reason, r.message);
+      }
+    }
+    /** 풀 직전: 남은 더티(업로드 재시도 대기) 한 번 더 플러시 → 로컬이 서버 최신 메타 기준 병합 보장 */
+    if (get(workspaceIsDirty)) {
+      const r = await uploadWorkspaceToCloud();
+      if (!r.ok && import.meta.env.DEV) {
+        console.warn('[runBidirectionalCloudSync flush before pull]', reason, r.message);
       }
     }
     await pullOwnWorkspaceIfChanged();

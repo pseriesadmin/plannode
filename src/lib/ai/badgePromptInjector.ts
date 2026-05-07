@@ -421,8 +421,18 @@ export function filterBadgeSetToCanonicalPool(set: BadgeSet): BadgeSet {
 export function sanitizeNodeBadgesForTreeV1(n: {
   badges?: string[];
   metadata?: NodeMetadata | null;
+  /** 추론(`inferBadgeHintStringsFromMetadata`)에 포함 — 생략 시 이름·설명 키워드 매칭 생략 */
+  name?: string;
+  description?: string;
 }): { badges: string[]; metadata?: NodeMetadata } {
-  const set = filterBadgeSetToCanonicalPool(getBadgeSetFromNodeInput(n));
+  const set = filterBadgeSetToCanonicalPool(
+    getBadgeSetFromNodeInput({
+      badges: n.badges,
+      metadata: n.metadata,
+      name: n.name,
+      description: n.description
+    })
+  );
   const badges = flattenBadgeSet(set);
   const base: NodeMetadata =
     n.metadata && typeof n.metadata === 'object' && !Array.isArray(n.metadata)
@@ -445,7 +455,9 @@ export function sanitizeNodeBadgesForTreeV1(n: {
 export function applySanitizeImportedPlannodeNodeV1(node: Node): Node {
   const san = sanitizeNodeBadgesForTreeV1({
     badges: node.badges ?? [],
-    metadata: node.metadata
+    metadata: node.metadata,
+    name: node.name,
+    description: node.description
   });
   return { ...node, badges: san.badges, metadata: san.metadata };
 }

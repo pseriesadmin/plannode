@@ -10,7 +10,7 @@ export const NODE_SNAPSHOT_RING_MAX = 8;
 /** 단일 localStorage 키 대략 상한(바이트 아님 문자 길이 근사) */
 export const NODE_SNAPSHOT_JSON_ROUGH_MAX = 420_000;
 
-export type NodeSnapshotReason = 'presence_peer' | 'pre_pull' | 'manual';
+export type NodeSnapshotReason = 'presence_peer' | 'pre_pull' | 'manual' | 'import';
 
 export type StoredNodeSnapshot = {
   id: string;

@@ -90,6 +90,12 @@ async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
   if (remoteTs === prev) return;
 
   mergeWorkspaceBundleFromCloudRemote(bundle);
+  /** 캐시 갱신 — 업로드 루프가 동일 원격 번들을 중복 병합하지 않도록 */
+  try {
+    localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
+  } catch {
+    /* ignore */
+  }
 }
 
 function isWorkspaceUpsertRpcMissing(err: { message?: string; code?: string; details?: string } | null): boolean {
@@ -615,65 +621,93 @@ export async function pullOwnWorkspaceIfChanged(): Promise<number> {
   return n;
 }
 
-/** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영 */
-export async function pullSharedProjectSlicesIfNewer(): Promise<number> {
-  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
+/** NOW-43: 로컬·캐시 갱신 없이 내 `plannode_workspace` 번들만 조회 */
+export async function fetchOwnWorkspaceBundleFresh(): Promise<WorkspaceBundle | null> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return null;
+  const { userId } = await requireSessionUserId();
+  if (!userId) return null;
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select('projects_json, nodes_by_project_json')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return normalizeBundle(data as { projects_json: unknown; nodes_by_project_json: unknown });
+}
+
+/**
+ * 공유 프로젝트 1건: 소유자 슬라이스가 더 최신일 때 노드·메타 LWW 반영 (`pullSharedProjectSlicesIfNewer`와 동일 규칙).
+ * @returns 로컬에 실제 변경이 있었으면 true
+ */
+export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Project): Promise<boolean> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
   const uid = getAuthUserId();
-  if (!uid) return 0;
+  if (!uid) return false;
+  const src = local.cloud_workspace_source_user_id;
+  if (!src || src === uid) return false;
+
+  const slice = await fetchProjectSliceFromCloud(src, local.id);
+  if (!slice) return false;
 
   const parseTs = (iso: string | undefined): number => {
     const t = Date.parse(String(iso ?? ''));
     return Number.isFinite(t) ? t : 0;
   };
 
+  const rTime = parseTs(slice.project.updated_at);
+  const lTime = parseTs(local.updated_at);
+  const remoteMetaNewer = rTime > lTime;
+  const localNodes = loadProjectNodesFromLocalStorage(local.id);
+  /**
+   * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
+   * `remoteMetaNewer = false`여도 소유자가 배지·순서만 바꾼 경우 updated_at이 같거나
+   * 더 새로운 노드는 로컬로 흡수해야 한다.
+   */
+  const mergedNodes = mergeNodeListsForCloud(localNodes, slice.nodes, remoteMetaNewer, local.id);
+  const mergedProject = remoteMetaNewer
+    ? { ...slice.project, cloud_workspace_source_user_id: src }
+    : { ...local, cloud_workspace_source_user_id: src };
+
+  const nodesChanged =
+    projectWorkspaceNodesJsonSnapshot(mergedNodes) !== projectWorkspaceNodesJsonSnapshot(localNodes);
+  const metaChanged =
+    remoteMetaNewer &&
+    (mergedProject.name !== local.name ||
+      mergedProject.author !== local.author ||
+      mergedProject.start_date !== local.start_date ||
+      mergedProject.end_date !== local.end_date ||
+      (mergedProject.description ?? '') !== (local.description ?? ''));
+  const projectTsChanged =
+    remoteMetaNewer && String(mergedProject.updated_at || '') !== String(local.updated_at || '');
+
+  if (!nodesChanged && !metaChanged && !projectTsChanged) return false;
+
+  captureNodeSnapshot(local.id, localNodes, 'pre_pull');
+  upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
+    openAfter: false,
+    markDirty: false,
+    preserveRemoteUpdatedAt: remoteMetaNewer
+  });
+
+  const cur = get(currentProject);
+  if (cur?.id === local.id) {
+    const ref = get(projects).find((p) => p.id === local.id);
+    if (ref) selectProject(ref);
+  }
+  return true;
+}
+
+/** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영 */
+export async function pullSharedProjectSlicesIfNewer(): Promise<number> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
+  const uid = getAuthUserId();
+  if (!uid) return 0;
+
   let n = 0;
   const plist = get(projects);
   for (const local of plist) {
-    const src = local.cloud_workspace_source_user_id;
-    if (!src || src === uid) continue;
-
-    const slice = await fetchProjectSliceFromCloud(src, local.id);
-    if (!slice) continue;
-
-    const rTime = parseTs(slice.project.updated_at);
-    const lTime = parseTs(local.updated_at);
-    /** 엄격히 초과할 때만 원격 슬라이스를 노드 LWW에 반영 — 같거나 로컬이 더 새면 로컬만 유지(소유자 merge 실패·옛 슬라이스) */
-    const remoteMetaNewer = rTime > lTime;
-    const localNodes = loadProjectNodesFromLocalStorage(local.id);
-    const mergedNodes = remoteMetaNewer
-      ? mergeNodeListsForCloud(localNodes, slice.nodes, true, local.id)
-      : localNodes;
-    const mergedProject = remoteMetaNewer
-      ? { ...slice.project, cloud_workspace_source_user_id: src }
-      : { ...local, cloud_workspace_source_user_id: src };
-
-    const nodesChanged =
-      projectWorkspaceNodesJsonSnapshot(mergedNodes) !== projectWorkspaceNodesJsonSnapshot(localNodes);
-    const metaChanged =
-      remoteMetaNewer &&
-      (mergedProject.name !== local.name ||
-        mergedProject.author !== local.author ||
-        mergedProject.start_date !== local.start_date ||
-        mergedProject.end_date !== local.end_date ||
-        (mergedProject.description ?? '') !== (local.description ?? ''));
-    const projectTsChanged =
-      remoteMetaNewer && String(mergedProject.updated_at || '') !== String(local.updated_at || '');
-
-    if (!nodesChanged && !metaChanged && !projectTsChanged) continue;
-
-    captureNodeSnapshot(local.id, localNodes, 'pre_pull');
-    upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
-      openAfter: false,
-      markDirty: false,
-      preserveRemoteUpdatedAt: remoteMetaNewer
-    });
-    n++;
-
-    const cur = get(currentProject);
-    if (cur?.id === local.id) {
-      const ref = get(projects).find((p) => p.id === local.id);
-      if (ref) selectProject(ref);
-    }
+    const changed = await mergeSharedProjectSliceFromCloudIfApplicable(local);
+    if (changed) n++;
   }
   return n;
 }
