@@ -90,6 +90,12 @@ async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
   if (remoteTs === prev) return;
 
   mergeWorkspaceBundleFromCloudRemote(bundle);
+  /** 캐시 갱신 — 업로드 루프가 동일 원격 번들을 중복 병합하지 않도록 */
+  try {
+    localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
+  } catch {
+    /* ignore */
+  }
 }
 
 function isWorkspaceUpsertRpcMissing(err: { message?: string; code?: string; details?: string } | null): boolean {
@@ -652,9 +658,12 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   const lTime = parseTs(local.updated_at);
   const remoteMetaNewer = rTime > lTime;
   const localNodes = loadProjectNodesFromLocalStorage(local.id);
-  const mergedNodes = remoteMetaNewer
-    ? mergeNodeListsForCloud(localNodes, slice.nodes, true, local.id)
-    : localNodes;
+  /**
+   * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
+   * `remoteMetaNewer = false`여도 소유자가 배지·순서만 바꾼 경우 updated_at이 같거나
+   * 더 새로운 노드는 로컬로 흡수해야 한다.
+   */
+  const mergedNodes = mergeNodeListsForCloud(localNodes, slice.nodes, remoteMetaNewer, local.id);
   const mergedProject = remoteMetaNewer
     ? { ...slice.project, cloud_workspace_source_user_id: src }
     : { ...local, cloud_workspace_source_user_id: src };

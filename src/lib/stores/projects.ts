@@ -937,6 +937,7 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
 /**
  * 동접·다기기: 원격 워크스페이스 스냅샷과 로컬 노드를 id 단위로 합침.
  * - remoteProjectMetaNewer: 프로젝트 메타가 원격이 더 최신 → 원격 목록에 없는 id는 삭제로 간주, 동일 id는 updated_at이 같거나 더 새로운 쪽(원격 동률 시 원격 우선).
+ *   **반환 배열의 평면 순서는 `remoteNodes`와 동일**하게 유지(형제 드래그 순서·파일럿 렌더 정합).
  * - 그렇지 않음: 로컬 메타가 같거나 더 최신 → 원격에서 더 새로운 updated_at인 노드만 흡수(로컬 전용 id·삭제 유지).
  * `suppressRecentDeletesProjectId`가 있으면 `registerRecentlyDeletedNodeIdsForCloudMerge`로 등록된 id는
  * **원격 메타가 더 최신이어도** 로컬에 없을 때는 넣지 않음(소유자 슬라이스가 merge 실패 등으로 옛 목록을 유지할 때 되살림 방지).
@@ -965,6 +966,13 @@ export function mergeNodeListsForCloud(
         byId.set(rn.id, rn);
       }
     }
+    /** 원격 스냅샷의 평면 배열 순서 유지 — 파일럿 형제 순서·레이아웃(`nodes.filter(parent_id)`)과 일치 */
+    const ordered: Node[] = [];
+    for (const rn of remoteNodes) {
+      const v = byId.get(rn.id);
+      if (v) ordered.push(v);
+    }
+    return ordered;
   } else {
     const suppress = recentDeleteIdsForCloudMerge(suppressRecentDeletesProjectId ?? null);
     for (const rn of remoteNodes) {
@@ -978,6 +986,22 @@ export function mergeNodeListsForCloud(
         byId.set(rn.id, rn);
       }
     }
+    /**
+     * 로컬 메타가 더 최신이어도 원격에 있는 노드들의 상대 순서를 앞에 두고,
+     * 로컬 전용 노드(원격에 없는 것)를 뒤에 붙인다.
+     * 파일럿은 nodes.filter(parent_id===…)의 배열 순서로 형제를 표시하므로
+     * 소유자가 바꾼 드래그 순서가 공유 계정에 올바르게 반영된다.
+     */
+    const remoteIdOrder = new Set(remoteNodes.map((x) => x.id));
+    const ordered: Node[] = [];
+    for (const rn of remoteNodes) {
+      const v = byId.get(rn.id);
+      if (v) ordered.push(v);
+    }
+    for (const [id, v] of byId) {
+      if (!remoteIdOrder.has(id)) ordered.push(v);
+    }
+    return ordered;
   }
   return [...byId.values()];
 }
@@ -995,11 +1019,9 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
 
 /**
  * 내 plannode_workspace 행 기준: 원격 번들과 로컬을 합침.
- * 프로젝트 updated_at 비교에 더해, 동일 프로젝트라도 노드별 updated_at으로 수정·추가를 흡수하고,
- * 원격 메타가 더 최신일 때만 원격 목록에 없는 노드를 삭제로 반영.
- *
- * **로컬 프로젝트가 더 새면** 노드 배열은 `mergeNodeListsForCloud`를 쓰지 않고 **로컬 스토리지 그대로** 둔다.
- * (업로드 직전 `mergeRemoteWorkspaceBeforeUpload`가 옛 `nodes_by_project_json`을 합치면서 삭제가 되살아나던 문제 방지)
+ * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
+ * - remoteProjectMetaNewer: 원격 목록에 없는 id를 삭제로 간주 + 동일 id는 updated_at 비교
+ * - !remoteProjectMetaNewer: 원격에서 더 새로운 노드만 흡수(로컬 전용 노드·순서 유지)
  */
 export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): number {
   if (typeof window === 'undefined') return 0;
@@ -1017,10 +1039,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
     const lTime = local ? parseTs(local.updated_at) : -1;
     const remoteProjectMetaNewer = !local || rTime > lTime;
     const localNodes = local ? loadProjectNodesFromLocalStorage(project.id) : [];
-    const mergedNodes =
-      local && !remoteProjectMetaNewer
-        ? localNodes
-        : mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer, project.id);
+    /** 로컬 메타가 더 새더라도 노드 수준 LWW는 항상 수행 — 배지·순서 변경 반영 */
+    const mergedNodes = mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer, project.id);
     const keepSrc = local?.cloud_workspace_source_user_id ?? project.cloud_workspace_source_user_id;
 
     const mergedProject: Project = remoteProjectMetaNewer
