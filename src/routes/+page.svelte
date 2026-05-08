@@ -1017,6 +1017,12 @@
       showPilotToast(msg);
       return;
     }
+
+    // **가져오기 완료 직후 모달 즉시 닫기** (백그라운드 작업과 무관)
+    projectImportError = '';
+    await tick();
+    requestAnimationFrame(() => showProjectModal.set(false));
+
     const uid = getAuthUserId();
     if (cloudSyncAvailable && uid) {
       if (!merged.owner_user_id) {
@@ -1030,14 +1036,11 @@
       const r = await trySelectProject(latest);
       if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
       else {
-        projectImportError = '';
         showPilotToast(
           importUsedOutlineFallback
             ? `가져오기 완료(제목·목차 초안): ${latest.name}`
             : `가져오기 완료: ${latest.name}`
         );
-        await tick();
-        requestAnimationFrame(() => showProjectModal.set(false));
       }
     }
   }
