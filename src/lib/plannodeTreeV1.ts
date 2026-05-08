@@ -3,15 +3,16 @@ import type { NodeMetadata } from '$lib/ai/types';
 import { applySanitizeImportedPlannodeNodeV1 } from '$lib/ai/badgePromptInjector';
 
 /** 가져오기 UX·토스트에서 재사용 (md/json 동일 소스) */
-export const PLANNODE_TREE_UNSUPPORTED_VERSION_MESSAGE = '지원 버전은 1과 2만 가능해.';
+export const PLANNODE_TREE_UNSUPPORTED_VERSION_MESSAGE =
+  '지원 가져오기 버전은 정수 1~5야. 그 밖 버전은 아직 안 돼.';
 export const PLANNODE_TREE_VERSION_INVALID_MESSAGE =
-  'plannode.tree 루트 version은 정수 1 또는 2여야 해.';
+  'plannode.tree 루트 version은 정수 1~5여야 해.';
 
 /** 프로젝트 모달 `#BJI` — 툴팁·접근성 라벨(가져오기 UX 단일 소스, md·json 동일 규칙 안내) */
 export const PLANNODE_TREE_IMPORT_BJI_TITLE =
-  'plannode.tree JSON — version은 1 또는 2. .json 전체와 .md 안 JSON 코드펜스는 같은 파서입니다. .md는 JSON이 없으면 본문 #·번호 목차로 초안( .docx와 같은 규칙). .docx는 #·번호 목차. 파일당 최대 5MB.';
+  'plannode.tree JSON — version 1~5 (3~5는 외부 확장본, 노드 행은 2와 동일 규칙). .json·.md 펜스·.docx 규칙 동일. 파일당 최대 5MB.';
 export const PLANNODE_TREE_IMPORT_BJI_ARIA_LABEL =
-  'plannode.tree JSON 가져오기 — 파일 version 1 또는 2, 마크다운 펜스와 동일 규칙';
+  'plannode.tree JSON 가져오기 — 파일 version 1~5, 마크다운 펜스와 동일 규칙';
 
 /** 보내기 JSON(`buildPlannodeExportV1`) 루트 `version` — Plannode 앱 산출은 스키마 v1(정수 **1**) 고정. `version: 2` 파일로보내기(역매핑)는 미구현·별 게이트. */
 export const PLANNODETREE_EXPORT_ROOT_VERSION = 1 as const;
@@ -61,10 +62,9 @@ function parseFileVersion(o: Record<string, unknown>): ParsePlannodeTreeV1Result
   if (typeof verRaw !== 'number' || !Number.isInteger(verRaw)) {
     return { ok: false, message: PLANNODE_TREE_VERSION_INVALID_MESSAGE };
   }
-  if (verRaw !== 1 && verRaw !== 2) {
-    return { ok: false, message: PLANNODE_TREE_UNSUPPORTED_VERSION_MESSAGE };
-  }
-  return verRaw as PlannodeTreeFileVersion;
+  if (verRaw === 1) return 1;
+  if (verRaw >= 2 && verRaw <= 5) return 2;
+  return { ok: false, message: PLANNODE_TREE_UNSUPPORTED_VERSION_MESSAGE };
 }
 
 function normalizeImportedNodeType(raw: string, fileVersion: PlannodeTreeFileVersion): string {

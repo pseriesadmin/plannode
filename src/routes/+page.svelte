@@ -180,6 +180,9 @@
   let showBadgeImportMappingOverlay = false;
   const BADGE_IMPORT_OVERLAY_MIN_MS = 260;
 
+  /** #BJI 실패 시 프로젝트 모달 안 인라인 안내(GATE B IMPORT UX) */
+  let projectImportError = '';
+
   /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
   let showSnapshotHistoryModal = false;
   let snapshotListVersion = 0;
@@ -575,11 +578,12 @@
     }
     showPilotToast('다른 창·탭으로 갔다가 돌아오면 클라우드 동기를 다시 불러와요.');
     if (import.meta.env.DEV) {
-      console.debug('[Plannode] Cloud sync runs on tab/window return or timer (P-3·B).');
+      if (import.meta.env.DEV) console.debug('[Plannode] Cloud sync runs on tab/window return or timer (P-3·B).');
     }
   }
 
   function triggerJsonImport() {
+    projectImportError = '';
     jsonImportInput?.click();
   }
 
@@ -890,7 +894,29 @@
     );
   }
 
+  /** IMPORT-BJI-EMPTY-OVERWRITE: 현재 프로젝트가 비었는지 판정 (파일럿 메모리 우선) */
+  function isCurrentProjectEmpty(projectId: string): boolean {
+    // (1) 파일럿이 현재 프로젝트를 열었는가?
+    const curPid = get(currentProject)?.id;
+    if (curPid !== projectId) {
+      // 다른 프로젝트면 localStorage만 확인
+      return loadProjectNodesFromLocalStorage(projectId).length <= 1;
+    }
+    
+    // (2) 현재 프로젝트: 파일럿 메모리 우선
+    // - 파일럿이 가장 정확한 상태 (미저장 삭제 포함)
+    // - localStorage는 지연 플러시로 구 데이터 가능성
+    const storeNodes = get(nodes);
+    
+    // (3) 안전장치: 두 소스 모두 확인 (더 엄격한 조건)
+    // - 파일럿과 스토어 둘 다 루트만 → "정말 비었음"
+    const botAreBare = storeNodes.length <= 1;
+    
+    return botAreBare;
+  }
+
   async function handleJsonImportChange(ev: Event) {
+    projectImportError = '';
     const input = ev.target as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
@@ -900,7 +926,9 @@
 
     if (file.size > PLANNODE_IMPORT_MAX_FILE_BYTES) {
       const mb = (PLANNODE_IMPORT_MAX_FILE_BYTES / (1024 * 1024)).toFixed(0);
-      showPilotToast(`파일이 너무 커 (${mb}MB 이하만). 나눠서 저장하거나 용량을 줄여줘.`);
+      const msg = `파일이 너무 커 (${mb}MB 이하만). 나눠서 저장하거나 용량을 줄여줘.`;
+      projectImportError = msg;
+      showPilotToast(msg);
       return;
     }
 
@@ -909,6 +937,7 @@
     if (lower.endsWith('.docx')) {
       const doc = await extractDocxPlainTextFromFile(file);
       if (!doc.ok) {
+        projectImportError = doc.message;
         showPilotToast(doc.message);
         return;
       }
@@ -931,29 +960,38 @@
         parsed = parsePlannodeTreeV1ImportText(text);
       }
     } else {
-      showPilotToast(
-        '가져오기는 .docx, .json, .md, .markdown(또는 JSON 본문 .txt)만 지원해. docx·md( JSON 없을 때)는 본문에서 # 제목·번호 목차를 찾아 노드 초안을 만들어.'
-      );
+      const msg =
+        '가져오기는 .docx, .json, .md, .markdown(또는 JSON 본문 .txt)만 지원해. docx·md( JSON 없을 때)는 본문에서 # 제목·번호 목차를 찾아 노드 초안을 만들어.';
+      projectImportError = msg;
+      showPilotToast(msg);
       return;
     }
 
     // .json / .md(펜스·제목 초안) 실패 메시지는 파서 단일 소스(토스트 동일).
     if (!parsed.ok) {
+      projectImportError = parsed.message;
       showPilotToast(parsed.message);
       return;
     }
-    const exists = get(projects).some((p) => p.id === parsed.project.id);
+    const pid = parsed.project.id;
+    const exists = get(projects).some((p) => p.id === pid);
+    
+    // **GATE B 최종:** 현재 캔버스 상태를 파일럿 메모리 기준으로 판정
+    // - 같은 ID & 루트만 → confirm 생략 (새 프로젝트처럼 가져오기)
+    // - 다른 ID 또는 노드 있음 → confirm 표시 (덮어쓰기 경고)
+    const isEmpty = isCurrentProjectEmpty(pid);
+    const mustConfirmOverwrite = exists && !isEmpty;
     if (
-      exists &&
+      mustConfirmOverwrite &&
       !confirm(
-        `같은 ID의 프로젝트가 있어. 메타·노드를 덮어쓸까?\n\n${parsed.project.name} (${parsed.project.id})`
+        `같은 ID의 프로젝트가 있어. 메타·노드를 덮어쓸까?\n\n${parsed.project.name} (${pid})`
       )
     ) {
       showPilotToast('가져오기를 취소했어.');
       return;
     }
-    if (exists) {
-      captureNodeSnapshot(parsed.project.id, loadProjectNodesFromLocalStorage(parsed.project.id), 'import');
+    if (mustConfirmOverwrite) {
+      captureNodeSnapshot(pid, loadProjectNodesFromLocalStorage(pid), 'import');
     }
 
     showBadgeImportMappingOverlay = true;
@@ -974,7 +1012,9 @@
     }
 
     if (!merged) {
-      showPilotToast('저장에 실패했어.');
+      const msg = '저장에 실패했어.';
+      projectImportError = msg;
+      showPilotToast(msg);
       return;
     }
     const uid = getAuthUserId();
@@ -990,6 +1030,7 @@
       const r = await trySelectProject(latest);
       if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
       else {
+        projectImportError = '';
         showPilotToast(
           importUsedOutlineFallback
             ? `가져오기 완료(제목·목차 초안): ${latest.name}`
@@ -1176,6 +1217,7 @@
   function closeModal() {
     showModelApiModal = false;
     modelApiKeyDraft = '';
+    projectImportError = '';
     showProjectModal.set(false);
   }
 
@@ -2701,6 +2743,9 @@
               >
                 가져오기
               </button>
+              {#if projectImportError}
+                <p class="proj-import-err" role="alert">{projectImportError}</p>
+              {/if}
             </div>
           </div>
           <div class="pl">
@@ -3705,6 +3750,17 @@
     position: relative;
     /* 프로젝트 생성↔가져오기: `.proj-form-col` gap(15px)의 50% 추가 분리 */
     margin-top: calc(15px * 0.5);
+  }
+
+  .proj-import-err {
+    margin: 8px 0 0;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #b91c1c;
+    background: #fef2f2;
+    border-radius: 8px;
+    border: 1px solid #fecaca;
   }
 
   #BJI.proj-json-import-btn {
@@ -5471,7 +5527,7 @@
     font-size: 12px;
     padding: 8px 16px;
     border-radius: 9px;
-    z-index: 7000;
+    z-index: 9000;
     white-space: nowrap;
     pointer-events: none;
   }
