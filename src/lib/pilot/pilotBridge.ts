@@ -206,7 +206,6 @@ export function pilotFlushPersistNow() {
   pilotApi?.flushPersistNow?.();
 }
 
-/** 지연 persist(50ms)가 대기 중이면 이탈 직전에 `pilotFlushPersistNow()` 호출 권장 */
 export function pilotHasPendingGridPersist(): boolean {
   return pilotApi?.hasPendingGridPersist?.() ?? false;
 }

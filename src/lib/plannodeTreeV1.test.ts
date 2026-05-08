@@ -240,8 +240,23 @@ describe('plannode.tree file version 2 (import)', () => {
     expect(r.nodes.find((n) => n.id === 'n-fg')?.node_type).toBe('feature');
   });
 
-  it('rejects version 3+ with shared unsupported message', () => {
-    const bad = { ...minimalTree, version: 3 };
+  it('accepts version 3 through 5 like version 2 (extras + feature_group)', () => {
+    for (const v of [3, 4, 5] as const) {
+      const tree = { ...minimalTreeV2, version: v };
+      const r = parsePlannodeTreeV1Json(JSON.stringify(tree));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const root = r.nodes.find((n) => n.id === 'p-v2-import-r');
+      expect(root?.metadata?.treeImportExtras).toEqual({
+        level: 1,
+        externalOnly: { a: 1 }
+      });
+      expect(r.nodes.find((n) => n.id === 'n-fg')?.node_type).toBe('feature');
+    }
+  });
+
+  it('rejects version 6+ with unsupported message', () => {
+    const bad = { ...minimalTree, version: 6 };
     const r = parsePlannodeTreeV1Json(JSON.stringify(bad));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toBe(PLANNODE_TREE_UNSUPPORTED_VERSION_MESSAGE);
