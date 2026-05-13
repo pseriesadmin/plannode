@@ -7,8 +7,28 @@
 
 ---
 
+## 개발 계획·문서 인덱스 (통합 로드맵)
+
+| 순서 | 문서 | 용도 |
+|------|------|------|
+| **1** | [`.cursor/plans/plannode_integrated_milestone_v2.md`](../plans/plannode_integrated_milestone_v2.md) | **M1~M5·H1~H4·M2-CORE** 단계별 통합 플랜 · §0 실행 순서 · §7 진실 순위·지침 교차표 |
+| **2** | [`.cursor/plans/harness-workflow_final.md`](../plans/harness-workflow_final.md) | 기본·단축 모드 · GATE · 복붙(G/R/W) |
+| **3** | [`AGENTS.md`](../../AGENTS.md) (저장소 루트) | 황금 원칙(GP) · 트리 보호 헌장 · **에이전트 호출 순서** |
+| **4** | [`.cursor/rules/plannode-prd.mdc`](../rules/plannode-prd.mdc) | 제품 M#·F#·Phase — `plan-output`·`TASK` **PRD:** 한 줄 근거 |
+| **4a** | [`.cursor/rules/README.md`](../rules/README.md) | **규칙 폴더** 영역별 `.mdc` 지침 통합 인덱스 |
+| **5** | `docs/PILOT_FUNCTIONAL_SPEC.md` | 파일럿 vs SvelteKit 갭 §9~§10 |
+| **6** | [`.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md`](../plans/PLANNODE_INTEGRATED_GUIDE.md) | Git · Supabase · Vercel · DNS |
+| **7** | [노드트리 AI생성 자동화- 파이프라인 정밀 개발서 v1.0.md](../plans/노드트리%20AI생성%20자동화-%20파이프라인%20정밀%20개발서%20v1.0.md) | **M2-CORE** 구현 파일·순서 단일 기준 |
+| **8** | [`.cursor/plans/plannode-ai-logic-v4.md`](../plans/plannode-ai-logic-v4.md) | M2/M3 ID · 제품 경계(참고) |
+| **9** | [`.cursor/plans/개발가이드-PLANNODE_WIREFRAME_DEV.md`](../plans/개발가이드-PLANNODE_WIREFRAME_DEV.md) | 와이어 Figma 트랙(마일스톤 §6 트랙 B) |
+
+**하네스 산출물(이 폴더):** [TASK.md](TASK.md) · [plan-output.md](plan-output.md) · [GSD_LOG.md](GSD_LOG.md) · [context-hook.md](context-hook.md) — 역할은 아래 **폴더 파일 역할** 표 참조.
+
+---
+
 ## PRD(제품)와 하네스(절차)의 연계
 
+- **통합 단계별 로드맵:** [plannode_integrated_milestone_v2.md](../plans/plannode_integrated_milestone_v2.md) §0 — 스코프(단계 0)부터 M4~M5(단계 5)까지 **실행 순서**; 본 README 상단 **「개발 계획·문서 인덱스」**와 쌍으로 본다.
 - **제품 기준(단일 진실)**: `.cursor/rules/plannode-prd.mdc` — 모듈 M#·기능 F#-#, MVP/Phase(§6), IA/와이어(F2-4, F4-3/4-4) vs LLM(F2-5, §10), v2 DB(§11) 등.
 - **하네스 산출물**은 PRD의 **이번 사이클에 해당하는 조각**을 구현·검수한다.
   - `plan-output.md`: **PRD 연계** 섹션에 M#·F#-# (필요 시 PRD 절 §) + **이번에 제외하는 Phase/기능**을 명시.
@@ -20,13 +40,13 @@
 ## 최소 구현·기술부채·경량화 (하네스 전역)
 
 - **오버 엔지니어링 견제:** `plan-output`·`TASK` **포함/제외**·PRD M#·F#·Phase를 넘는 **불필요한 로직**·**범용 뼈대**·PRD 밖 v2/LLM 파이프 **선제** — 금지(GP-7·GP-12·`@promptor` P-6.5).
-- **메뉴·출력 면 = `plan-output`·§4.0 고정:** `TASK` NOW ID·v4 `M2-*`·BACKLOG는 **후보**일 뿐, **상단/출력/보기에 항목을 추가하는 허가가 아님**. 신규 면 조각은 👤 채팅 또는 GATE B 보완 + `plan-output` 반영 후에만 구현. 체크리스트·사례: [harness-workflow_final.md §경량화 제어 — 「면(메뉴·출력) — 플랜 후보와 UI 분리」](../plans/harness-workflow_final.md).
+- **메뉴·출력 면 = `plan-output`·§4.0 고정:** `TASK` NOW ID·v4 `M2-*`·BACKLOG는 **후보**일 뿐, **상단/출력/보기에 항목을 추가하는 허가가 아님**. 신규 면 조각은 👤 채팅 또는 GATE B 보완 + `plan-output` 반영 후에만 구현. (플랜 후보 ≠ UI 허가 — `plan-output`·GATE B와 병행.)
 - **모듈·파일 수 억제:** “한 번 더 감싸는” 레이어, **PRD·TASK에 이름 없는** `src/lib/...` 신규 모듈 — **가능한 한 기존 파일에** 붙이거나 `BACKLOG`+승인 후. 동일 UX는 **최소 import 경로** 유지.
 - **기술부채:** `console.log`/TODO/any/미사용 import/무분별 의존성은 **@qa 2단계**에서 잡는다. `npm` 신규 패키지·스키마 컬럼·공개 API는 `TASK`·GATE B 없이 **불가**.
-- **제어 구조(요지):** `AGENTS.md` 표 **경량화·오버엔지니어링 견제 제어 구조** = 스캐폴드가 아니라 **GATE + 스코프 + NOW 크기 + @qa** 의 다층 차단. 상세: `.cursor/plans/harness-workflow_final.md` **「경량화 제어」** 절.
-- **Guides vs Sensors (외부 권고·정합):** *Guides(사전)* = `AGENTS`·`plan-output`·PRD·`@promptor` (행동 유도). *Sensors(사후)* = `npm run build`·`@qa`·린트 (깨짐/부채 검출). **불필요한 복잡도·“멋진” 일반화**는 센서만으론 부족하므로 **포함/제외·GATE**가 1차 방어 — `harness-workflow_final.md` **「외부 하네스·오버엔지니어링」** 절.
+- **제어 구조(요지):** `AGENTS.md` 표 **경량화·오버엔지니어링 견제 제어 구조** = 스캐폴드가 아니라 **GATE + 스코프 + NOW 크기 + @qa** 의 다층 차단. (절차·복붙: `harness-workflow_final.md`.)
+- **Guides vs Sensors (외부 권고·정합):** *Guides(사전)* = `AGENTS`·`plan-output`·PRD·`@promptor` (행동 유도). *Sensors(사후)* = `npm run build`·`@qa`·린트 (깨짐/부채 검출). **불필요한 복잡도·“멋진” 일반화**는 센서만으론 부족하므로 **포함/제외·GATE**가 1차 방어 — 요지는 `AGENTS.md` 본절 인용 링크와 위 표.
 - **층·툴 최소:** 하네스 전용 **문서·GATE·에이전트** 층을 “부작위 방지”만으로 **무한 증가**시키지 않는다(신규 체크리스트·sub-agent = **의무 정당화** 없으면 넣지 않음).
-- **노드 수·캔버스 부하·안정성:** 프로젝트별 노드 **N**이 커질수록 `render`·`drawEdges`·미니맵·전량 JSON persist·`IAGridSheet` 행 수가 **한꺼번에** 비용을 만든다. **지침:** `.cursor/rules/plannode-architecture.mdc` **§9**. **하네스:** `.cursor/plans/harness-workflow_final.md` **「노드 규모·부하·안정성」** — `plan-output` 포함/제외·`TASK` NOW 한 줄·GATE C(스케일 회귀)·`GSD_LOG`·`@qa` 성능 표기. 대규모 최적화는 **승인된 BACKLOG/NOW**로만 진행(YAGNI).
+- **노드 수·캔버스 부하·안정성:** 프로젝트별 노드 **N**이 커질수록 `render`·`drawEdges`·미니맵·전량 JSON persist·`IAGridSheet` 행 수가 **한꺼번에** 비용을 만든다. **지침:** `.cursor/rules/plannode-architecture.mdc` **§9**. **하네스 쪽:** `plan-output` 포함/제외·`TASK` NOW 한 줄·GATE C(스케일 회귀)·`GSD_LOG`·`@qa`에 성능·회귀 한 줄. 대규모 최적화는 **승인된 BACKLOG/NOW**로만 진행(YAGNI).
 
 ---
 

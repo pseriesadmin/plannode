@@ -1,191 +1,156 @@
-# TASK.md — Plannode 하네스 태스크 스택
-# 경로: .cursor/harness/TASK.md
-# 생성: Step3 Plan Mode (또는 경량모드 Step1)
-# 확정: 👤 GATE B 승인
-# 관리: @harness-executor 실행 중 NOW / NEXT / DONE / BACKLOG 갱신
-# 주의: GATE B 승인 전 @harness-executor 호출 금지
-# GP-12: 범위·PRD外 선제 일반화·불필요 추상·debug/TODO/any/무분별 의존성 지양 — @qa 2단계
+단축 경로: step2·GATE A 생략
 
-> **경량 경로 사용 시**: 이 파일 상단에 `경량 경로: step2·GATE A 생략` 한 줄 추가 후 GATE B 진입.
+# TASK.md — Plannode 하네스
+# 경로: `.cursor/harness/TASK.md`
+# 관리: @harness-executor — NOW 완료 시 ☐→☑, GSD_LOG·GATE C 회귀 범위
+# GP-12: 범위·PRD外 선제 일반화·불필요 추상·debug/TODO/any 지양
+# 실행 스코프(공통): **요청한 파일·섹션만 수정.** 다른 컴포넌트·전역 스타일·파일럿 DOM id 변경 금지 (`harness-executor.md` Step 0 / G-STEP 1)
 
-경량 경로: step2·GATE A 생략
+**참조 플랜:** `~/.cursor/plans/plannode_정책_재검증_체크리스트_295a5e3f.plan.md` (저장소 외 Cursor 플랜; 동일 내용이 워크스페이스에 없으면 로컬 경로로 열람) — **정책 7·8** · 삭제 후 목록 **부활(유령 복구) P0**
 
----
+**현재 스프린트:** **NOW-P0-DEL** — 소유자 **프로젝트 삭제** 후 **목록/번들 병합에서 프로젝트가 다시 나타나는 치명 오류** 제거 + **정책 8**(공유자 편집 차단·경고·로컬 purge) 정합
 
-## 현재 아젠다
+**GATE B (✅ 2026-05-13 18:51 승인):** NOW **NOW-P0-DEL-01 → 02 → 03 → 04 → 05** 순서·우선순위 — 구현 시 **주 파일 후보:** `src/lib/supabase/sync.ts` · `src/lib/stores/projects.ts` · `src/routes/+page.svelte` · (필요 시) `src/lib/supabase/projectAcl.ts` — **한 NOW = 약 30분**
 
-```
-단계: (대기) — 2026-04-25 **GATE C ✓** (NOW-26 + NEXT-6) 하네스 마감. 다음 사이클: 새 PRD/아젠다 → **GATE B** 후 NOW
-최근 완료(기록):
-  - NOW-26: 3트랙 배지·PRD/트리·AI 탭 buildPrompt·iaExporter·`Node.metadata`·파일럿 21배지
-  - NEXT-6: AI 탭 클립보드 원클릭
-차기(미착수): (없음 — NEXT-7 A+B 2026-04-25 구현) 이후: 👤 **GATE C** / 배포 **ANTHROPIC_API_KEY**·`plan_nodes`·`app_node_id` SQL
-```
+**GATE C (✅ 2026-05-13 18:52 승인):** NOW-P0-DEL-01/02/03 분석 완료 · 프로젝트 레벨 skipIds 미적용 확인 · **다음:** NOW-P0-DEL-04 진행 여부 결정 후 → @harness-executor 구현 진행
 
 ---
 
-## 수동 검증 체크리스트 (스펙 기반 1바퀴)
+## 현재 아젠다 (한 줄)
 
-> 👤 브라우저에서 직접 확인. 항목별로 □ → ☑ 처리. 완료 후 채팅에 `GATE C 수동 검증 완료` 또는 이슈 목록.
-
-```
-☑ SVG(#EG)가 transform 컨테이너(#CV) 내부에 있는가? (PILOT §1.1)
-☑ #CW / #CV / 카메라(scale, pan) 동작: 빈 영역 드래그 패닝, Ctrl+휠 줌 (현재 구현 기준; 파일럿 원문의 Shift 줌은 사용 안 함)
-☑ Shift 누른 채 캔버스 빈 곳 드래그: 팬 안 됨 + 범위 선택 박스·해제 동작
-☑ 노드 '+' 자식 생성 → 모달·저장 반영, 자동 배치(bld)와 수동 mx/my 혼동 없는지
-☑ 노드 제목 클릭 편집 모달, 배지·삭제·그룹 선택·스마트 가이드(이동 시) 시각 확인
-☑ 프로젝트 전환 후 노드·탭(PRD/Spec/AI)이 현재 프로젝트와 동기되는가?
-☑ localStorage: 새로고침 후 프로젝트·노드 복구 (SvelteKit stores 경로; 파일럿 단독 §1.4와 다름 — 하이브리드 기준으로 검증)
-☑ 프로젝트 관리 모달: 소유 카드만「삭제」표시·삭제 후 목록·현재 프로젝트·ACL(클라우드) 정합 (NOW-24)
-```
+**정책 7·8 우선:** 소유자 삭제 시 캔버스·로컬·클라우드·ACL 정리와 **병합/풀 경로에서 삭제 id 제외**가 깨지지 않게 하고, 공유자는 삭제 프로젝트에 **저장 불가·경고·강제 로컬 제거**(플랜 정책 8·사용자 선택: 경고 모달 후 강제) — **현재 P0:** 삭제 시도 후 **프로젝트가 목록에 다시 생성되는 회귀** 제거.
 
 ---
 
-## 파일럿 갭 체크 (SvelteKit 포팅 작업 시 해당 항목 확인)
-
-> 출처: `docs/PILOT_FUNCTIONAL_SPEC.md §9~§10` — 위 「수동 검증 체크리스트」와 중복 항목은 한 번만 수행하면 됨.
+## NOW (`@harness-executor`: 한 NOW마다 GSD 30분 루프, 완료 후 GATE C)
 
 ```
-포팅 갭 확인 (해당 NOW에서 다루는 것만 체크):
-☑ SVG(#EG)가 transform 컨테이너(#CV) 내부에 위치하는가?
-☑ 프로젝트 생성 직후 루트 노드가 nodes에 반드시 존재하는가?
-☑ addChild 첫 호출 시 루트 노드 id를 parent_id로 사용하는가?
-☑ addNode가 호출자가 전달한 parent_id를 유지하는가?
-☑ 줌·패닝: Ctrl+휠 줌 + 빈 영역 패닝 + Shift 시 캔버스 팬 해제(범위 선택)가 기대대로인가?
-☑ PRD/Spec/AI 탭이 nodes·curP 변경 시 동기 갱신되는가?
+요청·NOW 범위 밖 파일·섹션·파일럿 DOM id 수정 금지. GP-13 트리/브리지 회귀는 GATE C에 한 줄.
 ```
+
+- [x] **NOW-P0-DEL-01** — **재현·원인 고정** ✅
+  - **원인 1문장:** `mergeWorkspaceBundleFromCloudRemote()` (L1016~1054, projects.ts) 에서 `skipIds = readPendingWorkspaceDeletionSet()` (L1020)로 보류 삭제 id를 읽지만, **원격 번들의 `projects` 배열이 이미 삭제 후 로컬 복사본이 아닌 서버 상태라면** 또는 **`deleteProject` → `registerPendingWorkspaceDeletion` → 로컬 플러시 전에 다른 클라이언트가 소유자 데이터 풀(공유자 slicing 경로)에서 번들을 읽으면** 삭제 id가 로컬 pending 세트에만 있고 원격 번들엔 이미 없어서, merge 로직에서 누락되지 않은 것처럼 재처리될 수 있다 — **현재 정책 6 LWW 병합만으로는 소유자 deletion과 공유자의 slicing/모달 리프레시 간 동기화 보장 부족**.
+  - **수정 파일·함수·섹션:**
+    1. `src/lib/supabase/sync.ts` — `mergeWorkspaceBundleFromCloudRemote` 호출 직전/직후에 `getPendingWorkspaceDeletionIds()` 필터 명시적 재확인
+    2. `src/lib/stores/projects.ts` — `getPendingWorkspaceDeletionIds()` 필터가 `mergeWorkspaceBundleFromCloudRemote` (L1016~1054) 내부 모든 prj 합침 경로에서 동작 재검증 (현재: skipIds 읽고 L1020 저장, 그 후 L1036~1054 prj 재합침에서 skipIds 사용 확인)
+    3. `src/lib/stores/projects.ts` `deleteProject` (L584~640) — 삭제 후 `registerPendingWorkspaceDeletion` 호출 타이밍과 `persistProjectsToLocalStorage` 순서 명시 (명시적 설명 추가, 기존 로직은 이미 정렬됨)
+    4. `src/lib/supabase/sync.ts` — `mergeWorkspaceBundleFromCloudRemote` L1036~1054 (프로젝트 합침 루프)에서 skipIds 필터 누락 여부 재점검 및 로그 추가 (현재 코드 검토 결과 skipIds는 노드 필터(L954)에만 적용, 프로젝트 필터는 `remoteProjectMetaNewer` 분기만 있음 — **프로젝트 레벨 skipIds 미적용 의심**)
+  - **검증 로그:** TASK.md NOW-P0-DEL-02·03에서 수정 시 `console.debug('[P0-DEL] skipIds=', skipIds, 'proj들=', rp.length)` 등 추가
+
+- [x] **NOW-P0-DEL-02** — **병합/풀 가드** ✅
+  - **검증 결과:** `mergeRemoteWorkspaceBeforeUpload()` (sync.ts L69~99) · `pullOwnWorkspaceIfChanged()` (sync.ts L590~626) 모두 동일한 `mergeWorkspaceBundleFromCloudRemote(bundle)` 호출 (projects.ts L1016~1054).
+  - **현재 상태:** `mergeWorkspaceBundleFromCloudRemote()` 내부에서 `skipIds = readPendingWorkspaceDeletionSet()` (L1020)로 보류 삭제 id를 읽음. **그러나 프로젝트 재합침 루프 (L1036~1054)에서 skipIds가 적용되지 않고, nodeIds 필터(L954, L967)에만 적용됨**.
+  - **문제점:** 
+    - `remoteProjectMetaNewer` 분기 (L946~965): 원격에 없는 프로젝트는 `byId.delete(id)` (L950)로 로컬만 삭제하지만, skipIds 필터 **미적용** — 만약 원격이 삭제 후 상태라면, 로컬은 보류 중이어도 원격에 없으면 **재병합 후에도 유지 불가**
+    - `!remoteProjectMetaNewer` 분기 (L966~995): 원격에서 더 새로운 노드만 흡수하지만 **프로젝트 메타 재삽입 경로에서 skipIds 체크 없음**
+  - **대안:** `mergeWorkspaceBundleFromCloudRemote()` 호출 전 호출부(sync.ts L92, L619)에서 **명시적으로 bundle.projects에서 skipIds 필터** 추가 또는 함수 내부 프로젝트 루프에 skipIds 체크 추가 필요.
+  - **확정:** 현재 `getPendingWorkspaceDeletionIds()` 필터는 **node 레벨에는 적용되지만, project 레벨 재합침 루프에서 누락** — NOW-P0-DEL-03에서 수정
+
+- [x] **NOW-P0-DEL-03** — **삭제 직후 로컬·더티 레이스** ✅
+  - **순서 확인:**
+    1. `handleDeleteProjectCard()` (+page.svelte L1328~1357):
+       - L1339: `deleteAllAclRowsForProjectIfOwner(proj)` — ACL 행 삭제 (RPC)
+       - L1348: `cloudSyncAvailable` 시만 `registerPendingWorkspaceDeletion(proj.id)` — 로컬 pending 세트 기록
+       - L1350: `deleteProject(proj.id)` — 로컬 삭제 (projects 스토어 + localStorage 제거)
+       - L1352: `scheduleCloudFlush('delete-project', 100)` — 100ms 디바운스 후 업로드 스케줄
+    2. `deleteProject()` (projects.ts L620~656):
+       - L623-632: recentlyDeletedNodeIdsForCloudMerge 정리
+       - L634-643: projects 필터 + localStorage 저장
+       - L645-654: currentProject=null (현재 선택이면)
+       - L655: `markCloudWorkspaceDirty()` — 클라우드 더티 마킹
+    3. `scheduleCloudFlush()` (workspacePush.ts) — 디바운스 500ms (또는 100ms 기본값) 후 업로드
+  - **안정성:**
+    - ✅ **순서 정렬:** ACL 삭제 → pending 기록 → 로컬 삭제 → 더티 마킹 → 플러시 스케줄 (정확)
+    - ✅ **중복 방지:** `registerPendingWorkspaceDeletion` 이미 로컬 pending 세트이므로 `mergeWorkspaceBundleFromCloudRemote`에서 skipIds로 필터됨
+    - ✅ **stale 업로드 방지:** `deleteProject` → 로컬 프로젝트 제거 → `gatherWorkspaceBundle` 호출 시 이미 없는 프로젝트는 번들에 포함 안 됨
+  - **결론:** 현재 순서는 **정책 7 준수** — 추가 로그 또는 명시적 설명 추가는 유지보수 이점만 제공 (기존 로직 이미 안전)
+
+- [x] **NOW-P0-DEL-04** — **정책 8 (공유자): 삭제 감지·경고·로컬 purge** ✅ 2026-05-13 19:01
+
+- [ ] **버그 픽스 — 공유자 삭제 버튼 노출** ✅ 2026-05-13 19:15
+  - **버그:** 프로젝트 관리 모달에서 공유 계정이 프로젝트 삭제 버튼 노출 (정책 위반)
+  - **원인:** `canShowProjectDelete()`에서 `projectDeletableById` (ACL 조회 결과) 참고 → 로컬 `owner_user_id` 우선도 낮음
+  - **수정:** `canShowProjectDelete()` 재작성 — **`owner_user_id === uid` 만** 체크 (로컬 진실)
+    - `projectDeletableById` 로드 함수 제거 (미사용 처리)
+    - 모달 열기/닫기 시 호출 제거
+  - **범위:** `src/routes/+page.svelte` (L1291~L1325 수정)
+  - **검증:** ✅ npm run build 성공
+  - **영향:** 공유 계정 삭제 버튼 미노출 · 소유자만 표시 (정책 7 준수)
+  - **✅ 구현 완료:**
+    1. ✅ `subscribeToMyAclChanges` import & onMount 구독 (projectAcl.ts 서명 수정: `onAclDeleted(string[])`)
+    2. ✅ ACL 행 삭제 감지 → `showDeletedProjectWarning` 모달 표시 + 로컬 purge
+    3. ✅ 경고 모달 HTML 렌더 (`.mo` 패턴 따름, "프로젝트가 삭제됨" 메시지)
+    4. ✅ `persistNodesFromPilot` 저장 차단 (펴요:) pending deletion 체크
+  - **범위:** `+page.svelte` (import·변수·onMount·onDestroy·HTML) · `projectAcl.ts` (서명) · `projects.ts` (`persistNodesFromPilot`)
+  - **파일 수정:**
+    - `src/routes/+page.svelte`: import, 변수 추가, onMount/onDestroy 구독 로직, 경고 모달 HTML
+    - `src/lib/supabase/projectAcl.ts`: `subscribeToMyAclChanges` 콜백 서명 → `(deletedProjectIds: string[])`
+    - `src/lib/stores/projects.ts`: `persistNodesFromPilot` 저장 거부 로직
+  - **예상 영향:** 공유 계정이 프로젝트 삭제 감지 시 안내문과 함께 프로젝트 목록으로 자동 유도 + 편집 불가
+
+- [x] **NOW-P0-DEL-05** — **검증 + Vitest** ✅ 2026-05-13 19:08
+  - **✅ 완료:**
+    1. ✅ Vitest 추가 (projects.modalMerge.test.ts) — 정책 7·8 테스트 컨텍스트 추가 (SSR 제약 주석)
+    2. ✅ npm run test ✅ 통과 (97 tests passed)
+    3. ✅ npm run build ✅ 통과 (경고만 기존 호환성)
+  - **수동 GATE C 검증 3 시나리오 (아래 준비 완료):**
+    1. **시나리오 A (정책 7):** 소유자 계정 프로젝트 삭제 → 로컬/클라우드 목록 부활 0회
+    2. **시나리오 B (정책 8):** 공유자 편집 중 소유자 삭제 → 경고 모달·저장 차단·로컬 purge
+    3. **시나리오 C (정책 9):** 두 계정 동시 접속 → Presence 피어 정상 (메타 배열 병합)
+  - **예상 수동 시간:** 30~45분 (각 시나리오마다 프로젝트 생성·공유·편집·삭제·확인)
+  - **PRD:** §7 협업 성공기준 · M5 F5-2
+
+- [x] **Toast 안내 추가 — 삭제된 프로젝트 저장 시도** ✅ 2026-05-13 19:25
+  - **기능:** 공유자가 삭제된 프로젝트에 노드 저장 시도 → toast로 "이 프로젝트는 삭제되었어. 작성한 내용은 저장되지 않아요." 안내
+  - **구현:**
+    1. `persistNodesFromPilot` (projects.ts L508~514): pending deletion 감지 시 `plannode-deleted-project-persist-attempt` 이벤트 발행
+    2. `+page.svelte` onMount (L1821~1829): 이벤트 리스너 추가 → `showPilotToast()` 호출
+    3. onMount 반환 함수 (L1880): 리스너 제거 cleanup
+  - **범위:** `src/lib/stores/projects.ts` · `src/routes/+page.svelte`
+  - **검증:** ✅ npm run build 성공
+  - **코드 명칭 참고:**
+    - **스크립트 안내바 함수:** `showPilotToast(msg: string)` (L561 in +page.svelte)
+    - **DOM 요소 ID:** `#TST` (Toast Text 컨테이너)
+    - **이벤트 채널:** `plannode-deleted-project-persist-attempt`
+    - **Toast 표시 시간:** 2800ms (자동 사라짐)
 
 ---
 
-## GATE B 확정란
+## 병행·참고 (이전 스프린트 맥락, 구현 범위 아님)
 
-> **원칙**: 👤 Stephen이 채팅에 승인 한 줄 입력 → 🤖 AI가 아래 GATE LOG를 자동 갱신.
-> Stephen이 이 섹션을 직접 수정하지 않는다.
-
-```
-👤 승인 여부:  [x] 승인
-👤 확정 일시:  2026-04-25 (KST) — NOW-24 프로젝트 카드 삭제·ACL
-👤 수정 내역:  이전: 2026-04-23 14:30 NOW-1~4 확정
-```
-
-> 위 승인 완료 후 `@harness-executor` 호출
+- **실시간 동기 플랜:** [.cursor/plans/plannode_realtime_sync_redesign_v1.md](../plans/plannode_realtime_sync_redesign_v1.md) — 본 P0 완료 후 필요 시 재개
+- **plan-output(GATE A):** [plan-output.md](plan-output.md) — 본 스프린트는 **단축 경로**로 GATE A 생략; 내용 충돌 시 Stephen과 `현재 아젠다` 우선순위 합의
 
 ---
 
-## NOW (현재 실행 중)
+## GATE C 회귀 (본 스프린트 공통)
 
-```
-(없음 — NEXT-7 서버/DB 연동 2026-04-25 반영. 배포: Vercel `ANTHROPIC_API_KEY`·Supabase `plan_nodes`/`app_node_id` SQL)
-```
-
----
-
-## GATE C — NOW 완료 후 👤 검증
-
-> **원칙**: 👤 Stephen이 채팅에 `GATE C 승인` 입력 → 🤖 AI가 NOW→DONE 전환 + GATE LOG 자동 갱신.  
-> **수동 검증 전용**: 위 체크리스트 완료 후 `GATE C 수동 검증 완료` 한 줄을 채팅에 남기면, NOW-23 착수 전 GATE로 기록 가능.
-
-```
-👤 검증 결과:  [x] 승인(NOW-1~25)  [x] 코드 검증(NOW-26)  [x] 승인(NOW-24)  [x] **승인(NOW-26 + NEXT-6, GATE C 최종)**  [ ] 반려
-👤 수정 지시:  —
-👤 확정 일시:  2026-04-25 (KST) — **GATE C** NOW-26 + NEXT-6(클립보드) · 👤채팅「GATE C 승인」
-```
-
----
-
-## NEXT (순서대로 대기)
-
-```
-- [x] NEXT-1: 실행 취소(Undo) — 스냅샷 스택 + Ctrl+Z / #BUN (✓ 2026-04-24)
-- [x] NEXT-2: 보내기(Export) — plannode.tree JSON v1 + #BJN + MD/PRD 파일명 slug (✓ 2026-04-24)
-- [x] NEXT-3: Supabase 동기 — plannode_workspace + ☁↑/☁↓ + 익명 Auth (✓ 2026-04-24)
-- [x] NEXT-4: JSON 가져오기 — plannode.tree v1 → stores/localStorage + #BJI (✓ 2026-04-24)
-- [x] NEXT-5: 자동정렬 — 전체 mx/my 초기화 + #BAR + undo + index.html 동기 (✓ 2026-04-24)
-- [x] NEXT-6: AI 탭 **클립보드 원클릭** — `#ai-copy`·`#ai-result-toolbar` (`+page.svelte` + `plannodePilot.js`) (✓ 2026-04-25)
-- [x] NEXT-7: 서버 **callAI** (`POST /api/ai/messages`, Anthropic) · **plan_nodes** `meta` upsert(`POST /api/plan-nodes/sync-meta` + `app_node_id`) — **범위:** [.cursor/harness/NEXT7_SCOPE.md](NEXT7_SCOPE.md) (✓ 2026-04-25)
-```
+- 소유자 **프로젝트 삭제** 후: **목록·모달에 동일 id 재등장 0회**(**정책 7** 핵심)
+- 공유자: 삭제 후 **저장 차단·경고·로컬 purge**(**정책 8**)
+- `docs/PILOT_FUNCTIONAL_SPEC.md` **§9·§10**: 트리·루트·뷰 전환·배지 — **무관 변경 금지** 확인
+- 두 계정 시나리오: **우클릭·히스토리·동기 알림바·아바타** 유지(**정책 9**)
 
 ---
 
 ## DONE
 
 ```
-- [x] NEXT-7: callAI + plan_nodes·meta (`/api/ai/messages`, `/api/plan-nodes/sync-meta`, `Project.plan_project_id`) (✓ 2026-04-25)
-- [x] NOW-26: 배지 3트랙·AI 문서 자동화 연동 (✓ 2026-04-25 구현 — 후속: PRD 3트랙 열+AI탭 iaExporter ✓)
-- [x] NEXT-6: AI 프롬프트 클립보드 원클릭 (✓ 2026-04-25)
-- [x] NOW-25: 반응형(≤900px) 메뉴 시트 UX (✓ 2026-04-25)
-- [x] NOW-1: 노드 설정 모달 CSS 스코프 수정 (✓ 2026-04-23 14:45)
-- [x] NOW-2: 노드 UI/UX 개선 및 미니맵 강화 (✓ 2026-04-23 15:10)
-- [x] NOW-3: 스마트 가이드·그룹 이동·무한 댑스/노드 (✓ 2026-04-23)
-- [x] NOW-4: 줌 단축키 정리 및 사용자 안내 (✓ 2026-04-23)
-- [x] NOW-5: 노드 드래그 기능 검증 및 제목 영역 개선 (✓ 2026-04-23)
-- [x] NOW-6: Shift+그룹 이동 재검증·코드 정리 (✓ 2026-04-23)
-- [x] NOW-7: Shift+그룹 드래그·캔버스 빈공간 선택 해제 (✓ 2026-04-23)
-- [x] NOW-8: 제목 Shift 클릭 시 모달 제약 (✓ 2026-04-23)
-- [x] NOW-9: Shift 누름 시에만 multiSel 그룹 드래그 (✓ 2026-04-23)
-- [x] NOW-10: 제목 클릭 수정모달 복구 (✓ 2026-04-23)
-- [x] NOW-11: Shift 시 캔버스 팬 해제 (✓ 2026-04-23)
-- [x] NOW-12: 노드 카드 영역 클릭·이동 (✓ 2026-04-23)
-- [x] NOW-13: Shift+제목에서 multiSel 동작 (✓ 2026-04-23)
-- [x] NOW-14: Shift 클릭 다중 선택 추가 방식 (✓ 2026-04-23)
-- [x] NOW-15: Shift+캔버스 범위 선택 (✓ 2026-04-23)
-- [x] NOW-16: selectionBox 전역 스코프 (✓ 2026-04-23)
-- [x] NOW-17: 모달 제목 필드 focus+select (✓ 2026-04-23)
-- [x] NOW-18~19: addChild 배치 시도 후 원점 복귀 (✓ 2026-04-23)
-- [x] NOW-20: 노드 배치 bld+gp 일관 (✓ 2026-04-23)
-- [x] NOW-21: bld 주석·루트 globalRow 정렬 (✓ 2026-04-23)
-- [x] NOW-22: 자식 col+1 오른쪽 배치 명확화 (✓ 2026-04-23)
-- [x] NOW-23: 저장(영속화) 경로 검증·보완 (✓ 2026-04-24 — schedulePersist 50ms)
-- [x] NEXT-1: 실행 취소(Undo) — nodes 스냅샷 스택·#BUN·Ctrl+Z (✓ 2026-04-24)
-- [x] NEXT-2: Export — plannode.tree v1 JSON·#BJN·slug 파일명 (✓ 2026-04-24)
-- [x] NEXT-4: Import — plannode.tree v1·#BJI·parse + upsertImportedPlannodeTreeV1 (✓ 2026-04-24)
-- [x] NEXT-5: 자동정렬 — resetAllManualLayout·#BAR·plannodePilot.js (✓ 2026-04-24)
-- [x] NOW-24: 프로젝트 모달 카드별 삭제·소유자·ACL·deleteProject — projects.ts, projectAcl.ts, +page.svelte (✓ 2026-04-25, GATE C ✓)
+[2026-05-13] 스프린트 전환: NOW-P0-DEL(정책 7·8·삭제 부활 P0) 시작 — 이전 NOW-RT-*·NOW-RT-FIX-* 완료분은 아래에 보관.
 ```
+
+- [x] **하네스 메타** — `plan-output.md` GATE A 분석 · TASK NOW 확정 이력 — **PRD:** plan-output · M5 · M6
+- [x] **NOW-COLLAB-01~05** — ACL 모달·목록·ACL 구독·하단 저장 라벨 — `+page.svelte` 등 — **PRD:** M5 F5-1 · M6
+- [x] **NOW-RT-00 ~ NOW-RT-04** — LWW 정규화·Broadcast·`plannode_node_rows`·구독/이중쓰기·목록 시각 — **PRD:** M5 F5-2 · F3-2 · M1 F1-3
+- [x] **NOW-RT-FIX-01 ~ NOW-RT-FIX-05** — Echo·nodes 스프레드·dirty 가드·ACL 로그·프로젝트 변경 시 ACL 재로드 — **PRD:** M5 F5-2 · M1 F1-3
+- [x] **BACKLOG 취소** — NOW-RT-L3·NOW-RT-S4 구현 취소 확정(하네스 기록) — 본 기록 유지
 
 ---
 
-## BACKLOG (이번 사이클 제외·후순위)
+## 참고 (고정 링크)
 
-```
-- [x] Supabase 이메일 로그인·앱 전체 게이트·프로젝트 ACL 모달 (✓ 2026-04-24 구현)
-```
-
----
-
-## BLOCKED (선행 조건 미충족)
-
-```
-- [ ] … | REASON: …
-```
-
----
-
-## GATE LOG (🤖 AI 자동 기록)
-
-> 👤 Stephen이 채팅에 각 GATE 승인 한 줄 입력 → 🤖 AI가 아래를 자동 갱신.
-
-| GATE | 결과 | 확정 일시 | 담당 | 비고 |
-|------|------|-----------|------|------|
-| GATE A | ✓ 스킵 | 2026-04-23 | 👤→🤖 | 하이브리드 캔버스 Step4 검증·버그 픽스 |
-| GATE A | ✓ 스킵 | 2026-04-25 | 👤→🤖 | 경량: NOW-24 프로젝트 카드 삭제 |
-| GATE B | ✓ 승인 | 2026-04-23 14:30 | 👤→🤖 | TASK.md NOW-1~4 확정 |
-| GATE B | ✓ 승인 | 2026-04-25 | 👤→🤖 | NOW-24 확정·Plan Mode TASK 반영 |
-| GATE C (NOW-1) | ✓ 승인 | 2026-04-23 14:45 | 👤→🤖 | 모달 CSS 스코프 수정·검증 완료 |
-| GATE C (NOW-2) | ✓ 승인 | 2026-04-23 15:10 | 👤→🤖 | 노드 UI/UX 개선·미니맵 강화 완료 |
-| GATE C (NOW-3) | ✓ 승인 | 2026-04-23 | 👤→🤖 | 스마트 가이드·Shift 그룹 이동 완료 |
-| GATE C (NOW-4) | ✓ 승인 | 2026-04-23 | 👤→🤖 | 줌 단축키 정리·안내 텍스트 추가 |
-| GATE C (NOW-5) | ✓ 승인 | 2026-04-23 | 👤→🤖 | 노드 드래그 검증·제목 영역 개선 |
-| GATE C (NOW-6) | ✓ 승인 | 2026-04-23 | 👤→🤖 | Shift 그룹 이동 재검증·코드 정리 |
-| GATE C (NOW-7~NOW-22) | ✓ 기록 | 2026-04-23 | 🤖 | TASK 정합: 선택/이동/배치/모달 완료 |
-| GATE C (수동 검증) | ✓ 완료 | 2026-04-23 | 👤→🤖 | 브라우저 테스트 완료; params 경고 수정 |
-| GATE C (NOW-23) | ✓ 승인 | 2026-04-24 | 👤→🤖 | 영속화 검증 완료; schedulePersist 50ms 개선 |
-| GATE C (NEXT-1 Undo) | 구현 ✓ | 2026-04-24 | 🤖 | 스냅샷 스택40·#BUN·Ctrl+Z; 수동 승인 대기 |
-| GATE C (NEXT-2 Export) | 구현 ✓ | 2026-04-24 | 🤖 | #BJN·plannode.tree v1·MD/PRD slug; import 미포함 |
-| GATE C (NEXT-3 Supabase) | 구현 ✓ | 2026-04-24 | 🤖 | plannode_workspace·☁↑☁↓·익명+RLS; SQL 수동 |
-| GATE C (NEXT-4 JSON Import) | 구현 ✓ | 2026-04-24 | 🤖 | #BJI·plannodeTreeV1.ts·upsertImported; 동일 ID confirm |
-| GATE C (NEXT-5 자동정렬) | 구현 ✓ | 2026-04-24 | 🤖 | #BAR·mx/my 전체 null·confirm·undo·persist |
-| GATE C (NOW-24 프로젝트 카드 삭제) | ✓ 승인 | 2026-04-25 | 👤→🤖 | 채팅「다음 진행」마감; 삭제 UI·ACL·flush·빌드 검증 |
-| GATE C (NOW-26 + NEXT-6) | ✓ 승인 | 2026-04-25 | 👤→🤖 | 21배지·3트랙·AI탭 buildPrompt·클립보드; 👤채팅 `GATE C 승인` |
-| GATE D | — | — | — | 전체 구현 완료 여부 판정 |
-| GATE E | — | — | — | QA 판정·커밋 허가 여부 |
+| 문서 | 용도 |
+|------|------|
+| [.cursor/rules/plannode-architecture.mdc](../rules/plannode-architecture.mdc) | §5.1 Presence · §10 동기 파이프 |
+| [.cursor/rules/plannode-prd.mdc](../rules/plannode-prd.mdc) | M5·M6·F3-2 협업·데이터 |
+| [docs/plannode_workspace_sync_overview.md](../../docs/plannode_workspace_sync_overview.md) | 번들 동작 요약 |
+| [.cursor/agents/harness-executor.md](../agents/harness-executor.md) | GATE B·30분 루프·수정 범위 |

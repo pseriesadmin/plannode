@@ -1,11 +1,12 @@
 ---
 description: >
-  가져오기→노드카드 배지 파이프라인(동의어·추론·저장)·외부 AI 샘플링 규칙.
+  표준 배지 풀 기반 매핑 로직·가져오기→노드카드 파이프·풀 확대 시 동기화·지능적 학습 자동화 방향.
   학습 저장소(localStorage)·추론 병합 순서 1~4의 정본. 코드와 함께 유지보수한다.
 globs:
   - "src/lib/ai/**/*.ts"
   - "src/lib/plannodeTreeV1.ts"
   - "src/lib/stores/projects.ts"
+  - "src/lib/pilot/plannodePilot.js"
   - "src/routes/+page.svelte"
 alwaysApply: false
 ---
@@ -14,6 +15,57 @@ alwaysApply: false
 
 **근원:** Cursor 플랜 `가져오기_배지_파이프라인_구현결과_bbe7c690.plan.md`를 규칙용으로 재구성·코드 동기화.  
 **제품 의미의 “학습”:** 머신러닝 학습이 아니라 **규칙 테이블 + 브라우저 누적 저장**이다.
+
+---
+
+## 0. 표준 배지 풀 기반 배지 매핑 — 기술 지침
+
+### 0.1 목표 (제품 정렬)
+
+- **표준 배지 풀**이 허용하는 토큼만 최종 칩·저장물에 남긴다: `filterBadgeSetToCanonicalPool`가 최종 게이트.
+- 풀 안에서 **동의어·메타 추론·가져오기 누적 규칙**으로 들어갈 수 있는 것은 최대한 매핑한다(외부 임의 문자열 원문 보존은 제품 범위 밖 — PRD·아키텍처와 동일).
+
+### 0.2 단일 진실·호출 순서 (구현 불변)
+
+| 역할 | 코드 정본 |
+|------|-----------|
+| 런타임 유효 풀(기본 21 + 사용자 확장) | `getEffectiveBadgePool` — `badgePoolConfig.ts` |
+| 원문 토큰 → 트랙·표준 대문자 토큰 | `resolveImportedBadgeToken` — `badgeImportAliases.ts` |
+| 명시 배지 + 메타 힌트 병합 | `getBadgeSetFromNodeInput` → `inferBadgeHintStringsFromMetadata` 병합 순서 **1→4** — `badgePromptInjector.ts`, `badgeMetadataInference.ts` |
+| 저장·가져오기 sanitize | `sanitizeNodeBadgesForTreeV1` / `applySanitizeImportedPlannodeNodeV1` |
+| 노드 카드 표시 | **동일** `getBadgeSetFromNodeInput` 계열 — 단, 파일럿 `render()`는 **표시 전용 게이트**(§6.2)로 `inferHints`를 제한할 수 있음 |
+
+가져오기·아젠다 생성·클라우드 머지 등 **진입점이 달라도** 위 단일 파이프를 깨거나 **둘째 배지 저장소**를 두지 않는다.
+
+**파일럿 표시 게이트**는 `metadata.badges`·`badges[]`·`sanitize` 결과와 **충돌하지 않게** 동작해야 한다(§6).
+
+### 0.3 표준 풀 확대·증식 시 동기화 (필수)
+
+표준 풀은 **지속적으로 확대할 계획**이므로, 토큰을 추가·변경할 때 아래를 **한 세트**로 갱신한다. 누락 시 가져오기 해석·칩·LLM 프롬프트가 어긋난다.
+
+| 단계 | 할 일 |
+|------|--------|
+| 1 | `badgePoolConfig.ts` — 기본 풀 정의·검증·스토리지 키 일관성 |
+| 2 | `badgeImportAliases.ts` — `ALIAS_GROUPS`·신규 토큰으로 들어올 외부 표기 동의어 |
+| 3 | (해당 시) `badgeMetadataInference.ts` — 키워드·extras가 새 도메인 의미를 다루면 정규식·힌트 보강 |
+| 4 | Vitest — `badgeImportAliases.test.ts`, CRAZYSHOT·파이프라인 회귀 샘플 갱신 또는 케이스 추가 |
+| 5 | 아젠다 프롬프트 등 **인라인 풀 문구**를 쓰는 문서·코드 — 예: `노드트리 AI생성 자동화- 파이프라인 정밀 개발서 v1.0.md` §3-1 `BADGE_SPEC`, `agendaPromptAgent.ts`의 동기 래퍼 |
+| 6 | UI 칩 라벨·색 — `plannode-ui-identity.mdc`·컴포넌트에서 신규 트랙·토큰 표기 필요 여부 |
+
+제품 공표가 필요하면 **`plannode-prd.mdc`** M1 F1-3 등과 한 줄 교차한다.
+
+### 0.4 지능적 학습 자동화 (향후 고려 — 구현은 TASK·GATE·GP-12)
+
+현재 구현층은 **규칙 기반**: 동의어표·키워드·`mergeLearnedBadgeRulesFromImportedNodes`로 **브라우저에 규칙 누적**. 이것만으로도 풀이 커질수록 **별칭·규칙 테이블 유지 비용**이 늘어난다.
+
+**확대 증식에 맞춘 자동화·지능화 방향(선택·단계적):**
+
+1. **데이터 기반 동의어 후보:** 가져오기 시 `resolveImportedBadgeToken`에 걸리지 않은 원문(또는 빈도)을 개발·디버그 리포트로 모아, `badgeImportAliases` 보강 후보를 만들 수 있다.
+2. **사용자 규칙 UI:** `setUserBadgeInferenceRules`를 콘솔 없이 편집 — 비개발자 튜닝·GP-12 범위 내에서 TASK 승인 후.
+3. **학습 저장소 정리:** `AI_LEARNED_RULES_MAX`·충돌 시 우선순위를 제품 정책으로 문서화.
+4. **진짜 ML·임베딩 매핑**은 PRD·`plan-output`·GATE에 명시되기 전까지 **도입하지 않는다**(오버엔지니어링 견제). 도입 시에도 **구조 골격은 트리·풀 고정**, 모델은 보조 배지 제안 정도로 한정하는 방향이 PRD F2-4·§10.4와 정합하다.
+
+에이전트는 위 **0.3 동기화 표**를 풀 변경 시 1차 체크리스트로 삼고, **0.4**는 설계 메모로만 참고하고 임의 신규 모듈을 추가하지 않는다.
 
 ---
 
@@ -137,9 +189,107 @@ AI 학습 규칙은 가져오기 시 노드별로 주로 **`field: "name"`, `con
 
 ---
 
-## 6. 파일럿 노드 카드
+## 6. 파일럿 노드 카드·설정 모달 — 추론 조건 구조 (정본)
 
-- `plannodePilot.js` — `getBadgeSetFromNodeInput`과 동일 파이프라인으로 칩 표시.
+이 절은 **`badgePromptInjector.ts` / `badgeMetadataInference.ts`의 코어 파이프**와 **`src/lib/pilot/plannodePilot.js`의 UX 게이트**를 분리해 기록한다. 향후 AI 추론 자동 반영·배지 UI 고도화 시 **이 구조를 변경하면 회귀**한다(진공 노드·기본 제목 `새 노드`·학습 규칙과의 상호작용).
+
+### 6.1 계층 모델 (코어 vs 표시·편집 게이트)
+
+| 층 | 역할 | 정본 위치 |
+|----|------|-----------|
+| **L1 — 명시 배지 + 풀 정규화** | `metadata.badges`(3트랙) 또는 평면 `badges[]` → `BadgeSet` | `getBadgeSetFromNodeInput` (`opts`에 따라 추론 병합 여부) |
+| **L2 — 메타 힌트 추론 병합** | `inferBadgeHintStringsFromMetadata` 순서 1→4(§4.4)·`mergeBadgeSets` | `getBadgeSetFromNodeInput`에서 **기본값** `inferHints` 미지정 시만 활성 |
+| **L3 — 저장 sanitize** | 항상 **추론 비활성**: `{ inferHints: false }` | `sanitizeNodeBadgesForTreeV1` |
+| **L4 — 파일럿 표시 게이트** | 카드 칩: **설명 비었으면 추론 병합 금지** | `plannodePilot.js` `render()` |
+| **L5 — 파일럿 편집 게이트** | 모달 `working`: **항상 명시만** | `plannodePilot.js` `showEdit()` |
+| **L6 — 저장 순간 (진공 입력)** | 제목·설명 **입력란** 모두 빈 문자열이면 클로저 `working` 3트랙 초기화 | `plannodePilot.js` 저장 버튼 콜백 |
+
+**절대 원칙:** 배지의 **영속 단일 경로**는 `sanitizeNodeBadgesForTreeV1` / `applySanitizeImportedPlannodeNodeV1`(가져오기)이다. 파일럿은 **치 레이어에 덮어쓰지 않고**, `getBadgeSetFromNodeInput`의 **`inferHints` 옵션**과 **저장 직전 `working` 초기화**로만 행동을 제한한다.
+
+### 6.2 노드 카드 칩 (`render()`)
+
+**조건식 (정본):**
+
+- `_descEmpty = !String(n.description ?? '').trim()`
+- `inferHints = !_descEmpty`  
+  - 즉 **`description`이 비어 있으면 `inferHints: false`** → L2(키워드·사용자 규칙·AI 학습 규칙) **병합 안 함**. L1 명시 배지(`badges[]` / `metadata.badges`)만 평탄화되어 표시.
+
+**의도·근거:**
+
+- UI에서 제목만 기본값 `'새 노드'`로 둔 상태에서도, **`name`에만 의존하는 학습 규칙**(`plannode.badgeInferenceAiLearnedRules.v1` 등)이 켜지면 명시 1~2개 저장 후에도 카드에 **과다 칩**이 붙는 문제가 발생할 수 있음. **설명이 없을 때는 제목/메타만으로 추론을 섞지 않는다**는 제품 UX 정책.
+- `inferBadgeHintStringsFromMetadata`의 **진공 노드 조기 반환**(`name`·`desc`·구조 hay·treeImportExtras 모두 비었을 때 `[]`)과는 **별개**다. 저장 후 `name === '새 노드'`는 비어 있지 않으므로 진공 조기반환이 깨지지 않아도, L2가 켜지면 학습 규칙이 **`name` 전체 매칭**으로 발동할 수 있다. 이를 카드 단에서 차단하는 것이 §6.2.
+
+**수식 요약:**
+
+```text
+카드 칩 = flattenBadgeSet( getBadgeSetFromNodeInput(n, { inferHints: description에 trim 후 문자가 있음 }) )
+```
+
+### 6.3 설정 모달 초기 상태 (`showEdit()`)
+
+**조건식 (정본):**
+
+- `working = cloneBadgeSet( getBadgeSetFromNodeInput(n, { inferHints: false }) )`
+
+**의도:**
+
+- 모달에 **“추론으로만 생긴” 배지가 선택된 것처럼 보이지 않게** 한다. 편집기는 **저장된 명시 배지(평면·3트랙 정규화 결과)** 만 반영한다.
+
+### 6.4 저장 버튼 (`showEdit` 내부 콜백)
+
+**입력란 원문 (저장 판정):**
+
+- `nm = document.querySelector('.ein')?.value?.trim() ?? ''`
+- `desc = document.querySelector('.eid')?.value?.trim() ?? ''`
+
+**진공 입력 시 `working` 초기화 (정본):**
+
+- `if (!nm && !desc) { working.dev = []; working.ux = []; working.prj = []; }`
+- 그 다음 `target.name` / `target.description` 대입(미입력 시 기본 제목 `'새 노드'` 등) → **`working` 초기화 판정은 반드시 대입 전·입력란 기준**이어야 한다.
+
+**이후 공통 파이프:**
+
+- `applyBadgeSetToNode(target, working)` → `sanitizeNodeBadgesForTreeV1({ badges, metadata, name, description })` → `target.badges` / `target.metadata` 갱신.
+
+### 6.5 `description`이 생긴 뒤의 추론 (카드)
+
+- `_descEmpty === false` 이면 `inferHints: true`(기본 동작) → §4.4 순서 1→4로 **키워드·사용자·AI 학습** 병합 가능. 제목·설명·구조 메타·가져오기 extras가 풀·규칙과 맞을 때만 칩이 늘어난다.
+
+### 6.6 코어 추론과의 관계 (에이전트 체크용)
+
+| 질문 | 답 |
+|------|-----|
+| 진공 노드 조기반환만으로 카드 과다 표시가 막히는가? | **아님.** `name`이 `'새 노드'` 등으로 채워지면 조기반환 조건이 완화된다. 카드는 §6.2로 **설명 없음 → 추론 끔**. |
+| 저장은 추론을 다시 넣는가? | **아니오.** `sanitizeNodeBadgesForTreeV1`는 내부적으로 `{ inferHints: false }`. |
+| 스토어 `persistNodesFromPilot`이 배지를 재추론하는가? | **아니오.** 리스트 그대로 저장; sanitize는 import 루트 등 별 경로. |
+| 향후 “자동 반영 AI”를 어디에 붙이면 안전한가? | **L2 확장** 시에도 §6.2·§6.3·§6.4를 유지하거나, 동일 정책을 `getBadgeSetFromNodeInput` 옵션으로 **코드 한곳에 합치기** — 파일럿과 이중 기준이 되면 안 된다(GP-12). |
+
+### 6.7 회귀 시나리오 (수동·TASK)
+
+1. 새 노드 추가 → 제목·설명 미입력 저장 → 카드 칩 **없음**, 모달 재오픈 시 칩 **미선택**.
+2. 동일 노드에서 DEV 1개만 선택·저장, 설명 비움 유지 → 카드에 **해당 1개만**, **6개 풀 표시 금지**.
+3. 설명에 키워드 입력 후 저장 → 카드에서 **추론 병합 허용**(§6.5).
+4. 가져오기·클라우드 병합 후에도 **칩 = `getBadgeSetFromNodeInput` + 파일럿 게이트**와 모순 없어야 한다.
+
+### 6.8 원인규명 트리북 (저장 ≠ 카드·모달 불일치 시)
+
+**이 절은** `inferBadgeHintStringsFromMetadata`·`sanitize`가 정상인데도 UI만 틀어지는 **계층 혼동**을 줄이기 위한 것이다. 구조 정보는 §6.1~§6.5에 있으나, **현장에서 무엇을 먼저 볼지**를 고정한다.
+
+| 증상 | 먼저 의심할 층 | 확인 방법(개요) |
+|------|----------------|-------------------|
+| 저장 직후 `san.badges`·`target.badges`는 **기대와 일치**인데 카드만 과다/부족 | **L4** 파일럿 `render()` | 동일 노드 `n`에 대해 `description.trim()`이 비었는지. 비었으면 카드는 `inferHints: false` 경로(§6.2) — **학습 규칙·키워드 병합이 카드에 섞이면 안 됨**. 과거 버그: `inferHints: true` + `name === '새 노드'` + `plannode.badgeInferenceAiLearnedRules.v1`로 카드만 6칩. |
+| 모달에 DEV 6개가 **선택**된 것처럼 보임·취소 불가처럼 느껴짐 | **L5** `showEdit()` | `working`은 `getBadgeSetFromNodeInput(n, { inferHints: false })`만 사용(§6.3). 추론 칩이 보이면 **이전 코드·캐시** 또는 **`n.badges` / `metadata.badges`에 실제 명시 값**이 있는지 확인. |
+| 제목·설명 미입력 저장인데 저장물에 배지가 들어감 | **L6** 저장 콜백 | 입력란 `nm`·`desc` **둘 다 빈 문자열**인지. 빈 경우 `working` 3트랙 클리어가 **이름 대입 전**에 실행되는지(§6.4). |
+| 가져오기·sanitize 후는 정상인데 일정 시간 후 배지가 **되살아남** | **클라우드/번들** (`sync.ts` 등) | 로컬 `persistNodesFromPilot`은 재추론 안 함(§6.6표). 원격 머지·슬라이스가 오래된 노드를 덮어쓸 수 있음 — `pullOwnWorkspaceIfChanged`·충돌 재병합 로그와 시각 정렬. |
+| 코드 고쳤는데 브라우저 반응 없음 | **번들/HMR** | `plannodePilot.js` 변경이 Vite 로그에 반영되는지, **하드 리로드** 후 재현. |
+
+**한 번에 비교할 두 값 (디버그용):**
+
+1. **저장 단말:** `sanitizeNodeBadgesForTreeV1(...)` 산출 `badges`(항상 `inferHints: false` 경로, L3).
+2. **카드 단말:** `flattenBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: !_descEmpty }))` — §6.2와 동일해야 정상.  
+   (1)과 (2)가 같아야 하는 것은 **아님** — (2)는 `_descEmpty`에 따라 L2 병합 여부가 달라짐. **같아야 하는 경우:** `description`이 비어 있을 때 (2)는 L1 명시만, (1)과 명시 배지 집합이 **논리적으로 일치**해야 한다.
+
+**학습 규칙 의심 시:** 브라우저 `localStorage` 키 `plannode.badgeInferenceAiLearnedRules.v1`·`plannode.badgeInferenceUserRules.v1`(§1) — `field: "name"` + `contains`가 `'새 노드'` 등과 맞으면 카드에서 L2가 켜질 때만 과다 매칭(§6.2로 차단).
 
 ---
 
@@ -147,7 +297,7 @@ AI 학습 규칙은 가져오기 시 노드별로 주로 **`field: "name"`, `con
 
 - 키워드·규칙 기반; 본문 우연 일치 가능.
 - outline-only 가져오기는 배지 입력 부족이 정상.
-- 별도 ML·피드백 학습 UI는 본 지침 범위 밖.
+- 별도 ML·피드백 학습 UI는 **현재 구현 범위** 밖; 풀 확대·자동화 **방향**은 **§0.3·§0.4** 참조.
 
 ---
 
@@ -221,3 +371,6 @@ AI 학습 규칙은 가져오기 시 노드별로 주로 **`field: "name"`, `con
 - 가져오기·sanitize·표시가 **`getEffectiveBadgePool`** 단일 풀을 본다.
 - 추론 순서 **1→2→3→4**를 바꾸면 TASK·QA·제품 문서와 충돌할 수 있다.
 - AI 학습 저장소를 비우려면 `clearAiLearnedBadgeInferenceRules()` (테스트·디버그용 API).
+- **파일럿:** `render()`에서 `description` 비었을 때 **`inferHints: false`** 유지(§6.2); `showEdit()`에서 **`inferHints: false`** 유지(§6.3); 저장 시 입력란 둘 다 빈 경우 **`working` 3트랙 클리어**(§6.4).
+- **자동 AI 추론**을 새로 붙일 때: §6.1~§6.6과 **동일 UX 정책**을 깨지 말 것 — 필요하면 `badgePromptInjector.ts`에 옵션으로 흡수하고 파일럿은 얇게 유지.
+- **저장 OK·UI만 이상** 시 §6.8 원인규명 트리북으로 층(L3 vs L4·클라우드) 분리 후 수정.
