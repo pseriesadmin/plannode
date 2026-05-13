@@ -4,8 +4,8 @@
  * - 배지별 문서 출력 조건 정의
  *
  * **가져오기·표시 공통 배지 파이프라인(모듈 경계)** — 트리·parent_id는 건드리지 않음:
- * - **표시·직렬화 전**: `getBadgeSetFromNodeInput` → 명시 배지(`coerce…` / `migrate…`) + `inferBadgeHintStringsFromMetadata` → `mergeBadgeSets`.
- * - **저장·sanitize**: `sanitizeNodeBadgesForTreeV1` → 위와 동일하게 `getBadgeSetFromNodeInput` 결과를 풀 필터(`filterBadgeSetToCanonicalPool`) 후 평면·3트랙 정렬.
+ * - **표시·직렬화 전**: `getBadgeSetFromNodeInput` (기본값) → 명시 + 구조메타 추론 병합 / inferHints:false → 명시만.
+ * - **저장·sanitize**: `sanitizeNodeBadgesForTreeV1` → `getBadgeSetFromNodeInput(n, { inferHints: false })` → 풀 필터(`filterBadgeSetToCanonicalPool`) 후 평면·3트랙 정렬.
  * - **파싱/스토어 래퍼**: `applySanitizeImportedPlannodeNodeV1`가 `sanitizeNodeBadgesForTreeV1` 단일 경로( `plannodeTreeV1`·`upsertImportedPlannodeTreeV1`에서 이중 호출·멱등).
  */
 
@@ -357,13 +357,23 @@ export function flattenBadgeSet(set: BadgeSet): string[] {
 
 /**
  * 노드(스토어·파일럿·PRD)에서 BadgeSet — metadata 우선, 없으면 레거시 배열 마이그레이션
+ *
+ * 기본값(opts.inferHints 미지정 또는 undefined): **명시 배지 + 구조 메타 추론 병합**
+ * opts.inferHints: false: 명시 배지만 반환 (저장·sanitize 경로 전용)
+ *
+ * @param n 노드 입력 (badges, metadata, name, description)
+ * @param opts 옵션. { inferHints?: boolean } — false 지정 시 추론 스킵 (기본값: 추론 병합)
+ * @returns BadgeSet (명시+추론 또는 명시만)
  */
-export function getBadgeSetFromNodeInput(n: {
-  badges?: string[];
-  metadata?: NodeMetadata | null;
-  name?: string;
-  description?: string;
-}): BadgeSet {
+export function getBadgeSetFromNodeInput(
+  n: {
+    badges?: string[];
+    metadata?: NodeMetadata | null;
+    name?: string;
+    description?: string;
+  },
+  opts?: { inferHints?: boolean }
+): BadgeSet {
   const pool = getEffectiveBadgePool();
   const mb = n.metadata?.badges;
   const hasTrackShape =
@@ -380,6 +390,14 @@ export function getBadgeSetFromNodeInput(n: {
   } else {
     base = migrateLegacyBadgesToSet(n.badges || [], pool);
   }
+
+  // 기본값: 추론 병합 활성화 (표시 경로)
+  // false만 지정되면 명시 배지만 반환 (저장 경로·sanitize)
+  if (opts?.inferHints === false) {
+    return base;
+  }
+
+  // 추론 활성화: 명시 배지 + 구조 메타 키워드/학습 규칙 병합
   const hints = inferBadgeHintStringsFromMetadata({
     name: n.name,
     description: n.description,
@@ -417,21 +435,26 @@ export function filterBadgeSetToCanonicalPool(set: BadgeSet): BadgeSet {
 /**
  * `plannode.tree` v1 입·출력용: 노드의 배지를 **현재 표준 풀**로 정리하고 `badges`(소문자 평면)와 `metadata.badges`를 맞춤.
  * `functionalSpec`·`iaGrid`·`tech` 등 나머지 metadata는 유지.
+ *
+ * **저장 정책**: `getBadgeSetFromNodeInput` 호출 시 반드시 `{ inferHints: false }` 명시.
+ * 저장·가져오기 경로에서는 **명시 배지만** 정리하고, 구조 메타/사용자/AI 학습 규칙 추론은 제외한다 (버그 B 차단).
  */
 export function sanitizeNodeBadgesForTreeV1(n: {
   badges?: string[];
   metadata?: NodeMetadata | null;
-  /** 추론(`inferBadgeHintStringsFromMetadata`)에 포함 — 생략 시 이름·설명 키워드 매칭 생략 */
   name?: string;
   description?: string;
 }): { badges: string[]; metadata?: NodeMetadata } {
   const set = filterBadgeSetToCanonicalPool(
-    getBadgeSetFromNodeInput({
-      badges: n.badges,
-      metadata: n.metadata,
-      name: n.name,
-      description: n.description
-    })
+    getBadgeSetFromNodeInput(
+      {
+        badges: n.badges,
+        metadata: n.metadata,
+        name: n.name,
+        description: n.description
+      },
+      { inferHints: false } // 명시 호출: 저장 경로는 명시 배지만 정리
+    )
   );
   const badges = flattenBadgeSet(set);
   const base: NodeMetadata =

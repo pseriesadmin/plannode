@@ -2000,7 +2000,11 @@ function render() {
     if (presenceConflict) {
       nd.style.boxShadow = '0 0 0 2px rgba(239, 68, 68, 0.88)';
     }
-    const cardBadgeFlat = flattenBadgeSet(getBadgeSetFromNodeInput(n));
+    // 설명(description)이 없으면 name만으로 추론하지 않음 — user/AI학습 규칙 오추론 차단
+    const _descEmpty = !String(n.description ?? '').trim();
+    const cardBadgeFlat = flattenBadgeSet(
+      getBadgeSetFromNodeInput(n, { inferHints: !_descEmpty })
+    );
     const bgs = cardBadgeFlat
       .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
       .join('');
@@ -2420,7 +2424,8 @@ function cDel(id) {
 }
 
 function showEdit(n) {
-  const working = cloneBadgeSet(getBadgeSetFromNode(n));
+  // 모달 편집 시 명시 저장된 배지만 로드 (추론 배지는 모달에 표시하지 않음)
+  const working = cloneBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: false }));
   const pool = getEffectiveBadgePool();
   const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
   const bh = [
@@ -2447,8 +2452,15 @@ function showEdit(n) {
             pushUndoSnapshot();
           }
           const nm = document.querySelector('.ein')?.value?.trim() ?? '';
+          const desc = document.querySelector('.eid')?.value?.trim() ?? '';
+          // 제목·설명 둘 다 비어 있으면 working 배지 전부 초기화 (빈 노드 저장 시 DEV 강제 매핑 차단)
+          if (!nm && !desc) {
+            working.dev = [];
+            working.ux = [];
+            working.prj = [];
+          }
           target.name = nm.length > 0 ? nm : (target.name ? target.name : '새 노드');
-          target.description = document.querySelector('.eid')?.value?.trim() ?? '';
+          target.description = desc;
           const numIn = String(document.querySelector('.einum')?.value ?? '')
             .trim()
             .slice(0, 10);

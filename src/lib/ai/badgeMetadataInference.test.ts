@@ -73,12 +73,16 @@ describe('badgeMetadataInference', () => {
   });
 
   it('merges into getBadgeSetFromNodeInput when explicit badges sparse', () => {
-    const set = getBadgeSetFromNodeInput({
-      badges: [],
-      name: '결제 콜백',
-      description: 'Stripe webhook 처리',
-      metadata: {}
-    });
+    // 추론 파이프 검증: 기본값(opts 없음)으로 추론 병합
+    const set = getBadgeSetFromNodeInput(
+      {
+        badges: [],
+        name: '결제 콜백',
+        description: 'Stripe webhook 처리',
+        metadata: {}
+      }
+      // opts 미지정 → 기본값(추론 on)
+    );
     expect(set.dev).toContain('PAYMENT');
   });
 
@@ -95,7 +99,9 @@ describe('badgeMetadataInference', () => {
     expect(hints).toEqual(expect.arrayContaining(['USP', 'MVP']));
   });
 
-  it('sanitize persists inferred badges on import-shaped node', () => {
+  it('sanitize returns empty badges when no explicit badges (no infer)', () => {
+    // 정책: sanitize는 { inferHints: false }로 명시되므로 추론 off
+    // 명시 배지가 없으면 → sanitize 후에도 비어 있음
     const n: Node = {
       id: 'n1',
       project_id: 'p1',
@@ -108,19 +114,23 @@ describe('badgeMetadataInference', () => {
       metadata: { functionalSpec: { io: 'websocket channel' } }
     };
     const out = applySanitizeImportedPlannodeNodeV1(n);
-    expect(out.badges.length).toBeGreaterThan(0);
-    expect(out.metadata?.badges?.dev).toContain('REALTIME');
+    // sanitize는 inferHints: false이므로 명시 배지만 남음 → 비어 있음
+    expect(out.badges.length).toBe(0);
+    expect(out.metadata?.badges).toBeUndefined();
   });
 
   it('hint merge order: treeImportExtras before keywordHints when tokens differ', () => {
     const hints = inferBadgeHintStringsFromMetadata({
       name: '폼',
-      description: '입력 폼 validation 유효성',
+      description: '',
       metadata: {
         treeImportExtras: { isTDD: true },
-        functionalSpec: {}
+        functionalSpec: { userTypes: 'input form validation' }
       }
     });
+    // TDD는 treeImportExtras에서, FORM은 functionalSpec haystack에서 추론
+    expect(hints).toContain('TDD');
+    expect(hints).toContain('FORM');
     expect(hints.indexOf('TDD')).toBeLessThan(hints.indexOf('FORM'));
   });
 
@@ -232,5 +242,84 @@ describe('badgeMetadataInference', () => {
     expect(rules.length).toBe(AI_LEARNED_RULES_MAX);
     expect(rules.some((r) => r.contains === 'ZZZ newest unique node')).toBe(true);
     expect(rules.some((r) => r.contains === 'cap-fill-0')).toBe(false);
+  });
+
+  // 진공 노드 회귀: 제목·설명 없으면 추론 전체 스킵
+  it('returns empty hints for vacuum node (no name, desc, or structured meta)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: '',
+      metadata: { badges: { dev: [], ux: [], prj: [] } }
+    });
+    expect(hints).toEqual([]);
+  });
+
+  // 빈 needle 규칙 방어
+  it('does not match rules with empty/whitespace-only contains', () => {
+    setUserBadgeInferenceRules([
+      { field: 'name', contains: '   ', suggestBadges: ['API', 'TDD'] }
+    ]);
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: 'some node',
+      description: 'description',
+      metadata: {}
+    });
+    // 빈 needle은 무시되어야 함
+    expect(hints).not.toContain('API');
+    expect(hints).not.toContain('TDD');
+  });
+
+  // 자유텍스트 UX 복원 케이스: keywordHints(hay+name+desc)에서 보수적 매칭
+  it('infers UX badge LIST from name with structured keyword', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '목록',
+      description: '',
+      metadata: {}
+    });
+    // keywordHints에서 '목록' 키워드를 포함하므로 LIST 추론 기대
+    expect(hints).toContain('LIST');
+  });
+
+  it('infers UX badge NAVI from description', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: '메뉴 화면',
+      metadata: {}
+    });
+    // '메뉴' 키워드 → NAVI 기대
+    expect(hints).toContain('NAVI');
+  });
+
+  // 긍정 케이스: 구조 메타에서 DEV 배지
+  it('infers PAYMENT from structured metadata hint', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: 'Order',
+      description: '',
+      metadata: {
+        functionalSpec: { io: 'stripe webhook' }
+      }
+    });
+    expect(hints).toContain('PAYMENT');
+  });
+
+  // 상한 케이스
+  it('caps hints at MAX_HINTS_PER_NODE = 6', () => {
+    // 10개의 힌트를 유도하되, 상한이 6개로 제한되어야 함
+    setUserBadgeInferenceRules([
+      { field: 'name', contains: 'test1', suggestBadges: ['API'] },
+      { field: 'name', contains: 'test2', suggestBadges: ['TDD'] },
+      { field: 'name', contains: 'test3', suggestBadges: ['CRUD'] },
+      { field: 'name', contains: 'test4', suggestBadges: ['PAYMENT'] },
+    ]);
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: 'test1 test2 test3 test4',
+      description: '',
+      metadata: {
+        treeImportExtras: { auth: true, realtime: true },
+        functionalSpec: { io: 'form validation' }
+      }
+    });
+    // 상한 적용: 최대 6개
+    expect(hints.length).toBeLessThanOrEqual(6);
   });
 });

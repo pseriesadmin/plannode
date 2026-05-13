@@ -6,6 +6,8 @@ import {
   flattenBadgeSet,
   BADGE_PROMPT_FRAGMENTS,
   applySanitizeImportedPlannodeNodeV1,
+  getBadgeSetFromNodeInput,
+  sanitizeNodeBadgesForTreeV1,
 } from './badgePromptInjector';
 import type { BadgeSet } from './types';
 import type { Node } from '$lib/supabase/client';
@@ -351,6 +353,60 @@ describe('badgePromptInjector', () => {
       expect(out.metadata?.badges?.dev?.sort()).toEqual(['AUTH', 'TDD']);
       expect(out.metadata?.badges?.ux?.sort()).toEqual(['LIST', 'MODAL']);
       expect(out.badges.sort()).toEqual(['auth', 'list', 'modal', 'tdd']);
+    });
+  });
+
+  describe('getBadgeSetFromNodeInput inferHints option', () => {
+    it('should merge inference by default (no opts)', () => {
+      const set = getBadgeSetFromNodeInput({
+        badges: [],
+        name: '결제',
+        description: 'Stripe webhook',
+        metadata: {}
+      });
+      // 기본값: 추론 on → PAYMENT 포함
+      expect(set.dev).toContain('PAYMENT');
+    });
+
+    it('should skip inference when opts.inferHints is explicitly false', () => {
+      const set = getBadgeSetFromNodeInput(
+        {
+          badges: [],
+          name: '결제',
+          description: 'Stripe webhook',
+          metadata: {}
+        },
+        { inferHints: false }
+      );
+      // 명시 false: 추론 off → 명시 배지만
+      expect(set.dev).not.toContain('PAYMENT');
+    });
+
+    it('should return only explicit badges when no inference hints (inferHints: false)', () => {
+      const set = getBadgeSetFromNodeInput(
+        {
+          badges: ['tdd'],
+          name: '결제 처리',
+          description: 'Stripe API',
+          metadata: { functionalSpec: { io: 'payment webhook' } }
+        },
+        { inferHints: false }
+      );
+      // 명시: TDD, 추론 off → PAYMENT 제외
+      expect(set.dev).toContain('TDD');
+      expect(set.dev).not.toContain('PAYMENT');
+    });
+
+    it('sanitize implicitly disables inference (backward compat)', () => {
+      const result = sanitizeNodeBadgesForTreeV1({
+        badges: [],
+        name: '실시간 업데이트',
+        description: 'websocket channel',
+        metadata: { functionalSpec: { io: 'realtime' } }
+      });
+      // sanitize는 inferHints: false 명시 → 명시 배지만
+      expect(result.badges).not.toContain('realtime');
+      expect(result.badges.length).toBe(0);
     });
   });
 });
