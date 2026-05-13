@@ -28,6 +28,14 @@ const PROJECTS_KEY = 'plannode_projects_v3';
 const NODES_KEY_PREFIX = 'plannode_nodes_v3_';
 const CURRENT_PROJECT_KEY = 'plannode_current_project_v3';
 
+/** localStorage에 프로젝트 목록 강제 동기화 */
+export function persistProjectsToLocalStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(get(projects)));
+  } catch { /* ignore */ }
+}
+
 /** 클라우드 LWW 병합이 로컬 삭제 직후 서버 스냅샷으로 프로젝트를 되살리지 않도록 유지 */
 const WORKSPACE_PENDING_DELETE_IDS_KEY = 'plannode_workspace_pending_delete_ids_v1';
 
@@ -496,6 +504,25 @@ function syncProjectRootNodeTitle(projectId: string, name: string, now: string):
 /** 파일럿 캔버스에서 전체 노드 스냅샷 저장 (현재 프로젝트와 id 일치 시만) */
 export function persistNodesFromPilot(projectId: string, list: Node[]) {
   if (typeof window === 'undefined') return;
+  
+  // 정책 8: 프로젝트가 삭제 대기 중이면 저장 거부
+  const pendingDeleted = getPendingWorkspaceDeletionIds();
+  if (pendingDeleted.has(projectId)) {
+    console.warn(`[NOW-P0-DEL-04] 삭제 대기 프로젝트(${projectId})에 저장 시도 → 거부`);
+    // 파일럿 → +page.svelte로 이벤트 발행 (toast 표시용)
+    try {
+      window.dispatchEvent(new CustomEvent('plannode-deleted-project-persist-attempt', { 
+        detail: { projectId } 
+      }));
+      if (import.meta.env.DEV) {
+        console.debug(`[toast] plannode-deleted-project-persist-attempt 이벤트 발행됨 (projectId: ${projectId})`);
+      }
+    } catch (e) {
+      console.error('[toast] 이벤트 발행 실패:', e);
+    }
+    return;
+  }
+
   const cur = get(currentProject);
   if (!cur || cur.id !== projectId) return;
   const prevSnap = get(nodes);
@@ -662,11 +689,17 @@ const parseTs = (iso: string | undefined): number => {
  * 모달 목록 카드(NOW-70~72): 로그인·클라우드 사용 가능 시 **`plannode_workspace.projects_json`** 행을 카드 행의 정본으로 쓰고,
  * 아직 서버에 없는 로컬 전용 프로젝트는 목록 뒤에 붙인다. 미로그인·`isAclEnforced()` 거짓(오프라인 호환)일 때는 로컬 `$projects`만 사용한다(+page).
  * 동일 id는 메타 **`updated_at`이 더 새쪽**을 카드에 표시(미플러시 로컬 편집분 우선).
+ *
+ * P2: pending 삭제 id 필터링 — 소유자가 삭제 중인 프로젝트는 모달에 나타나지 않도록.
  */
 export function mergeModalListCloudCanon(cloudRows: Project[], localPlist: Project[]): Project[] {
+  const pendingDelete = getPendingWorkspaceDeletionIds();
   const cloudIds = new Set(cloudRows.map((p) => p.id));
   const out: Project[] = [];
   for (const cp of cloudRows) {
+    // P2: 정책 7 pending 삭제 id는 모달 목록에서 제외
+    if (pendingDelete.has(cp.id)) continue;
+
     const loc = localPlist.find((p) => p.id === cp.id);
     if (!loc) {
       out.push(cp);
@@ -677,7 +710,8 @@ export function mergeModalListCloudCanon(cloudRows: Project[], localPlist: Proje
     out.push(lt > ct ? loc : cp);
   }
   for (const lp of localPlist) {
-    if (!cloudIds.has(lp.id)) out.push(lp);
+    // P2: pending 삭제 id는 로컬 전용 목록에서도 제외
+    if (!cloudIds.has(lp.id) && !pendingDelete.has(lp.id)) out.push(lp);
   }
   return out;
 }

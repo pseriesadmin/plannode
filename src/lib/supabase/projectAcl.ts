@@ -3,12 +3,54 @@ import type { Project, Node } from '$lib/supabase/client';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { getAuthEmail, getAuthEmailResolved, getAuthUserId } from '$lib/stores/authSession';
 import { writable } from 'svelte/store';
-import { selectProject, updateProjectMeta, upsertImportedPlannodeTreeV1 } from '$lib/stores/projects';
+import { selectProject, updateProjectMeta, upsertImportedPlannodeTreeV1, deleteProject } from '$lib/stores/projects';
 import { isMissingRelationError, userFacingAclErrorFromSupabase } from '$lib/supabase/aclErrors';
 import { isPlatformMaster } from '$lib/supabase/platformMaster';
 import { MAX_SHARED_COLLABORATORS } from '$lib/plannodeCollabLimits';
 
 const TABLE = 'plannode_project_acl';
+const OWN_WORKSPACE_TABLE = 'plannode_workspace';
+
+/** `canAccessProject` 반복 호출 시 짧게 재사용 — 내 워크스페이스 행의 프로젝트 id 집합 */
+let cachedOwnWorkspaceProjectIds: { uid: string; ids: Set<string>; at: number } | null = null;
+const OWN_WORKSPACE_IDS_CACHE_MS = 8000;
+
+async function getCachedProjectIdsFromOwnWorkspaceRow(): Promise<Set<string>> {
+  const uid = getAuthUserId();
+  if (!uid) return new Set();
+  const now = Date.now();
+  if (
+    cachedOwnWorkspaceProjectIds &&
+    cachedOwnWorkspaceProjectIds.uid === uid &&
+    now - cachedOwnWorkspaceProjectIds.at < OWN_WORKSPACE_IDS_CACHE_MS
+  ) {
+    return cachedOwnWorkspaceProjectIds.ids;
+  }
+  const { data, error } = await supabase
+    .from(OWN_WORKSPACE_TABLE)
+    .select('projects_json')
+    .eq('user_id', uid)
+    .maybeSingle();
+  const ids = new Set<string>();
+  if (!error && data) {
+    const pj = (data as { projects_json?: unknown }).projects_json;
+    if (Array.isArray(pj)) {
+      for (const item of pj) {
+        if (item && typeof item === 'object' && item !== null && 'id' in item) {
+          const id = String((item as { id?: unknown }).id ?? '').trim();
+          if (id) ids.add(id);
+        }
+      }
+    }
+  }
+  cachedOwnWorkspaceProjectIds = { uid, ids, at: now };
+  return ids;
+}
+
+/** P1: ACL 변화 감지 직후 workspace row 캐시 무효화 (§5.1 PRESENCE_PEER_MERGE 보완) */
+export function invalidateOwnWorkspaceProjectIdsCache(): void {
+  cachedOwnWorkspaceProjectIds = null;
+}
 
 export function normalizeAclEmail(raw: string): string {
   return String(raw ?? '')
@@ -19,6 +61,25 @@ export function normalizeAclEmail(raw: string): string {
 /** Supabase 미설정 시: 로컬만 쓰는 구버전 호환(접근 허용 검사 생략) */
 export function isAclEnforced(): boolean {
   return isSupabaseCloudConfigured();
+}
+
+/**
+ * 공유설정(ACL 모달) UI 진입 허용 — 내 소유 워크스페이스 프로젝트만.
+ * 공유 받은 슬라이스(owner_user_id ≠ 현재 사용자, 또는 타인 워크스페이스 소스)에서는 false.
+ */
+export function canOpenProjectShareSettingsUi(project: Project | null | undefined): boolean {
+  if (!project || !isAclEnforced()) return false;
+  const uid = getAuthUserId();
+  if (!uid) return false;
+
+  if (project.owner_user_id) {
+    return project.owner_user_id === uid;
+  }
+
+  const src = project.cloud_workspace_source_user_id ?? null;
+  if (src && src !== uid) return false;
+
+  return true;
 }
 
 /** 행 개수. -2 = 테이블 없음·스키마 캐시(404·PGRST205), -1 = 기타 오류 */
@@ -60,7 +121,8 @@ export async function countMemberAclRows(projectId: string): Promise<number> {
 }
 
 /**
- * 프로젝트 열기 권한: 소유자 uid 일치 / ACL에 이메일 등록 / 레거시(소유자·ACL 없음)는 로그인 사용자 전원 허용
+ * 프로젝트 열기 권한: 내 `plannode_workspace.projects_json`에 포함된 항목(클라우드 백업 정본) /
+ * 소유자 uid 일치 / ACL에 이메일 등록 / 레거시(소유자·ACL 없음)는 로그인 사용자 전원 허용
  */
 export async function canAccessProject(project: Project): Promise<boolean> {
   if (!isAclEnforced()) return true;
@@ -68,10 +130,34 @@ export async function canAccessProject(project: Project): Promise<boolean> {
   const email = getAuthEmail();
   if (!uid || !email) return false;
   if (await isPlatformMaster()) return true;
+
+  // 내 소유 프로젝트: uid 일치 시 바로 허용
   if (project.owner_user_id && project.owner_user_id === uid) return true;
+
   const n = await countAclRows(project.id);
   if (n === -2 || n === -1) return false;
-  if (n === 0 && !project.owner_user_id) return true;
+
+  // 타인 슬라이스 형태 감지: owner_user_id가 채워졌으나 내 uid가 아니거나,
+  // cloud_workspace_source_user_id가 있으면서 내 uid가 아닐 때는 레거시 분기 차단
+  const isSharedSlice =
+    (project.owner_user_id && project.owner_user_id !== uid) ||
+    ((project as any).cloud_workspace_source_user_id && (project as any).cloud_workspace_source_user_id !== uid);
+  if (isSharedSlice) {
+    // ACL 없으면 거부 — 공유 해제된 프로젝트는 아예 접근 불가
+    if (n === 0) return false;
+  }
+
+  // ACL이 0 행이고 owner_user_id도 없는 레거시 프로젝트: 내 워크스페이스에 있으면 허용
+  // (단, isSharedSlice가 참이면 위에서 이미 처리했음)
+  if (n === 0 && !project.owner_user_id) {
+    // cloud_workspace_source_user_id가 있는 공유 슬라이스는 ACL 0이면 거부
+    if ((project as any).cloud_workspace_source_user_id) return false;
+    const ownWsIds = await getCachedProjectIdsFromOwnWorkspaceRow();
+    return ownWsIds.has(project.id);
+  }
+
+  // ACL이 있는 프로젝트: 반드시 내 이메일이 ACL에 있어야 허용
+  // (소유자가 ACL을 삭제하면 공유자 워크스페이스 캐시에 있어도 접근 불가)
   const { data, error } = await supabase
     .from(TABLE)
     .select('id')
@@ -707,6 +793,14 @@ export async function repairOwnedProjectsAclWorkspaceSources(
   const owned = projectList.filter((p) => p.owner_user_id === authUserId);
   if (!owned.length) return { repaired: 0, rpcMissing: false };
 
+  // ✅ FIX-04: 디버그 로그 추가
+  console.debug('[repairOwnedProjectsAclWorkspaceSources] START', {
+    supabaseConfigured: isAclEnforced(),
+    authUserId,
+    ownedProjectsCount: owned.length,
+    ownedProjects: owned.map((p) => ({ id: p.id }))
+  });
+
   if (lastRepairAuthUid !== authUserId) {
     lastRepairAuthUid = authUserId;
     repairedProjectSourceIds.clear();
@@ -735,6 +829,11 @@ export async function repairOwnedProjectsAclWorkspaceSources(
     }
     if ((r.fixed ?? 0) > 0) repaired += r.fixed ?? 0;
   }
+  // ✅ FIX-04: 완료 로그
+  console.debug('[repairOwnedProjectsAclWorkspaceSources] END', {
+    totalRepaired: repaired,
+    rpcMissing
+  });
   return { repaired, rpcMissing };
 }
 
@@ -825,16 +924,39 @@ export async function removeAclEmail(
 export async function isCurrentUserProjectOwner(project: Project): Promise<boolean> {
   const uid = getAuthUserId();
   const email = getAuthEmail();
-  if (!uid || !email) return false;
+  if (!uid || !email) {
+    if (import.meta.env.DEV) {
+      console.warn('[isCurrentUserProjectOwner] uid/email 없음:', { uid, email });
+    }
+    return false;
+  }
   if (await isPlatformMaster()) return true;
-  if (project.owner_user_id && project.owner_user_id === uid) return true;
-  const { data } = await supabase
+  if (project.owner_user_id && project.owner_user_id === uid) {
+    if (import.meta.env.DEV) {
+      console.info('[isCurrentUserProjectOwner] 로컬 owner_user_id 일치:', project.id);
+    }
+    return true;
+  }
+  const { data, error } = await supabase
     .from(TABLE)
     .select('is_owner')
     .eq('project_id', project.id)
     .eq('email', email)
     .maybeSingle();
-  return !!(data as { is_owner?: boolean } | null)?.is_owner;
+  if (error && import.meta.env.DEV) {
+    console.warn('[isCurrentUserProjectOwner] ACL 조회 오류:', { projectId: project.id, email, error: error.message });
+  }
+  const isOwner = !!(data as { is_owner?: boolean } | null)?.is_owner;
+  if (import.meta.env.DEV) {
+    console.info('[isCurrentUserProjectOwner] ACL 조회 결과:', {
+      projectId: project.id,
+      email,
+      hasData: !!data,
+      isOwner,
+      owner_user_id_in_project: project.owner_user_id
+    });
+  }
+  return isOwner;
 }
 
 /** 소유자 세션만: 해당 프로젝트의 ACL 행 전부 삭제(RLS). 클라우드 미설정 시 no-op 성공. */
@@ -842,12 +964,49 @@ export async function deleteAllAclRowsForProjectIfOwner(
   project: Project
 ): Promise<{ ok: boolean; message?: string }> {
   if (!isAclEnforced()) return { ok: true };
-  if (!(await isCurrentUserProjectOwner(project))) {
+  
+  const uid = getAuthUserId();
+  if (!uid) {
+    return { ok: false, message: '로그인이 필요해.' };
+  }
+  
+  // 로컬 owner_user_id가 현재 사용자와 일치하지 않으면 거부 (가장 정확한 검증)
+  if (project.owner_user_id && project.owner_user_id !== uid) {
+    if (import.meta.env.DEV) {
+      console.error('[deleteAllAclRowsForProjectIfOwner] 소유자 uid 불일치:', {
+        projectId: project.id,
+        currentUid: uid,
+        ownerUid: project.owner_user_id
+      });
+    }
     return { ok: false, message: '소유자만 이 프로젝트의 접근 정보를 완전히 지울 수 있어.' };
   }
+  
+  // 로컬 owner_user_id가 없는 경우: ACL 조회 (레거시 호환용)
+  // ⚠️ 주의: getAuthEmail()은 authUser 스토어 기반이라 프로젝트 선택 시 변할 수 있음
+  // 따라서 로컬 owner_user_id가 있으면 우선 사용 (이미 위에서 검증)
+  if (!project.owner_user_id) {
+    if (!(await isCurrentUserProjectOwner(project))) {
+      if (import.meta.env.DEV) {
+        console.error('[deleteAllAclRowsForProjectIfOwner] ACL 소유자 검증 실패 (레거시):', project.id);
+      }
+      return { ok: false, message: '소유자만 이 프로젝트의 접근 정보를 완전히 지울 수 있어.' };
+    }
+  }
+  
   const { error } = await supabase.from(TABLE).delete().eq('project_id', project.id);
   if (error) {
+    if (import.meta.env.DEV) {
+      console.error('[deleteAllAclRowsForProjectIfOwner] ACL 행 삭제 실패:', {
+        projectId: project.id,
+        errorCode: error.code,
+        errorMessage: error.message
+      });
+    }
     return { ok: false, message: userFacingAclErrorFromSupabase(error) };
+  }
+  if (import.meta.env.DEV) {
+    console.info('[deleteAllAclRowsForProjectIfOwner] 프로젝트 ACL 행 모두 삭제 완료:', project.id);
   }
   return { ok: true };
 }
@@ -868,7 +1027,79 @@ export async function canManageProjectAcl(project: Project): Promise<boolean> {
 export const showAclModal = writable(false);
 export const aclModalProject = writable<Project | null>(null);
 
+/**
+ * 로컬 스토어에서 ACL이 없는 프로젝트 정리
+ * (소유자가 공유 프로젝트를 삭제했을 때, 공유자 로컬에서 자동 제거)
+ */
+/**
+ * 로컬 스토어에서 ACL이 없는 프로젝트 정리
+ * (소유자가 공유 프로젝트를 삭제했을 때, 공유자 로컬에서 자동 제거)
+ * 
+ * 중요: 소유자의 본인 프로젝트는 ACL 여부와 무관하게 유지됨
+ * 공유받은 프로젝트 중 ACL이 제거된 것만 삭제
+ */
+export async function removeLocalProjectsNotInAcl(localProjectIds: string[]): Promise<{
+  removed: string[];
+  retained: string[];
+}> {
+  if (!isAclEnforced()) {
+    return { removed: [], retained: localProjectIds };
+  }
+
+  const uid = getAuthUserId();
+  if (!uid) {
+    return { removed: [], retained: localProjectIds };
+  }
+
+  // 공유받은 프로젝트 목록
+  const { rows: acl } = await fetchMyAclInviteSummaries();
+  const aclProjectIds = new Set(acl.map((x) => x.project_id));
+
+  const removed: string[] = [];
+  const retained: string[] = [];
+
+  // 스토어에서 owner_user_id를 조회해 소유 여부 판단
+  const { get: storeGet } = await import('svelte/store');
+  const { projects: projectsStore } = await import('$lib/stores/projects');
+  const storeList = storeGet(projectsStore);
+  const ownerMap = new Map<string, string | null | undefined>(
+    storeList.map((p) => [p.id, p.owner_user_id])
+  );
+
+  for (const projectId of localProjectIds) {
+    const ownerUid = ownerMap.get(projectId);
+
+    if (aclProjectIds.has(projectId)) {
+      // ACL에 있음 (공유받은 프로젝트) → 유지
+      retained.push(projectId);
+    } else if (!ownerUid) {
+      // owner_user_id 없는 레거시 프로젝트 → 유지 (canAccessProject에서 판단)
+      retained.push(projectId);
+    } else if (ownerUid === uid) {
+      // 내 소유 프로젝트: ACL 여부와 무관하게 캔버스에서 열 수 있어야 함
+      // (로컬스토리지에는 보관하되, 클라우드와 비교·병합 시점에서 삭제 판단)
+      retained.push(projectId);
+    } else {
+      // 타인 소유이고 ACL에도 없음 → 삭제된 공유 프로젝트
+      removed.push(projectId);
+    }
+  }
+
+  if (import.meta.env.DEV) {
+    console.info('[removeLocalProjectsNotInAcl] 공유 프로젝트 검증:', {
+      localCount: localProjectIds.length,
+      aclCount: aclProjectIds.size,
+      retainedCount: retained.length,
+      removedCount: removed.length,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  return { removed, retained };
+}
+
 export function openAclModal(project: Project): void {
+  if (!canOpenProjectShareSettingsUi(project)) return;
   aclModalProject.set(project);
   showAclModal.set(true);
 }
@@ -876,4 +1107,50 @@ export function openAclModal(project: Project): void {
 export function closeAclModal(): void {
   showAclModal.set(false);
   aclModalProject.set(null);
+}
+
+/**
+ * ✅ NOW-PM-06: Realtime ACL 변화 구독
+ * 공유자 계정이 ACL 행이 삭제되면(소유자가 공유 취소) 콜백 호출
+ * @param onAclDeleted ACL 삭제 감지 시 호출 (projectId는 선택, undefined면 모든 프로젝트)
+ * @returns 구독 해제 함수
+ */
+export function subscribeToMyAclChanges(
+  onAclDeleted: (deletedProjectIds: string[]) => void
+): () => void {
+  if (!isAclEnforced()) {
+    return () => {};
+  }
+
+  const email = getAuthEmailResolved();
+  if (!email) {
+    return () => {};
+  }
+
+  const channel = supabase
+    .channel(`acl-delete:${email}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'DELETE',
+        schema: 'public',
+        table: TABLE,
+        filter: `email=eq.${email}`
+      },
+      (payload: { old?: { project_id?: string } }) => {
+        const projectId = payload.old?.project_id as string | undefined;
+        if (import.meta.env.DEV) {
+          console.info('[subscribeToMyAclChanges] 내 ACL 행 삭제:', {
+            projectId,
+            at: new Date().toISOString()
+          });
+        }
+        if (projectId) {
+          onAclDeleted([projectId]);
+        }
+      }
+    )
+    .subscribe();
+
+  return () => void channel.unsubscribe();
 }
