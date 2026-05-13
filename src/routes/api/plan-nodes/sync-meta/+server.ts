@@ -1,4 +1,5 @@
 import { json, error, type RequestHandler } from '@sveltejs/kit';
+import { isUuid } from '$lib/isUuid';
 import { getSupabaseUserForRequest } from '$lib/server/supabaseUser';
 
 type Row = {
@@ -10,10 +11,6 @@ type Row = {
   metadata?: unknown;
   node_type?: string;
 };
-
-function isUuid(s: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
-}
 
 /**
  * plan_projects.id (UUID) 기준으로 plan_nodes 메타(배지 3트랙) upsert

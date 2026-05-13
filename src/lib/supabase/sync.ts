@@ -294,16 +294,19 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       const nodes = fresh.nodesByProject[p.id] ?? [];
       const { cloud_workspace_source_user_id: _cw, ...meta } = proj;
 
+      // revision_stale 경합 발생 시 다음 시도부터 null로 전환(get_revision 생략)
       let baseRevision: number | null = null;
-      const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
-        p_workspace_user_id: src,
-        p_project_id: p.id
-      });
-      if (!revErr) {
-        const rn = rpcBigintToNumber(revData);
-        if (rn !== null) baseRevision = rn;
-      } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
-        console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
+      if (!revisionStaleNotifiedThisPush) {
+        const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
+          p_workspace_user_id: src,
+          p_project_id: p.id
+        });
+        if (!revErr) {
+          const rn = rpcBigintToNumber(revData);
+          if (rn !== null) baseRevision = rn;
+        } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
+          console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
+        }
       }
 
       let lockHeld = false;
@@ -346,6 +349,7 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
           if (!revisionStaleNotifiedThisPush) {
             revisionStaleNotifiedThisPush = true;
             notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
+            // revision_stale 첫 발생 후 다음 시도는 baseRevision=null로 경합 탈출
           }
           continue;
         }

@@ -27,6 +27,9 @@ const HAYSTACK_NEEDLE_MAX = 120;
 /** 구조 메타 hay 전체가 너무 짧으면 라인 시그니처 학습 생략 */
 const HAYSTACK_BODY_MIN = 24;
 
+/** 추론 파이프에서 힌트의 최대 개수 (과다 배지 방지) */
+const MAX_HINTS_PER_NODE = 6;
+
 let memoryUserRules: UserBadgeInferenceRule[] = [];
 
 export type UserBadgeInferenceRule = {
@@ -144,16 +147,16 @@ function hintsFromTreeImportExtras(meta: NodeMetadata): string[] {
   return out;
 }
 
+
+/**
+ * 구조화 메타(hay) + name + desc에서 배지 키워드 힌트를 추론한다.
+ * 자유텍스트(name/desc) UX 트랙은 보수적으로만 허용하여 과다 매칭을 방지한다.
+ */
 function keywordHints(hay: string, name: string, desc: string): string[] {
   const raw = `${hay}\n${name}\n${desc}`;
   const t = raw.toLowerCase();
   const out: string[] = [];
-  /** `\b`는 ECMAScript에서 ASCII 단어에만 안정적이라 한글 토큰은 부분 문자열로 검사한다. */
   const ko = (subs: string[]) => subs.some((s) => raw.includes(s));
-
-  const push = (tok: string, re: RegExp) => {
-    if (re.test(t)) out.push(tok);
-  };
 
   if (
     /\b(stripe|toss|checkout|billing|payment)\b/i.test(t) ||
@@ -171,17 +174,18 @@ function keywordHints(hay: string, name: string, desc: string): string[] {
   }
   if (/\b(api|rest|graphql|grpc|openapi|endpoint|rpc)\b/i.test(t) || ko(['웹훅'])) out.push('API');
   if (/\b(tdd|unit\s*test)\b/i.test(t) || ko(['테스트 주도', '단위 테스트'])) out.push('TDD');
-  push('CRUD', /\bcrud\b/i);
+  if (/\bcrud\b/i.test(t)) out.push('CRUD');
+  // UX 트랙: 자유텍스트에서도 보수적으로 허용
   if (/\b(form|validation)\b/i.test(t) || ko(['입력 폼', '유효성'])) out.push('FORM');
   if (/\b(list|listing|pagination)\b/i.test(t) || ko(['목록', '페이지네이션'])) out.push('LIST');
   if (/\b(modal|dialog|popup)\b/i.test(t) || ko(['바텀시트', '드로어'])) out.push('MODAL');
   if (/\b(navigation|gnb|lnb|sidebar)\b/i.test(t) || ko(['내비', '메뉴'])) out.push('NAVI');
   if (/\b(upload|image|video)\b/i.test(t) || ko(['미디어', '업로드'])) out.push('MEDIA');
-  push('AI', /\b(llm|gpt|claude|genai|generative)\b/i);
+  if (/\b(llm|gpt|claude|genai|generative)\b/i.test(t)) out.push('AI');
   if (ko(['ai 기능', 'AI 기능'])) out.push('AI');
   if (/\b(mobile|ios|android|responsive)\b/i.test(t) || ko(['모바일'])) out.push('MOBILE');
   if (/\b(i18n|l10n|locale)\b/i.test(t) || ko(['다국어', '번역'])) out.push('I18N');
-  push('MVP', /\bmvp\b/i);
+  if (/\bmvp\b/i.test(t)) out.push('MVP');
   if (/\b(usp|differentiation)\b/i.test(t) || ko(['차별'])) out.push('USP');
   return out;
 }
@@ -264,20 +268,26 @@ function mergeLearnedRuleLists(
   const m = new Map<string, UserBadgeInferenceRule>();
   for (const r of existing) {
     if (!r?.contains || !Array.isArray(r.suggestBadges)) continue;
+    const trimmed = String(r.contains).trim();
+    // **방어(플랜 D)**: 빈 needle은 저장되지 않도록
+    if (!trimmed) continue;
     const k = ruleMergeKey(r);
     m.set(k, {
       field: r.field,
-      contains: String(r.contains).trim(),
+      contains: trimmed,
       suggestBadges: [...r.suggestBadges.map(String)]
     });
   }
   for (const r of incoming) {
     if (!r?.contains || !Array.isArray(r.suggestBadges)) continue;
+    const trimmed = String(r.contains).trim();
+    // **방어(플랜 D)**: 빈 needle은 저장되지 않도록
+    if (!trimmed) continue;
     const k = ruleMergeKey(r);
     const prev = m.get(k);
     const sug = r.suggestBadges.map(String).filter(Boolean);
     if (!prev) {
-      m.set(k, { field: r.field, contains: String(r.contains).trim(), suggestBadges: [...new Set(sug)] });
+      m.set(k, { field: r.field, contains: trimmed, suggestBadges: [...new Set(sug)] });
       continue;
     }
     const seen = new Set(prev.suggestBadges.map(String));
@@ -411,7 +421,9 @@ export function applyBadgeInferenceRules(
   const out: string[] = [];
   for (const r of rules) {
     if (!r?.contains || !Array.isArray(r.suggestBadges)) continue;
-    const needle = String(r.contains).toLowerCase();
+    const needle = String(r.contains).trim().toLowerCase();
+    // **방어(플랜 C)**: 빈/공백-only needle은 모든 문자열에 match하므로 차단
+    if (!needle) continue;
     let hit = false;
     if (r.field === 'name') hit = nameL.includes(needle);
     else if (r.field === 'description') hit = descL.includes(needle);
@@ -425,6 +437,8 @@ export function applyBadgeInferenceRules(
  * 명시 `badges` / `metadata.badges` 외에 메타에서 끌어올 **평면 힌트 문자열**(동의어·키워드·extras·사용자·AI 학습 규칙).
  * 파일 상단 주석의 **1→2→3→4 순서**로 합친 뒤, 대문자 토큰 단위로 중복 제거(먼저 나온 것 유지).
  * `migrateLegacyBadgesToSet`·`resolveImportedBadgeToken`으로 이어지므로 표준 풀 밖은 자연 제거.
+ * 
+ * **진공 노드 조기 반환(플랜 A)**: name/desc/structuredMeta 모두 비어 있으면 추론 전체 스킵 → 명시 배지만 유지.
  */
 export function inferBadgeHintStringsFromMetadata(n: {
   name?: string;
@@ -432,20 +446,35 @@ export function inferBadgeHintStringsFromMetadata(n: {
   metadata?: NodeMetadata | null;
 }): string[] {
   const meta = n.metadata && typeof n.metadata === 'object' && !Array.isArray(n.metadata) ? n.metadata : null;
-  const name = String(n.name ?? '');
-  const desc = String(n.description ?? '');
-  const hayStructured = meta ? haystackFromStructuredMeta(meta as NodeMetadata) : '';
+  const name = String(n.name ?? '').trim();
+  const desc = String(n.description ?? '').trim();
+  const hayStructured = meta ? haystackFromStructuredMeta(meta as NodeMetadata).trim() : '';
+  
+  // **진공 노드**: 제목·설명·구조 hay + treeImportExtras 모두 비어 있음
+  const extras = meta ? hintsFromTreeImportExtras(meta as NodeMetadata) : [];
+  if (!name && !desc && !hayStructured && !extras.length) {
+    return []; // 명시 배지만 유지, 추론 전체 스킵
+  }
 
-  const fromExtras = meta ? hintsFromTreeImportExtras(meta as NodeMetadata) : [];
+  const fromExtras = extras;
+  // keywordHints: 구조 hay + name + desc 단일 호출 (자유텍스트 UX 과다매칭 방지는 정규식 레벨에서 제어)
   const fromKw = keywordHints(hayStructured, name, desc);
   const fromUser = applyBadgeInferenceRules(getUserBadgeInferenceRules(), hayStructured, name, desc);
   const fromAiLearned = applyBadgeInferenceRules(getAiLearnedBadgeInferenceRules(), hayStructured, name, desc);
 
   const seen = new Set<string>();
   const out: string[] = [];
+
+  // 우선순위: treeImportExtras → keywordHints(hay+name+desc) → 사용자규칙 → AI학습규칙
   for (const x of [...fromExtras, ...fromKw, ...fromUser, ...fromAiLearned]) {
     const s = String(x).trim();
     if (!s || seen.has(s)) continue;
+
+    // 상한 체크: MAX_HINTS_PER_NODE 초과 시 낮은 우선순위부터 드롭
+    if (out.length >= MAX_HINTS_PER_NODE) {
+      break;
+    }
+
     seen.add(s);
     out.push(s);
   }

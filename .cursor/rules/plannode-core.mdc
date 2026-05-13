@@ -6,11 +6,12 @@ alwaysApply: true
 # Plannode 코어
 
 - 스택: Vanilla HTML/CSS/JS (`index.html`, `plannode.js`) → SvelteKit + Supabase 이행 중.
-- **구현 아키텍처·모듈·데이터 흐름(유지보수 기준)**: `.cursor/rules/plannode-architecture.mdc`
+- **구현 아키텍처·모듈·데이터 흐름(유지보수 기준)**: `.cursor/rules/plannode-architecture.mdc` — **「원격선택-null」/`PRESENCE_PEER_MERGE`(§5.1)** — **규칙 폴더 인덱스**: `.cursor/rules/README.md`
 - **UI 색·타이포·반응형·레이어 표준**: `.cursor/rules/plannode-ui-identity.mdc`
 - **제품·기능·로드맵(IA/와이어, LLM §10, v2 DB 등)**: `.cursor/rules/plannode-prd.mdc` — 하네스 `plan-output.md`·`TASK.md`는 **PRD 항목(M#·F#-#)을 1줄씩** 추적한다.
 - **파일럿 정합·포팅 갭**: `docs/PILOT_FUNCTIONAL_SPEC.md` §9~§10.
 - 인프라·배포: `.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md`를 우선한다.
+- **릴리스 노트 UI:** 캔버스 하단 「Release」→ 모달 「Release note」(`+page.svelte`, 정적 `src/lib/plannodeUpdateLog.ts`) — 표준 톤은 `plannode-ui-identity.mdc` §5 캔버스 하단 릴리스 행.
 - 개발 워크플로우: **Harness Flow v1.0** — `AGENTS.md` + `.cursor/harness/` + `.cursor/agents/` 참조.
 - `plannode-prd`·`PILOT_FUNCTIONAL_SPEC`·코드·통합 가이드가 어긋나면 **불일치를 먼저 밝히고** 한쪽을 명시적으로 맞춘다(묵시적 불일치 유지 금지).
 
@@ -21,6 +22,7 @@ alwaysApply: true
 | `.cursor/rules/plannode-architecture.mdc` | SvelteKit·파일럿 브리지·스토어·Supabase 데이터 흐름 |
 | `.cursor/rules/plannode-ui-identity.mdc` | 브랜드 색·타이포·브레이크포인트·모달/배지 패턴 |
 | `.cursor/rules/plannode-prd.mdc` | PRD: M/F/Phase, IA·와이어 vs F2-5 LLM, §10~§11 |
+| `.cursor/rules/plannode-badge-mapping.mdc` | 표준 배지 풀 매핑·풀 확대 동기화·가져오기→칩 파이프 |
 | `AGENTS.md` | 프로젝트 정체성·황금 원칙·에이전트 호출 순서·문서 위계 |
 | `.cursor/harness/README.md` | 폴더 역할·DB 절·운영 원칙·PRD 연계 |
 | `.cursor/harness/TASK.md` | 현재 스프린트 태스크 스택 |
@@ -29,7 +31,7 @@ alwaysApply: true
 | `.cursor/agents/harness-executor.md` | Step4 GSD 실행 에이전트 |
 | `.cursor/agents/promptor.md` | Step2 아젠다 분석·플래너 |
 | `.cursor/agents/qa.md` | Step5 QA 검수 에이전트 |
-| `.cursor/plans/harness-workflow_final.md` | 하네스 워크플로 + **경량화 제어**(오버엔지니어링·모듈 증가 견제) |
+| `.cursor/plans/harness-workflow_final.md` | 하네스 **기본·단축** · GATE · 채팅 복붙 블록 |
 
 ## 파일럿 갭 원칙
 
@@ -40,14 +42,21 @@ alwaysApply: true
 ## 최소 구현·기술부채·경량화 (하네스 공통)
 
 - **오버 엔지니어링 견제:** 아젠다·PRD·TASK에 없는 추상·불필요한 **신규 모듈/파일**·“나중에 쓸” 데드 코드를 넣지 않는다(기존 경로 확장 우선).
-- **경량화 제어:** `AGENTS.md` **「경량화·오버엔지니어링 견제 제어 구조」** 표(스코프→쪼개기→GATE→구현→@qa)와 `.cursor/plans/harness-workflow_final.md` **「경량화 제어」** 절.
+- **경량화 제어:** `AGENTS.md` **「경량화·오버엔지니어링 견제 제어 구조」** 표(스코프→쪼개기→GATE→구현→@qa)와 `.cursor/harness/README.md` **「최소 구현·기술부채·경량화」**.
 - **기술부채 누적 지양:** `AGENTS.md` GP-12, `@qa` 검수 2단계(기술 부채), `@harness-executor` G-STEP 4를 함께 본다.
-- **Guides(스펙·GATE) vs Sensors(빌드·QA):** 불필요한 설계(오버엔지니어링)는 **센서만**으로는 부족할 수 있으므로 **PRD·plan-output 포함/제외**를 1차로 둔다(`.cursor/plans/harness-workflow_final.md` **외부 문헌** 절).
+- **Guides(스펙·GATE) vs Sensors(빌드·QA):** 불필요한 설계(오버엔지니어링)는 **센서만**으로는 부족할 수 있으므로 **PRD·plan-output 포함/제외**를 1차로 둔다(`AGENTS.md` 대외·문헌 정합 단락 참고).
 
 ## 유지보수 시
 
+**단순 수정 스코프 (경량·단건):** 요청과 무관한 영역은 건드리지 않는다.
+
+- **파일:** 요청에 명시된 경로만 수정한다.
+- **섹션:** 같은 파일이라도 요청한 블록·기능 범위만 변경한다.
+- **전역 스타일:** 공통 레이아웃·전역 CSS·무관 컴포넌트 스타일 변경 금지.
+- **파일럿 DOM id:** 파일럿이 의존하는 **id·숨은 버튼·와이어 싱크** 임의 변경 금지 — 필요 시 `docs/PILOT_FUNCTIONAL_SPEC.md` §9~§10·`plannode-architecture.mdc`와 대조.
+
 - 요청 범위 밖 파일은 수정하지 않는다. 스타일·패턴은 기존 파일과 통일한다.
-- Supabase·Vercel·DNS·RLS 변경은 `PLANNODE_INTEGRATED_GUIDE.md` 및 환경 변수 영향을 함께 검토한다.
+- Supabase·Vercel·DNS·RLS 변경은 `.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md` 및 환경 변수 영향을 함께 검토한다.
 - git 명령은 Stephen만 직접 실행한다. AI가 자율 커밋·푸시하지 않는다.
 
 ## 서브에이전트·Task 활용

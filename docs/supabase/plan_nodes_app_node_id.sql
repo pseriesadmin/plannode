@@ -1,5 +1,5 @@
 -- NEXT-7: 로컬 Plannode 노드 id(비-UUID 문자열)를 plan_nodes와 맞추기 위한 열
--- 선행: PLANNODE_INTEGRATED_GUIDE.md §4.1 (plan_nodes 테이블·RLS) 적용됨
+-- 선행: .cursor/plans/PLANNODE_INTEGRATED_GUIDE.md §4.1 (plan_nodes 테이블·RLS) 적용됨
 -- Supabase → SQL Editor에서 한 번만 실행(이미 있으면 스킵)
 
 alter table if exists public.plan_nodes

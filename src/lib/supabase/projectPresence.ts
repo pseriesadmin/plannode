@@ -61,6 +61,15 @@ function peerFromMeta(raw: unknown): ProjectPresencePeer | null {
   };
 }
 
+/** Presence 채널이 오류/타임아웃으로 끊어진 상태인지 — +page.svelte 재구독 판단용 */
+export function isPresenceChannelBroken(): boolean {
+  if (!channel) return false;
+  if (presenceRealtimeSubscribed) return false;
+  const state = (channel as unknown as { state?: string }).state;
+  // joining/joined 이외의 상태(error, closed, leaving 등)면 오류로 간주
+  return state !== 'joining' && state !== 'joined';
+}
+
 export function unsubscribeProjectPresence() {
   presenceRealtimeSubscribed = false;
   projectPresenceSelectedEmail.set(null);
@@ -92,6 +101,17 @@ export function unsubscribeProjectPresence() {
 
 export function toggleProjectPresencePeerEmail(email: string) {
   projectPresenceSelectedEmail.update((cur) => (cur === email ? null : email));
+}
+
+/**
+ * 이메일 주소의 첫 글자를 아바타 표시용으로 추출.
+ * 알파벳·한글·숫자는 대문자로, 그 외는 '?'로 표시.
+ */
+export function presenceAvatarLetter(email: string): string {
+  const e = String(email ?? '').trim();
+  if (!e) return '?';
+  const ch = e[0];
+  return /[a-zA-Z가-힣0-9]/.test(ch) ? ch.toUpperCase() : '?';
 }
 
 /** 파일럿 노드 선택 시 Presence track 갱신 — 트리 뷰 협업 표시용 */
@@ -138,8 +158,15 @@ export async function subscribeProjectPresence(
 ): Promise<void> {
   if (!projectId || !myUserId) return;
   if (subscribedProjectId === projectId && channel && presenceRealtimeSubscribed) return;
-  /** SUBSCRIBED 이전 재진입 시 unsubscribe가 채널을 끊어 피어/아바타가 비는 경우 방지 */
-  if (subscribedProjectId === projectId && channel && !presenceRealtimeSubscribed) return;
+  /** SUBSCRIBED 이전 재진입: 채널이 CHANNEL_ERROR/TIMED_OUT 상태로 굳어버린 경우 재구독 허용.
+   *  채널이 정상 연결 중(subscribe 호출은 됐으나 아직 SUBSCRIBED 응답 전)이면 그대로 대기. */
+  if (subscribedProjectId === projectId && channel && !presenceRealtimeSubscribed) {
+    const state = (channel as unknown as { state?: string }).state;
+    // 연결 중(joining) 상태면 재진입 차단 유지 — SUBSCRIBED 응답을 기다림
+    if (state === 'joining' || state === 'joined') return;
+    // 오류/타임아웃/닫힘 상태면 채널을 버리고 재구독
+    unsubscribeProjectPresence();
+  }
 
   unsubscribeProjectPresence();
   subscribedProjectId = projectId;
@@ -244,6 +271,14 @@ export async function subscribeProjectPresence(
       if (presenceResyncTimer) {
         clearTimeout(presenceResyncTimer);
         presenceResyncTimer = null;
+      }
+      // 채널 오류 시 +page.svelte가 재구독을 트리거할 수 있도록 이벤트 발행
+      if (typeof window !== 'undefined' && subscribedProjectId) {
+        window.dispatchEvent(
+          new CustomEvent('plannode-presence-channel-error', {
+            detail: { projectId: subscribedProjectId, status }
+          })
+        );
       }
     }
   });

@@ -2,7 +2,7 @@
 
 *Pseries internal planning tool — Node tree PRD interface*
 
-**개발·배포 통합 가이드**(기능 보완 → Git·Supabase·Vercel): [`PLANNODE_INTEGRATED_GUIDE.md`](./PLANNODE_INTEGRATED_GUIDE.md)
+**개발·배포 통합 가이드**(기능 보완 → Git·Supabase·Vercel): [`.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md`](./.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md)
 
 ## 개요
 **Plannode**는 노드 트리 기반 기획 구조 작성 도구입니다. 프로젝트 기능 맵을 시각적으로 설계하고, PRD/기능명세서/IA 마크다운을 자동 생성합니다.
@@ -22,7 +22,7 @@ plannode/                          ← 이 저장소(프로젝트 루트)
 ├── README.md                     ← 이 파일
 ├── AGENTS.md                     ← Cursor 에이전트·유지보수 분업 안내
 ├── .cursor/rules/*.mdc           ← Cursor Rules (항상·파일별 규칙)
-└── PLANNODE_INTEGRATED_GUIDE.md  ← 기능 보완 → Git · Supabase(DB) · Vercel · DNS
+└── .cursor/plans/PLANNODE_INTEGRATED_GUIDE.md  ← 기능 보완 → Git · Supabase(DB) · Vercel · DNS
 ```
 
 ---

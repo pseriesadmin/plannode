@@ -73,6 +73,9 @@
     fetchProjectSliceFromCloud,
     isCurrentUserProjectOwner,
     deleteAllAclRowsForProjectIfOwner,
+    subscribeToMyAclChanges,
+    invalidateOwnWorkspaceProjectIdsCache,
+    canOpenProjectShareSettingsUi,
     type AclInviteSummary
   } from '$lib/supabase/projectAcl';
   import {
@@ -416,6 +419,11 @@
   let modalEditingDraft = '';
   let modalCardTitleInputEl: HTMLInputElement | undefined;
   let modalTitleLpTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 정책 8: 공유 계정이 삭제된 프로젝트 접근 시 경고 모달 */
+  let showDeletedProjectWarning = false;
+  let deletedProjectWarningId = '';
+  let unsubAclChanges: (() => void) | null = null;
   let modalTitleLpStart: { x: number; y: number } | null = null;
   let modalSuppressNextPcClick = false;
 
@@ -463,19 +471,40 @@
       projectsForModalAuthUid = uid;
     }
 
+    // 동시성 문제 회피(P0): 스토어 스냅샷을 여기서 한 번만 가져온다
     const plist = get(projects);
     let mergedList: Project[];
     if (cloudSyncAvailable) {
       const cloudRes = await fetchOwnWorkspaceProjectMetasForModal();
       if (token !== modalProjectListToken) return;
+      // 주의: mergeModalListCloudCanon 이후 스토어가 변경될 수 있으므로, 결과는 고정 스냅샷으로 취급
       mergedList = cloudRes.ok ? mergeModalListCloudCanon(cloudRes.projects, plist) : [...plist];
     } else {
       mergedList = [...plist];
     }
 
+    // P1: mergedList의 owner_user_id를 스냅샷 (canAccessProject 호출 시 스토어 재쿼리가 중복되지 않도록)
+    const ownerMapSnapshot = new Map<string, string | null | undefined>(
+      mergedList.map((p) => [p.id, p.owner_user_id])
+    );
+
+    // P0: 공유 프로젝트 1차 필터: ACL 목록을 가져와서 ACL에 없는 공유 슬라이스는 제외
+    let myAclProjectIds: Set<string> | null = null;
+    if (cloudSyncAvailable) {
+      const { rows } = await fetchMyAclInviteSummaries();
+      if (token !== modalProjectListToken) return;
+      myAclProjectIds = new Set(rows.map((r) => r.project_id));
+    }
+
     const next: Project[] = [];
     for (const p of mergedList) {
       if (token !== modalProjectListToken) return;
+      // 공유 슬라이스 감지: cloud_workspace_source_user_id가 있고 owner_user_id가 나와 다른 경우
+      // (주의: 스냅샷된 owner_user_id 사용)
+      const ownerUid = ownerMapSnapshot.get(p.id);
+      const isSharedSlice = (p as any).cloud_workspace_source_user_id && ownerUid !== uid;
+      // ACL 목록을 가져왔으면 공유 슬라이스는 ACL에만 있는 것만 통과
+      if (isSharedSlice && myAclProjectIds && !myAclProjectIds.has(p.id)) continue;
       if (await canAccessProject(p)) next.push(p);
     }
     if (token !== modalProjectListToken) return;
@@ -1017,6 +1046,12 @@
       showPilotToast(msg);
       return;
     }
+
+    // **가져오기 완료 직후 모달 즉시 닫기** (백그라운드 작업과 무관)
+    projectImportError = '';
+    await tick();
+    requestAnimationFrame(() => showProjectModal.set(false));
+
     const uid = getAuthUserId();
     if (cloudSyncAvailable && uid) {
       if (!merged.owner_user_id) {
@@ -1030,14 +1065,11 @@
       const r = await trySelectProject(latest);
       if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
       else {
-        projectImportError = '';
         showPilotToast(
           importUsedOutlineFallback
             ? `가져오기 완료(제목·목차 초안): ${latest.name}`
             : `가져오기 완료: ${latest.name}`
         );
-        await tick();
-        requestAnimationFrame(() => showProjectModal.set(false));
       }
     }
   }
@@ -1279,18 +1311,21 @@
     });
   })();
 
-  /** 모달에서 카드별 삭제 버튼 표시용(ACL·플랫폼 마스터 등 owner_user_id만으로는 모르는 경우) */
-  let projectDeletableById: Record<string, boolean> = {};
-  let deleteFlagsLoadGen = 0;
+  /** 정책 7·8: 모달에서 카드별 삭제 버튼 표시 
+   * - 현재: owner_user_id만 체크 (소유자 전용)
+   * - 이전 ACL 조회(projectDeletableById)는 제거됨 (로컬 owner_user_id가 진실)
+   */
+  let projectDeletableById: Record<string, boolean> = {}; // 미사용 (호환성 유지)
+  let deleteFlagsLoadGen = 0; // 미사용
   let deletingProjectId = '';
 
+  /* 미사용 함수 (정책 7·8: owner_user_id만 체크로 변경)
   async function loadProjectDeleteFlags() {
     const uid = getAuthUserId();
     if (!$showProjectModal || !uid) {
       projectDeletableById = {};
       return;
     }
-    // 재오픈·계정 전환 직전 스냅샷으로 비소유 카드에 삭제가 잠깐(또는 계속) 뜨는 것 방지
     projectDeletableById = {};
     const gen = ++deleteFlagsLoadGen;
     const plist = get(projects);
@@ -1300,16 +1335,17 @@
     if (gen !== deleteFlagsLoadGen || !$showProjectModal) return;
     projectDeletableById = Object.fromEntries(entries);
   }
+  */
 
-  /** 모달이 열려 있을 때만 갱신; auth·목록 변화에도 재조회 */
+  /** 모달이 열려 있을 때만 갱신; auth·목록 변화에도 재조회 (현재 미사용) */
   $: if ($showProjectModal) {
     $authUser?.id;
     $projects;
-    void loadProjectDeleteFlags();
+    // 미사용: void loadProjectDeleteFlags();
   }
 
   $: if (!$showProjectModal) {
-    projectDeletableById = {};
+    // 미사용: projectDeletableById = {};
     deleteFlagsLoadGen++;
     showModelApiModal = false;
     modelApiKeyDraft = '';
@@ -1318,8 +1354,10 @@
   function canShowProjectDelete(proj: Project): boolean {
     const uid = getAuthUserId();
     if (!uid) return false;
+    // 정책 7·8: 소유 계정만 삭제 가능 — owner_user_id 일치 확인 (공유자 오노출 방지)
     if (proj.owner_user_id === uid) return true;
-    return projectDeletableById[proj.id] === true;
+    // ACL 조회 결과는 참고만 (로컬 owner_user_id가 진실)
+    return false;
   }
 
   async function handleDeleteProjectCard(proj: Project) {
@@ -1519,6 +1557,8 @@
 
   function onProjectNameToolbarClick() {
     if (!cloudSyncAvailable || !toolbarCompact) return;
+    const p = get(currentProject);
+    if (!p || !canOpenProjectShareSettingsUi(p)) return;
     openAclForCurrentProject();
   }
 
@@ -1748,11 +1788,78 @@
     };
     window.addEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
 
+    let presenceResubscribeCooldownTimer: ReturnType<typeof setTimeout> | null = null;
+    const onPresenceChannelError = async (e: Event) => {
+      const detail = (e as CustomEvent).detail as { projectId?: string } | undefined;
+      if (!detail?.projectId || detail.projectId !== presenceProjectId) return;
+      // 10초 이내 중복 재구독 방지
+      if (presenceResubscribeCooldownTimer) return;
+      presenceResubscribeCooldownTimer = setTimeout(() => {
+        presenceResubscribeCooldownTimer = null;
+      }, 10_000);
+
+      // $: 블록 재트리거는 동작 안 함 → 재구독 직접 호출
+      const pid = detail.projectId;
+      const uid = $authUser?.id;
+      const email = $authUser?.email ?? null;
+      if (!pid || !uid || !cloudSyncAvailable) return;
+
+      presenceProjectId = ''; // 중복 진입 방지 리셋
+      unsubscribeProjectPresence();
+
+      const { rows } = await fetchProjectAcl(pid);
+      const proj = get(currentProject);
+      if (!proj || proj.id !== pid) return;
+      const emails = rows.map((r: { email: string }) => r.email).filter(Boolean);
+      const ownerOk = await isCurrentUserProjectOwner(proj);
+      if (presenceProjectId !== '') return; // 도중에 프로젝트 바뀐 경우 취소
+      const wsSrc = proj.cloud_workspace_source_user_id ?? null;
+      const presenceAlwaysShow = wsSrc && wsSrc !== uid ? [wsSrc] : [];
+      const presenceAllowedEmails = ownerOk ? [] : emails;
+      await subscribeProjectPresence(pid, uid, email, presenceAllowedEmails, presenceAlwaysShow);
+      presenceProjectId = pid; // 성공 후 복원
+    };
+    window.addEventListener('plannode-presence-channel-error', onPresenceChannelError);
+
+    /** 정책 8: 공유 계정이 삭제된 프로젝트 감지 → deleteProject 호출 + 선택 즉시 플러시 */
+    unsubAclChanges = subscribeToMyAclChanges((deletedProjectIds: string[]) => {
+      // P1: workspace row 캐시 무효화 (ACL이 0이면 canAccessProject 레거시 분기 다시 조회)
+      invalidateOwnWorkspaceProjectIdsCache();
+
+      for (const projId of deletedProjectIds) {
+        // P0: deleteProject 호출로 스토어·로컬 정리 + markCloudWorkspaceDirty 자동 수행
+        deleteProject(projId);
+
+        // 현재 열린 프로젝트가 삭제됐으면 경고 모달 표시
+        const cp = get(currentProject);
+        if (cp && cp.id === projId) {
+          deletedProjectWarningId = projId;
+          showDeletedProjectWarning = true;
+        }
+      }
+      // 정책 8 보강: ACL 변화 감지 후 모달 목록 즉시 갱신 (공유자에게 삭제된 프로젝트 미노출)
+      if (get(showProjectModal)) {
+        void syncProjectsForModalList();
+      }
+      // 선택: ACL 삭제 후 번들을 곧바로 서버에 반영 (DB JSON에서 id 제거)
+      // 기존 scheduleCloudFlush는 디바운스(~500ms)되므로, 즉시 반영을 원하면 아래 활성화:
+      // void flushCloudWorkspaceNow('acl-revoked');
+    });
+
     const onPilotToast = (ev: Event) => {
       const msg = (ev as CustomEvent<{ message?: string }>).detail?.message;
       if (msg) showPilotToast(msg);
     };
     window.addEventListener('plannode-pilot-toast', onPilotToast);
+
+    /** 정책 8: 삭제된 프로젝트에 저장 시도 → toast 안내 */
+    const onDeletedProjectPersist = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ projectId?: string }>).detail;
+      if (detail?.projectId) {
+        showPilotToast('이 프로젝트는 삭제되었어. 작성한 내용은 저장되지 않아요.');
+      }
+    };
+    window.addEventListener('plannode-deleted-project-persist-attempt', onDeletedProjectPersist);
 
     let sawHiddenSinceMount = false;
     let sawWindowBlurSinceMount = false;
@@ -1801,8 +1908,11 @@
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
       window.removeEventListener('plannode-modal-project-list-sync', onModalListSync);
       window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
+      window.removeEventListener('plannode-presence-channel-error', onPresenceChannelError);
       window.removeEventListener('plannode-node-select', onNodeSelectPresence);
       window.removeEventListener('plannode-pilot-toast', onPilotToast);
+      window.removeEventListener('plannode-deleted-project-persist-attempt', onDeletedProjectPersist);
+      if (presenceResubscribeCooldownTimer) clearTimeout(presenceResubscribeCooldownTimer);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('blur', onWinBlur);
       window.removeEventListener('focus', onWinFocus);
@@ -1816,6 +1926,7 @@
   onDestroy(() => {
     disposePrdDraftTimers();
     unsubscribeProjectPresence();
+    if (unsubAclChanges) unsubAclChanges();
   });
 
   $: if (pilotReady) pilotSetActiveView($activeView);
@@ -1904,10 +2015,16 @@
                 type="button"
                 id="PNT"
                 class="pntag"
-                class:pntag--share-entry={cloudSyncAvailable && !!$currentProject && toolbarCompact}
+                class:pntag--share-entry={cloudSyncAvailable &&
+                  !!$currentProject &&
+                  toolbarCompact &&
+                  canOpenProjectShareSettingsUi($currentProject)}
                 disabled={!$currentProject}
                 tabindex={cloudSyncAvailable && $currentProject && !toolbarCompact ? -1 : undefined}
-                title={cloudSyncAvailable && $currentProject && toolbarCompact
+                title={cloudSyncAvailable &&
+                $currentProject &&
+                toolbarCompact &&
+                canOpenProjectShareSettingsUi($currentProject)
                   ? '프로젝트 공유 · 접근 허용 이메일 관리'
                   : '길게 누르면 이름 수정'}
                 on:click={onProjectNameToolbarClickGuarded}
@@ -1916,7 +2033,7 @@
               </button>
             {/if}
           </div>
-          {#if $currentProject && cloudSyncAvailable}
+          {#if $currentProject && cloudSyncAvailable && canOpenProjectShareSettingsUi($currentProject)}
             <button type="button" id="BAC" title="프로젝트 공유 · 접근 허용 이메일 관리" on:click={openAclForCurrentProject}>
               공유
             </button>
@@ -2619,6 +2736,33 @@
       </div>
     {/if}
 
+    {#if showDeletedProjectWarning}
+      <div class="mbg" role="presentation" on:click|self={() => (showDeletedProjectWarning = false)}>
+        <div class="mo" role="dialog" aria-modal="true" aria-labelledby="del-warn-title">
+          <div class="pm-proj-head">
+            <h3 id="del-warn-title" style="margin:0">프로젝트 삭제됨</h3>
+            <button type="button" class="mcl" on:click={() => (showDeletedProjectWarning = false)}>✕</button>
+          </div>
+          <div class="modal-body" style="padding: 1.5rem;">
+            <p style="margin: 0 0 1rem 0; line-height: 1.5;">
+              이 프로젝트는 소유자에 의해 삭제되었어요. 더 이상 이 프로젝트에 접근할 수 없습니다.
+            </p>
+            <button
+              type="button"
+              class="bcr"
+              on:click={() => {
+                showDeletedProjectWarning = false;
+                // 프로젝트 목록 모달 열기
+                showProjectModal.set(true);
+              }}
+            >
+              프로젝트 목록 보기
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if $showProjectModal}
       <div class="mbg" role="presentation" on:click|self={closeModal}>
         <div class="mo mo-wide pm-scroll pm-proj-shell">
@@ -2853,7 +2997,7 @@
                         <span class="ct">현재</span>
                       {/if}
                     </div>
-                    {#if cloudSyncAvailable}
+                    {#if cloudSyncAvailable && canOpenProjectShareSettingsUi(proj)}
                       <button
                         type="button"
                         class="pacl"

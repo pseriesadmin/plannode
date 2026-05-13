@@ -1,5 +1,5 @@
 -- M1-1: ai_generations — L5 전체 트리 IA( node_id NULL, pipeline 1-stage ) + 노드 단위 생성 결과
--- 선행: PLANNODE_INTEGRATED_GUIDE.md §4.1 — plan_projects, plan_nodes, RLS 배포됨
+-- 선행: .cursor/plans/PLANNODE_INTEGRATED_GUIDE.md §4.1 — plan_projects, plan_nodes, RLS 배포됨
 -- PRD: M3 F3-2, §11 | v4: align-db-l5
 -- 적용: Supabase SQL Editor에서 한 번 실행(이미 테이블 있으면 오류 방지용 IF NOT EXISTS 사용)
 -- 삭제/ALTER는 기존 파일 수정 대신 신규 마이그레이션으로만.

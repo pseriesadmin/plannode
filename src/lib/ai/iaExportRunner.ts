@@ -26,7 +26,7 @@ export type IAExportResult =
 export async function runPlannodeIAExport(options: {
   nodes: Node[];
   activeProject: { name: string; description?: string } | null;
-  /** 있으면 AI 성공 시 `ai_generations` 1-stage upsert( node_id NULL ) */
+  /** 있으면 AI 성공 시 `ai_generations` 1-stage insert (`node_id` NULL, `plan_projects.id` UUID) */
   planProjectId?: string | null;
   /** 스냅샷에 넣는 로컬 프로젝트 id(앱) */
   plannodeProjectId?: string | null;
