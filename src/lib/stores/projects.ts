@@ -270,6 +270,106 @@ export function getPendingWorkspaceDeletionIds(): Set<string> {
 }
 
 /**
+ * 서버 `projects_json`에 고스트로 남은 id가 pending 제거·캐시 일부 삭제 후 `mergeWorkspaceBundleFromCloudRemote`로
+ * 되살아오는 것을 막음. pending과 별도 TTL(전체 사이트 데이터 삭제 시 키도 사라짐 — 서버 정본 반영이 최종 해결).
+ * NOW-DEL-WS-02: `pruneDeletedProjectTombstonesAgainstCloudProjectIds`로 정본에 없으면 항목 제거.
+ */
+const WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY = 'plannode_workspace_deleted_project_tombstones_v1';
+const TOMBSTONE_MAP_MAX_IDS = 240;
+const TOMBSTONE_ENTRY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+function readDeletedProjectTombstoneMap(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const s = localStorage.getItem(WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY);
+    const o = s ? JSON.parse(s) : {};
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDeletedProjectTombstoneMap(m: Record<string, number>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY, JSON.stringify(m));
+  } catch {
+    /* ignore */
+  }
+}
+
+function pruneExpiredDeletedProjectTombstones(map: Record<string, number>, now: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [id, t] of Object.entries(map)) {
+    if (typeof id === 'string' && id && typeof t === 'number' && now - t <= TOMBSTONE_ENTRY_TTL_MS) {
+      out[id] = t;
+    }
+  }
+  let entries = Object.entries(out).sort((a, b) => a[1] - b[1]);
+  while (entries.length > TOMBSTONE_MAP_MAX_IDS) {
+    entries = entries.slice(1);
+  }
+  return Object.fromEntries(entries);
+}
+
+/** 서버 정본 `projects_json` id 집합에 없으면 톰브스톤 제거(업로드 반영·고스트 소거 후). */
+export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudProjectIds: Set<string>): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  let map = pruneExpiredDeletedProjectTombstones(readDeletedProjectTombstoneMap(), now);
+  let changed = false;
+  for (const id of Object.keys(map)) {
+    if (!cloudProjectIds.has(id)) {
+      delete map[id];
+      changed = true;
+    }
+  }
+  map = pruneExpiredDeletedProjectTombstones(map, now);
+  if (changed) {
+    writeDeletedProjectTombstoneMap(map);
+    return;
+  }
+  const raw = readDeletedProjectTombstoneMap();
+  const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
+  if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+}
+
+/** 모달 보조 필터·테스트: 삭제 톰브스톤 id 집합 */
+export function getDeletedProjectTombstoneIds(): Set<string> {
+  return readDeletedProjectTombstoneIdSet();
+}
+
+function readDeletedProjectTombstoneIdSet(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  const now = Date.now();
+  const raw = readDeletedProjectTombstoneMap();
+  const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
+  if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+  return new Set(Object.keys(pruned));
+}
+
+function registerDeletedProjectTombstone(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  const now = Date.now();
+  let map = pruneExpiredDeletedProjectTombstones(readDeletedProjectTombstoneMap(), now);
+  map[projectId] = now;
+  let entries = Object.entries(map).sort((a, b) => a[1] - b[1]);
+  while (entries.length > TOMBSTONE_MAP_MAX_IDS) {
+    entries = entries.slice(1);
+  }
+  map = Object.fromEntries(entries);
+  writeDeletedProjectTombstoneMap(map);
+}
+
+function clearDeletedProjectTombstoneForReimport(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  const map = { ...readDeletedProjectTombstoneMap() };
+  if (!map[projectId]) return;
+  delete map[projectId];
+  writeDeletedProjectTombstoneMap(map);
+}
+
+/**
  * 업로드 성공 후 `clearPendingWorkspaceDeletions` 되면 원격 projects_json 고스트 한동안 남아
  * 소유자 조기 허용(`canAccessProject`)으로 모달에 다시 뜸. 서버 목록에서 id가 빠질 때까지 숨김(계정별).
  */
@@ -829,6 +929,7 @@ export function deleteProject(projectId: string) {
       console.error('Failed to clear current project:', e);
     }
   }
+  registerDeletedProjectTombstone(projectId);
   markCloudWorkspaceDirty();
 }
 
@@ -987,6 +1088,7 @@ const parseTs = (iso: string | undefined): number => {
  *
  * P2: pending 삭제 id 필터링 — 소유자가 삭제 중인 프로젝트는 모달에 나타나지 않도록.
  * P3: `viewerUid` + 고스트-hide — pending 제거 뒤에도 원격 `projects_json`에 잠깐 남은 id 모달 노출 차단.
+ * P4: 삭제 톰브스톤 — pending 비움·캐시 일부 삭제 후에도 원격 고스트 id 모달·병합에서 제외(NOW-DEL-WS-02).
  */
 export function mergeModalListCloudCanon(
   cloudRows: Project[],
@@ -995,12 +1097,14 @@ export function mergeModalListCloudCanon(
 ): Project[] {
   const pendingDelete = getPendingWorkspaceDeletionIds();
   const ghostHide = getOwnedProjectGhostHideIdsForModal(viewerUid);
+  const tombstoned = readDeletedProjectTombstoneIdSet();
   const cloudIds = new Set(cloudRows.map((p) => p.id));
   const out: Project[] = [];
   for (const cp of cloudRows) {
     // P2: 정책 7 pending 삭제 id는 모달 목록에서 제외
     if (pendingDelete.has(cp.id)) continue;
     if (ghostHide.has(cp.id)) continue;
+    if (tombstoned.has(cp.id)) continue;
 
     const loc = localPlist.find((p) => p.id === cp.id);
     if (!loc) {
@@ -1013,7 +1117,8 @@ export function mergeModalListCloudCanon(
   }
   for (const lp of localPlist) {
     // P2: pending 삭제 id는 로컬 전용 목록에서도 제외
-    if (!cloudIds.has(lp.id) && !pendingDelete.has(lp.id) && !ghostHide.has(lp.id)) out.push(lp);
+    if (!cloudIds.has(lp.id) && !pendingDelete.has(lp.id) && !ghostHide.has(lp.id) && !tombstoned.has(lp.id))
+      out.push(lp);
   }
   return out;
 }
@@ -1265,6 +1370,7 @@ export function upsertImportedPlannodeTreeV1(
   if (opts?.markDirty !== false) {
     markCloudWorkspaceDirty();
   }
+  clearDeletedProjectTombstoneForReimport(merged.id);
   return selected;
 }
 
@@ -1388,7 +1494,10 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   if (typeof window === 'undefined') return 0;
   let n = 0;
   const rp = Array.isArray(remote.projects) ? remote.projects : [];
-  const skipIds = readPendingWorkspaceDeletionSet();
+  const skipIds = new Set<string>([
+    ...readPendingWorkspaceDeletionSet(),
+    ...readDeletedProjectTombstoneIdSet()
+  ]);
   const map =
     remote.nodesByProject && typeof remote.nodesByProject === 'object' ? remote.nodesByProject : {};
 

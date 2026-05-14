@@ -16,6 +16,8 @@
     registerPendingWorkspaceDeletion,
     getPendingWorkspaceDeletionIds,
     pruneOwnedProjectGhostHideAgainstCloudCanon,
+    pruneDeletedProjectTombstonesAgainstCloudProjectIds,
+    getDeletedProjectTombstoneIds,
     registerOwnedProjectGhostHideForModal,
     getOwnedProjectGhostHideIdsForModal,
     removeDeletedProjectsFromLocalCache,
@@ -569,6 +571,8 @@
 
   /** ACL 모드에서 `syncProjectsForModalList` 비동기 구간(첫 페인트·새로고침 직후 등) 목록 위 로딩 표시 */
   let projectModalListSyncing = false;
+  /** 최소 1회 `projectsForModal`을 채운 뒤에는 재동기 시 전체 목록 로딩 오버레이 생략(삭제 직후 목록이 가려지지 않게) */
+  let modalProjectListInitialHydrated = false;
 
   /** 삭제 직후 서버 projects_json·머지 지연 동안 모달에서만 숨김(메모리). 서버 정본에서 id가 빠지면 prune. */
   let modalInstantHideEpoch = 0;
@@ -598,6 +602,7 @@
       projectsForModal = null;
       projectsForModalAuthUid = null;
       projectModalListSyncing = false;
+      modalProjectListInitialHydrated = false;
       modalInstantHideDeletedIds.clear();
       modalInstantHideEpoch++;
       return;
@@ -609,6 +614,7 @@
       projectsForModal = [];
       projectsForModalAuthUid = null;
       projectModalListSyncing = false;
+      modalProjectListInitialHydrated = false;
       modalInstantHideDeletedIds.clear();
       modalInstantHideEpoch++;
       return;
@@ -618,6 +624,7 @@
     if (projectsForModalAuthUid !== uid) {
       projectsForModal = [];
       projectsForModalAuthUid = uid;
+      modalProjectListInitialHydrated = false;
       modalInstantHideDeletedIds.clear();
       modalInstantHideEpoch++;
     }
@@ -633,6 +640,7 @@
         if (cloudRes.ok) {
           const cloudCanonIds = new Set(cloudRes.projects.map((p) => p.id));
           pruneOwnedProjectGhostHideAgainstCloudCanon(uid, cloudCanonIds);
+          pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudCanonIds);
           pruneModalInstantHideAgainstCloudCanon(cloudCanonIds);
         }
         // 주의: mergeModalListCloudCanon 이후 스토어가 변경될 수 있으므로, 결과는 고정 스냅샷으로 취급
@@ -684,6 +692,7 @@
       }
       if (token !== modalProjectListToken) return;
       projectsForModal = next;
+      modalProjectListInitialHydrated = true;
     } finally {
       if (token === modalProjectListToken) projectModalListSyncing = false;
     }
@@ -696,14 +705,19 @@
     void invitePanelEpoch;
     void $cloudSyncBadge;
     void modalInstantHideEpoch;
+    const tomb = getDeletedProjectTombstoneIds();
     const stripInstantHide = (arr: Project[]) =>
-      arr.filter((p) => !modalInstantHideDeletedIds.has(p.id));
+      arr.filter((p) => !modalInstantHideDeletedIds.has(p.id) && !tomb.has(p.id));
     if (projectsForModal !== null) return stripInstantHide(projectsForModal);
     if (!isAclEnforced()) return stripInstantHide($projects);
     const pend = getPendingWorkspaceDeletionIds();
     const ghostHide = getOwnedProjectGhostHideIdsForModal($authUser?.id ?? '');
     return $projects.filter(
-      (p) => !pend.has(p.id) && !ghostHide.has(p.id) && !modalInstantHideDeletedIds.has(p.id)
+      (p) =>
+        !pend.has(p.id) &&
+        !ghostHide.has(p.id) &&
+        !modalInstantHideDeletedIds.has(p.id) &&
+        !tomb.has(p.id)
     );
   })();
 
@@ -1525,7 +1539,6 @@
    */
   let projectDeletableById: Record<string, boolean> = {}; // 미사용 (호환성 유지)
   let deleteFlagsLoadGen = 0; // 미사용
-  let deletingProjectId = '';
 
   /* 미사용 함수 (정책 7·8: owner_user_id만 체크로 변경)
   async function loadProjectDeleteFlags() {
@@ -1558,6 +1571,7 @@
     showModelApiModal = false;
     modelApiKeyDraft = '';
     projectModalListSyncing = false;
+    modalProjectListInitialHydrated = false;
   }
 
   function canShowProjectDelete(proj: Project): boolean {
@@ -1578,32 +1592,44 @@
     ) {
       return;
     }
-    deletingProjectId = proj.id;
-    try {
-      const aclR = await deleteAllAclRowsForProjectIfOwner(proj);
-      if (!aclR.ok) {
-        alert(aclR.message ?? '접근 정보를 지우지 못했어. 잠시 후 다시 시도해줘.');
-        return;
-      }
-      if (get(aclModalProject)?.id === proj.id) {
-        closeAclModal();
-      }
-      if (cloudSyncAvailable) {
-        registerPendingWorkspaceDeletion(proj.id);
-        const uid = getAuthUserId();
-        if (uid) registerOwnedProjectGhostHideForModal(uid, proj.id);
-      }
-      deleteProject(proj.id);
-      markModalInstantHideDeletedProject(proj.id);
-      if (cloudSyncAvailable) {
-        scheduleCloudFlush('delete-project', 100);
-      }
-      showPilotToast('프로젝트를 삭제했어.');
-      invitePanelEpoch++;
-      void loadAclInvitesForModal();
-    } finally {
-      deletingProjectId = '';
+    if (get(aclModalProject)?.id === proj.id) {
+      closeAclModal();
     }
+    if (cloudSyncAvailable) {
+      registerPendingWorkspaceDeletion(proj.id);
+      const uid = getAuthUserId();
+      if (uid) registerOwnedProjectGhostHideForModal(uid, proj.id);
+    }
+    deleteProject(proj.id);
+    markModalInstantHideDeletedProject(proj.id);
+    if (cloudSyncAvailable) {
+      scheduleCloudFlush('delete-project', 100);
+    }
+    showPilotToast('프로젝트를 삭제했어.');
+    invitePanelEpoch++;
+    void loadAclInvitesForModal();
+
+    void (async () => {
+      const purge = () => deleteAllAclRowsForProjectIfOwner(proj);
+      let aclR = await purge();
+      if (!aclR.ok) {
+        showPilotToast(
+          aclR.message ?? '접근 정보를 지우지 못했어. 잠시 후 자동으로 한 번 더 시도해.'
+        );
+        if (import.meta.env.DEV) {
+          console.debug('[handleDeleteProjectCard] ACL purge failed, retry in 2.5s', proj.id, aclR.message);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 2500));
+        aclR = await purge();
+        if (!aclR.ok) {
+          showPilotToast(
+            aclR.message ?? '접근 정리 재시도도 실패했어. 네트워크를 확인하거나 잠시 후 프로젝트 목록을 다시 열어봐줘.'
+          );
+          return;
+        }
+      }
+      void loadAclInvitesForModal();
+    })();
   }
 
   async function handleImportInvited(inv: AclInviteSummary) {
@@ -3171,7 +3197,7 @@
             </div>
           </div>
           <div class="pl pm-proj-list-col">
-            {#if isAclEnforced() && projectModalListSyncing}
+            {#if isAclEnforced() && projectModalListSyncing && !modalProjectListInitialHydrated}
               <div
                 class="pm-proj-list-loading"
                 role="status"
@@ -3218,7 +3244,6 @@
                         class="pdl"
                         title={`「${proj.name}」 삭제`}
                         aria-label={`「${proj.name}」 삭제`}
-                        disabled={deletingProjectId === proj.id}
                         on:click|stopPropagation={() => void handleDeleteProjectCard(proj)}
                       >
                         <svg

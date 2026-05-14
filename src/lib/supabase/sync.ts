@@ -12,6 +12,7 @@ import {
   selectProject,
   projectWorkspaceNodesJsonSnapshot,
   clearPendingWorkspaceDeletions,
+  pruneDeletedProjectTombstonesAgainstCloudProjectIds,
   type WorkspaceBundle
 } from '$lib/stores/projects';
 import {
@@ -91,6 +92,7 @@ async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
   if (remoteTs === prev) return;
 
   mergeWorkspaceBundleFromCloudRemote(bundle);
+  pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set(bundle.projects.map((p) => p.id)));
   /** 캐시 갱신 — 업로드 루프가 동일 원격 번들을 중복 병합하지 않도록 */
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
@@ -626,6 +628,7 @@ export async function pullOwnWorkspaceIfChanged(): Promise<number> {
   if (!bundle) return 0;
 
   const n = mergeWorkspaceBundleFromCloudRemote(bundle);
+  pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set(bundle.projects.map((p) => p.id)));
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
   } catch {

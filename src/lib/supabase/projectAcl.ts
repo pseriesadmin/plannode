@@ -3,7 +3,13 @@ import type { Project, Node } from '$lib/supabase/client';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { getAuthEmail, getAuthEmailResolved, getAuthUserId } from '$lib/stores/authSession';
 import { writable } from 'svelte/store';
-import { selectProject, updateProjectMeta, upsertImportedPlannodeTreeV1, deleteProject } from '$lib/stores/projects';
+import {
+  selectProject,
+  updateProjectMeta,
+  upsertImportedPlannodeTreeV1,
+  deleteProject,
+  getPendingWorkspaceDeletionIds
+} from '$lib/stores/projects';
 import { isMissingRelationError, userFacingAclErrorFromSupabase } from '$lib/supabase/aclErrors';
 import { isPlatformMaster } from '$lib/supabase/platformMaster';
 import { MAX_SHARED_COLLABORATORS } from '$lib/plannodeCollabLimits';
@@ -130,6 +136,9 @@ export async function canAccessProject(project: Project): Promise<boolean> {
   const email = getAuthEmail();
   if (!uid || !email) return false;
   if (await isPlatformMaster()) return true;
+
+  // 삭제 직후~클라우드 정본 반영 전: 옛 projects_json 스냅샷이 모달에 남지 않도록(소유자 조기 허용보다 우선)
+  if (getPendingWorkspaceDeletionIds().has(project.id)) return false;
 
   // 내 소유 프로젝트: uid 일치 시 바로 허용
   if (project.owner_user_id && project.owner_user_id === uid) return true;
