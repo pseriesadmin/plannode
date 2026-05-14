@@ -1,10 +1,19 @@
 import { writable, get } from 'svelte/store';
-import type { Project, Node } from '$lib/supabase/client';
+import type { Project, Node, HistoryEntry } from '$lib/supabase/client';
+import { getAuthEmail } from '$lib/stores/authSession';
 import { applySanitizeImportedPlannodeNodeV1 } from '$lib/ai/badgePromptInjector';
 import { mergeLearnedBadgeRulesFromImportedNodes } from '$lib/ai/badgeMetadataInference';
 import type { PrdSectionKey } from '$lib/prdStandardV20';
 import { markCloudWorkspaceDirty, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
-import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
+import {
+  captureNodeSnapshot,
+  listNodeSnapshots,
+  nodeSnapshotCatalogRevision,
+  coerceStringToNodeSnapshotReason,
+  type StoredNodeSnapshot,
+  type NodeSnapshotCaptureMeta,
+  type NodeSnapshotReason
+} from '$lib/stores/nodeSnapshotHistory';
 
 // 프로젝트 상태
 export const projects = writable<Project[]>([]);
@@ -27,6 +36,7 @@ export const showProjectModal = writable(false);
 const PROJECTS_KEY = 'plannode_projects_v3';
 const NODES_KEY_PREFIX = 'plannode_nodes_v3_';
 const CURRENT_PROJECT_KEY = 'plannode_current_project_v3';
+const MERGED_HISTORY_ENTRIES_LS_KEY = 'plannode_merged_history_entries_v1';
 
 /** localStorage에 프로젝트 목록 강제 동기화 */
 export function persistProjectsToLocalStorage(): void {
@@ -122,6 +132,77 @@ function pruneExpiredRecentDeletesForMerge(now: number): void {
   }
 }
 
+/** GATE A: 캔버스 저장 시 히스토리 최신 행·하단 `update` 라벨 단일 소스 — 연속 저장은 디바운스해 링 버퍼 폭주 완화 */
+const persistSnapshotDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const PERSIST_SNAPSHOT_DEBOUNCE_MS = 900;
+
+function pipelineLabelForNodeSnapshotReason(reason: NodeSnapshotReason): string {
+  switch (reason) {
+    case 'persist':
+      return '로컬 캔버스 저장';
+    case 'manual':
+      return '수동 스냅샷';
+    case 'import':
+      return '가져오기·덮어쓰기';
+    case 'pre_pull':
+      return '클라우드 반영 직전';
+    case 'presence_peer':
+      return '동시 접속 반영';
+    case 'project_close':
+      return '프로젝트 전환 직전';
+    case 'idle_10min':
+      return '10분 무편집';
+    case 'cloud_history':
+      return '클라우드(병합 기록)';
+    default:
+      return '히스토리';
+  }
+}
+
+/** 히스토리 모달 메타 — PRD LLM 파이프라인과 무관한 저장·동기 단계 라벨만 사용(plan-output P-4.5). */
+export function buildNodeSnapshotCaptureMeta(
+  reason: NodeSnapshotReason,
+  project: Project | null | undefined,
+  nodeList: Node[]
+): NodeSnapshotCaptureMeta {
+  const v = project?.updated_at != null ? String(project.updated_at).trim() : '';
+  return {
+    author: getAuthEmail() ?? undefined,
+    nodeCount: nodeList.length,
+    ...(v ? { version: v } : {}),
+    pipelineLabel: pipelineLabelForNodeSnapshotReason(reason)
+  };
+}
+
+/** 페이지 이탈 등에서 persist 스냅 디바운스 타이머 정리(히스토리 플랜 보완 Phase D). */
+export function clearPersistSnapshotDebounceTimers(): void {
+  if (typeof window === 'undefined') return;
+  for (const [, t] of persistSnapshotDebounceTimers) {
+    window.clearTimeout(t);
+  }
+  persistSnapshotDebounceTimers.clear();
+}
+
+function schedulePersistNodeSnapshotAfterPilot(projectId: string): void {
+  if (typeof window === 'undefined') return;
+  const prev = persistSnapshotDebounceTimers.get(projectId);
+  if (prev !== undefined) window.clearTimeout(prev);
+  persistSnapshotDebounceTimers.set(
+    projectId,
+    window.setTimeout(() => {
+      persistSnapshotDebounceTimers.delete(projectId);
+      const cur = get(currentProject);
+      if (!cur || cur.id !== projectId) return;
+      captureNodeSnapshot(
+        projectId,
+        get(nodes),
+        'persist',
+        buildNodeSnapshotCaptureMeta('persist', cur, get(nodes))
+      );
+    }, PERSIST_SNAPSHOT_DEBOUNCE_MS)
+  );
+}
+
 /** 파일럿 삭제·`persistNodesFromPilot` 등에서 호출 — 병합 시 해당 id를 잠시 원격에서 되살리지 않음(메모리 + localStorage) */
 export function registerRecentlyDeletedNodeIdsForCloudMerge(projectId: string, nodeIds: string[]): void {
   if (typeof window === 'undefined' || !projectId || !nodeIds.length) return;
@@ -186,6 +267,181 @@ function readPendingWorkspaceDeletionSet(): Set<string> {
 /** 삭제 직후~클라우드 반영 전까지 보류된 project_id(초대 패널·병합 스킵과 동일 소스) */
 export function getPendingWorkspaceDeletionIds(): Set<string> {
   return readPendingWorkspaceDeletionSet();
+}
+
+/**
+ * 서버 `projects_json`에 고스트로 남은 id가 pending 제거·캐시 일부 삭제 후 `mergeWorkspaceBundleFromCloudRemote`로
+ * 되살아오는 것을 막음. pending과 별도 TTL(전체 사이트 데이터 삭제 시 키도 사라짐 — 서버 정본 반영이 최종 해결).
+ * NOW-DEL-WS-02: `pruneDeletedProjectTombstonesAgainstCloudProjectIds`로 정본에 없으면 항목 제거.
+ */
+const WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY = 'plannode_workspace_deleted_project_tombstones_v1';
+const TOMBSTONE_MAP_MAX_IDS = 240;
+const TOMBSTONE_ENTRY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+function readDeletedProjectTombstoneMap(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const s = localStorage.getItem(WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY);
+    const o = s ? JSON.parse(s) : {};
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDeletedProjectTombstoneMap(m: Record<string, number>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY, JSON.stringify(m));
+  } catch {
+    /* ignore */
+  }
+}
+
+function pruneExpiredDeletedProjectTombstones(map: Record<string, number>, now: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [id, t] of Object.entries(map)) {
+    if (typeof id === 'string' && id && typeof t === 'number' && now - t <= TOMBSTONE_ENTRY_TTL_MS) {
+      out[id] = t;
+    }
+  }
+  let entries = Object.entries(out).sort((a, b) => a[1] - b[1]);
+  while (entries.length > TOMBSTONE_MAP_MAX_IDS) {
+    entries = entries.slice(1);
+  }
+  return Object.fromEntries(entries);
+}
+
+/** 서버 정본 `projects_json` id 집합에 없으면 톰브스톤 제거(업로드 반영·고스트 소거 후). */
+export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudProjectIds: Set<string>): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  let map = pruneExpiredDeletedProjectTombstones(readDeletedProjectTombstoneMap(), now);
+  let changed = false;
+  for (const id of Object.keys(map)) {
+    if (!cloudProjectIds.has(id)) {
+      delete map[id];
+      changed = true;
+    }
+  }
+  map = pruneExpiredDeletedProjectTombstones(map, now);
+  if (changed) {
+    writeDeletedProjectTombstoneMap(map);
+    return;
+  }
+  const raw = readDeletedProjectTombstoneMap();
+  const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
+  if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+}
+
+/** 모달 보조 필터·테스트: 삭제 톰브스톤 id 집합 */
+export function getDeletedProjectTombstoneIds(): Set<string> {
+  return readDeletedProjectTombstoneIdSet();
+}
+
+function readDeletedProjectTombstoneIdSet(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  const now = Date.now();
+  const raw = readDeletedProjectTombstoneMap();
+  const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
+  if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+  return new Set(Object.keys(pruned));
+}
+
+function registerDeletedProjectTombstone(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  const now = Date.now();
+  let map = pruneExpiredDeletedProjectTombstones(readDeletedProjectTombstoneMap(), now);
+  map[projectId] = now;
+  let entries = Object.entries(map).sort((a, b) => a[1] - b[1]);
+  while (entries.length > TOMBSTONE_MAP_MAX_IDS) {
+    entries = entries.slice(1);
+  }
+  map = Object.fromEntries(entries);
+  writeDeletedProjectTombstoneMap(map);
+}
+
+function clearDeletedProjectTombstoneForReimport(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  const map = { ...readDeletedProjectTombstoneMap() };
+  if (!map[projectId]) return;
+  delete map[projectId];
+  writeDeletedProjectTombstoneMap(map);
+}
+
+/**
+ * 업로드 성공 후 `clearPendingWorkspaceDeletions` 되면 원격 projects_json 고스트 한동안 남아
+ * 소유자 조기 허용(`canAccessProject`)으로 모달에 다시 뜸. 서버 목록에서 id가 빠질 때까지 숨김(계정별).
+ */
+const WORKSPACE_MODAL_OWNED_GHOST_HIDE_BUCKET_KEY = 'plannode_workspace_modal_owned_ghost_hide_v1';
+const MODAL_OWNED_GHOST_HIDE_MAX_IDS = 160;
+
+type ModalOwnedGhostHideBucket = Record<string, string[]>;
+
+function readModalOwnedGhostHideBucket(): ModalOwnedGhostHideBucket {
+  if (typeof window === 'undefined') return {};
+  try {
+    const s = localStorage.getItem(WORKSPACE_MODAL_OWNED_GHOST_HIDE_BUCKET_KEY);
+    const o = s ? JSON.parse(s) : {};
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as ModalOwnedGhostHideBucket) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeModalOwnedGhostHideBucket(b: ModalOwnedGhostHideBucket): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(WORKSPACE_MODAL_OWNED_GHOST_HIDE_BUCKET_KEY, JSON.stringify(b));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 소유자가 클라우드 연동 상태에서 삭제한 프로젝트 — 원격 목록 고스트 소거 전까지 모달에서 제외 */
+export function registerOwnedProjectGhostHideForModal(uid: string, projectId: string): void {
+  if (typeof window === 'undefined' || !uid || !projectId) return;
+  try {
+    const b = readModalOwnedGhostHideBucket();
+    let arr = [...(b[uid] ?? [])];
+    if (!arr.includes(projectId)) arr.push(projectId);
+    if (arr.length > MODAL_OWNED_GHOST_HIDE_MAX_IDS) arr = arr.slice(-MODAL_OWNED_GHOST_HIDE_MAX_IDS);
+    b[uid] = arr;
+    writeModalOwnedGhostHideBucket(b);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getOwnedProjectGhostHideIdsForModal(uid: string | null | undefined): Set<string> {
+  if (!uid || typeof window === 'undefined') return new Set();
+  try {
+    const b = readModalOwnedGhostHideBucket();
+    const arr = b[uid];
+    return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string' && x.length > 0) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** `fetchOwnWorkspaceProjectMetasForModal` 성공 시: 서버에 더 없는 id는 숨김 마커 정리 */
+export function pruneOwnedProjectGhostHideAgainstCloudCanon(uid: string, canonicalCloudProjectIds: Set<string>): void {
+  if (typeof window === 'undefined' || !uid) return;
+  try {
+    const b = readModalOwnedGhostHideBucket();
+    const arr = b[uid];
+    if (!Array.isArray(arr) || arr.length === 0) return;
+    const next = arr.filter((id) => canonicalCloudProjectIds.has(id));
+    if (next.length === arr.length) return;
+    if (next.length === 0) {
+      delete b[uid];
+    } else {
+      b[uid] = next;
+    }
+    writeModalOwnedGhostHideBucket(b);
+  } catch {
+    /* ignore */
+  }
 }
 
 function makeRootNode(project: Project): Node {
@@ -546,6 +802,7 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
     nodesSetFromPilotPersist = false;
   }
   touchProjectUpdatedAt(projectId);
+  schedulePersistNodeSnapshotAfterPilot(projectId);
 }
 
 /**
@@ -574,6 +831,7 @@ export function replaceProjectNodesFromHistory(projectId: string, list: Node[]):
   }
   nodes.set(list);
   touchProjectUpdatedAt(projectId);
+  schedulePersistNodeSnapshotAfterPilot(projectId);
   return true;
 }
 
@@ -671,13 +929,151 @@ export function deleteProject(projectId: string) {
       console.error('Failed to clear current project:', e);
     }
   }
+  registerDeletedProjectTombstone(projectId);
   markCloudWorkspaceDirty();
 }
 
-/** 클라우드 동기용: 현재 스토어 + localStorage 노드 묶음 */
+/** 모달 동기화 등: `canAccessProject` 거부 시 로컬 스토어·스토리지에서 일괄 제거 (deleteProject 경로 재사용) */
+export function removeDeletedProjectsFromLocalCache(deletedIds: string[]): void {
+  if (typeof window === 'undefined' || !Array.isArray(deletedIds) || deletedIds.length === 0) return;
+  const seen = new Set<string>();
+  for (const projectId of deletedIds) {
+    if (!projectId || seen.has(projectId)) continue;
+    seen.add(projectId);
+    if (!get(projects).some((p) => p.id === projectId)) continue;
+    deleteProject(projectId);
+  }
+}
+
+/**
+ * 클라우드 원격 히스토리 병합 (append-only, LWW)
+ * - 로컬 + 원격 스냅샷 결합
+ * - 버전 LWW: 같은 버전이면 최신 `at` 우선
+ * - 중복 제거: 동일 (projectId, reason, at, version) 조합은 1번만
+ * - 최신순 정렬 후 저장
+ */
+function mergeHistoryEntriesFromCloudRemote(remoteEntries: HistoryEntry[]): void {
+  if (typeof window === 'undefined' || !Array.isArray(remoteEntries)) return;
+
+  try {
+    const MAX_MERGED_ENTRIES = 100; // 로컬 + 원격 합치면 최대 100개
+
+    // 기존 로컬 병합 히스토리 로드
+    let localMerged: HistoryEntry[] = [];
+    try {
+      const raw = localStorage.getItem(MERGED_HISTORY_ENTRIES_LS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          localMerged = parsed.filter(
+            (x): x is HistoryEntry =>
+              x &&
+              typeof x === 'object' &&
+              typeof (x as any).id === 'string' &&
+              typeof (x as any).at === 'string'
+          );
+        }
+      }
+    } catch {
+      localMerged = [];
+    }
+
+    // 로컬 + 원격 결합 (맵으로 중복 제거)
+    const mergedMap = new Map<string, HistoryEntry>();
+
+    // 기존 로컬 항목 추가 (충돌 시 로컬 우선)
+    for (const entry of localMerged) {
+      const key = `${entry.project_id}|${entry.reason}|${entry.at}|${entry.version ?? ''}`;
+      if (!mergedMap.has(key)) {
+        mergedMap.set(key, entry);
+      }
+    }
+
+    // 원격 항목 병합 (LWW)
+    for (const entry of remoteEntries) {
+      const key = `${entry.project_id}|${entry.reason}|${entry.at}|${entry.version ?? ''}`;
+      const existing = mergedMap.get(key);
+
+      if (!existing) {
+        // 새로운 항목 추가
+        mergedMap.set(key, entry);
+      } else if (entry.version && existing.version) {
+        // 버전 비교 LWW: 같은 버전이면 최신 `at` 우선
+        if (entry.version === existing.version) {
+          const remoteTs = new Date(entry.at).getTime();
+          const localTs = new Date(existing.at).getTime();
+          if (remoteTs > localTs) {
+            mergedMap.set(key, entry);
+          }
+        }
+        // 버전이 다르면 로컬 유지 (로컬 우선)
+      }
+    }
+
+    // 최신순 정렬 (ISO 날짜 역순)
+    const merged = Array.from(mergedMap.values()).sort((a, b) => {
+      const aTime = new Date(a.at).getTime();
+      const bTime = new Date(b.at).getTime();
+      return bTime - aTime;
+    });
+
+    // 최대값까지만 유지
+    const trimmed = merged.slice(0, MAX_MERGED_ENTRIES);
+
+    // localStorage 저장
+    localStorage.setItem(MERGED_HISTORY_ENTRIES_LS_KEY, JSON.stringify(trimmed));
+    nodeSnapshotCatalogRevision.update((n) => n + 1);
+  } catch (e) {
+    if (import.meta.env.DEV) {
+      console.error('[mergeHistoryEntriesFromCloudRemote]', e);
+    }
+  }
+}
+
+/** `mergeHistoryEntriesFromCloudRemote`가 채운 병합 버퍼 → 모달용 `StoredNodeSnapshot` (C2). */
+export function listMergedHistorySnapshotsForProject(projectId: string): StoredNodeSnapshot[] {
+  if (typeof window === 'undefined' || !projectId) return [];
+  let merged: HistoryEntry[] = [];
+  try {
+    const raw = localStorage.getItem(MERGED_HISTORY_ENTRIES_LS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    merged = parsed.filter(
+      (x): x is HistoryEntry =>
+        x &&
+        typeof x === 'object' &&
+        typeof (x as HistoryEntry).id === 'string' &&
+        typeof (x as HistoryEntry).at === 'string' &&
+        typeof (x as HistoryEntry).project_id === 'string' &&
+        Array.isArray((x as HistoryEntry).nodes)
+    );
+  } catch {
+    return [];
+  }
+  const out: StoredNodeSnapshot[] = [];
+  for (const e of merged) {
+    if (e.project_id !== projectId) continue;
+    const reason = coerceStringToNodeSnapshotReason(String(e.reason));
+    const nodes = JSON.parse(JSON.stringify(e.nodes)) as Node[];
+    out.push({
+      id: e.id,
+      at: e.at,
+      reason,
+      nodes,
+      version: e.version,
+      nodeCount: nodes.length,
+      pipelineLabel: pipelineLabelForNodeSnapshotReason(reason)
+    });
+  }
+  return out;
+}
+
+/** 클라우드 동기용: 현재 스토어 + localStorage 노드 묶음 + 히스토리 */
 export type WorkspaceBundle = {
   projects: Project[];
   nodesByProject: Record<string, Node[]>;
+  historyEntries?: HistoryEntry[];
 };
 
 const parseTs = (iso: string | undefined): number => {
@@ -691,14 +1087,24 @@ const parseTs = (iso: string | undefined): number => {
  * 동일 id는 메타 **`updated_at`이 더 새쪽**을 카드에 표시(미플러시 로컬 편집분 우선).
  *
  * P2: pending 삭제 id 필터링 — 소유자가 삭제 중인 프로젝트는 모달에 나타나지 않도록.
+ * P3: `viewerUid` + 고스트-hide — pending 제거 뒤에도 원격 `projects_json`에 잠깐 남은 id 모달 노출 차단.
+ * P4: 삭제 톰브스톤 — pending 비움·캐시 일부 삭제 후에도 원격 고스트 id 모달·병합에서 제외(NOW-DEL-WS-02).
  */
-export function mergeModalListCloudCanon(cloudRows: Project[], localPlist: Project[]): Project[] {
+export function mergeModalListCloudCanon(
+  cloudRows: Project[],
+  localPlist: Project[],
+  viewerUid?: string | null
+): Project[] {
   const pendingDelete = getPendingWorkspaceDeletionIds();
+  const ghostHide = getOwnedProjectGhostHideIdsForModal(viewerUid);
+  const tombstoned = readDeletedProjectTombstoneIdSet();
   const cloudIds = new Set(cloudRows.map((p) => p.id));
   const out: Project[] = [];
   for (const cp of cloudRows) {
     // P2: 정책 7 pending 삭제 id는 모달 목록에서 제외
     if (pendingDelete.has(cp.id)) continue;
+    if (ghostHide.has(cp.id)) continue;
+    if (tombstoned.has(cp.id)) continue;
 
     const loc = localPlist.find((p) => p.id === cp.id);
     if (!loc) {
@@ -711,7 +1117,8 @@ export function mergeModalListCloudCanon(cloudRows: Project[], localPlist: Proje
   }
   for (const lp of localPlist) {
     // P2: pending 삭제 id는 로컬 전용 목록에서도 제외
-    if (!cloudIds.has(lp.id) && !pendingDelete.has(lp.id)) out.push(lp);
+    if (!cloudIds.has(lp.id) && !pendingDelete.has(lp.id) && !ghostHide.has(lp.id) && !tombstoned.has(lp.id))
+      out.push(lp);
   }
   return out;
 }
@@ -760,7 +1167,43 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
       nodesByProject[p.id] = [];
     }
   }
-  return { projects: [...plist], nodesByProject };
+
+  /** 최근 N개(50개) 스냅샷 수집 — 최신순 정렬 */
+  const historyEntries: HistoryEntry[] = [];
+  const MAX_HISTORY_ENTRIES = 50;
+  const allSnapshots: Array<{ projectId: string; snapshot: any }> = [];
+
+  for (const p of plist) {
+    const snaps = listNodeSnapshots(p.id);
+    for (const snap of snaps) {
+      allSnapshots.push({
+        projectId: p.id,
+        snapshot: snap
+      });
+    }
+  }
+
+  /** 최신순 정렬(ISO 날짜 역순) */
+  allSnapshots.sort((a, b) => {
+    const aTime = new Date(a.snapshot.at).getTime();
+    const bTime = new Date(b.snapshot.at).getTime();
+    return bTime - aTime;
+  });
+
+  /** 최대 50개까지 추가 */
+  for (let i = 0; i < Math.min(allSnapshots.length, MAX_HISTORY_ENTRIES); i++) {
+    const { projectId, snapshot } = allSnapshots[i];
+    historyEntries.push({
+      id: snapshot.id,
+      project_id: projectId,
+      at: snapshot.at,
+      reason: snapshot.reason,
+      version: snapshot.version,
+      nodes: snapshot.nodes
+    });
+  }
+
+  return { projects: [...plist], nodesByProject, historyEntries };
 }
 
 /** 로그아웃 직전 1회 스냅(M2-SESSION-SNAPSHOT NOW-41): `gatherWorkspaceBundle` + 선택 AI 탭 텍스트. 클라우드 upsert와 별도 `localStorage` 단일 키. */
@@ -927,6 +1370,7 @@ export function upsertImportedPlannodeTreeV1(
   if (opts?.markDirty !== false) {
     markCloudWorkspaceDirty();
   }
+  clearDeletedProjectTombstoneForReimport(merged.id);
   return selected;
 }
 
@@ -1038,14 +1482,25 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
  * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
  * - remoteProjectMetaNewer: 원격 목록에 없는 id를 삭제로 간주 + 동일 id는 updated_at 비교
  * - !remoteProjectMetaNewer: 원격에서 더 새로운 노드만 흡수(로컬 전용 노드·순서 유지)
+ *
+ * **히스토리 병합(append-only, LWW):**
+ * - 로컬 `historyEntries` 있으면, 원격 항목과 병합
+ * - 각 항목의 `version` 필드 기반 LWW (같은 버전이면 최신 `at` 우선)
+ * - append-only 원칙: 기존 히스토리 덮어쓰기 금지, 신규 항목만 추가
+ * - 중복 제거: 같은 `at`, `reason`, `project_id` 조합은 1번만
+ * - 최종 정렬: 최신순
  */
 export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): number {
   if (typeof window === 'undefined') return 0;
   let n = 0;
   const rp = Array.isArray(remote.projects) ? remote.projects : [];
-  const skipIds = readPendingWorkspaceDeletionSet();
+  const skipIds = new Set<string>([
+    ...readPendingWorkspaceDeletionSet(),
+    ...readDeletedProjectTombstoneIdSet()
+  ]);
   const map =
     remote.nodesByProject && typeof remote.nodesByProject === 'object' ? remote.nodesByProject : {};
+
   for (const project of rp) {
     if (skipIds.has(project.id)) continue;
     const plist = get(projects);
@@ -1082,7 +1537,12 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
       String(mergedProject.updated_at || '') !== String(local.updated_at || '');
 
     if (nodesChanged || metaChanged || projectTsChanged) {
-      captureNodeSnapshot(project.id, localNodes, 'pre_pull');
+      captureNodeSnapshot(
+        project.id,
+        localNodes,
+        'pre_pull',
+        buildNodeSnapshotCaptureMeta('pre_pull', local, localNodes)
+      );
       upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
         openAfter: false,
         markDirty: false,
@@ -1091,6 +1551,10 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
       n++;
     }
   }
+
+  /** 히스토리 병합(append-only, LWW) */
+  mergeHistoryEntriesFromCloudRemote(remote.historyEntries ?? []);
+
   if (n > 0) {
     const cur = get(currentProject);
     if (cur) {

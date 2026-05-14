@@ -12,18 +12,20 @@ import {
   selectProject,
   projectWorkspaceNodesJsonSnapshot,
   clearPendingWorkspaceDeletions,
+  pruneDeletedProjectTombstonesAgainstCloudProjectIds,
   type WorkspaceBundle
 } from '$lib/stores/projects';
 import {
   ensureOwnerAclRowForMyProject,
   fetchProjectSliceFromCloud,
-  trySelectProject
+  trySelectProject,
+  normalizeAclEmail
 } from '$lib/supabase/projectAcl';
 import type { Node, Project } from '$lib/supabase/client';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { isWorkspaceMissingOrCacheError, WORKSPACE_SETUP_MSG } from '$lib/supabase/aclErrors';
 import { markCloudWorkspaceSynced, markCloudWorkspaceFailed } from '$lib/stores/workspaceDirty';
-import { getAuthUserId } from '$lib/stores/authSession';
+import { getAuthEmail, getAuthUserId } from '$lib/stores/authSession';
 import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
 import {
   CLOUD_MERGE_SLICE_LOCK_TTL_SECONDS,
@@ -90,6 +92,7 @@ async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
   if (remoteTs === prev) return;
 
   mergeWorkspaceBundleFromCloudRemote(bundle);
+  pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set(bundle.projects.map((p) => p.id)));
   /** 캐시 갱신 — 업로드 루프가 동일 원격 번들을 중복 병합하지 않도록 */
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
@@ -145,13 +148,21 @@ type UpsertBundleRpcResult = {
   server_updated_at?: string | null;
 };
 
-/** merge RPC와 동일한 키로 ACL 행이 SELECT RLS에 걸러져 보이는지 — 없으면 RPC 403만 반복되므로 호출 생략 */
+/**
+ * merge/lock RPC는 ACL에 JWT 이메일(및 세션 헬퍼) 일치까지 요구함 — project_id·workspace 소스만 맞고
+ * 현재 사용자 이메일 행이 없으면 함수 본문에서 42501 forbidden → PostgREST 403.
+ * SELECT 사전 검사도 동일 축(email)으로 해 불필요한 RPC 폭주를 줄인다.
+ */
 async function canPushMergeSliceForProject(projectId: string, workspaceUserId: string): Promise<boolean> {
+  const email = getAuthEmail();
+  if (!email) return false;
+  const em = normalizeAclEmail(email);
   const { data, error } = await supabase
     .from('plannode_project_acl')
     .select('id')
     .eq('project_id', projectId)
     .eq('workspace_source_user_id', workspaceUserId)
+    .eq('email', em)
     .limit(1);
   if (error || !data?.length) return false;
   return true;
@@ -617,6 +628,7 @@ export async function pullOwnWorkspaceIfChanged(): Promise<number> {
   if (!bundle) return 0;
 
   const n = mergeWorkspaceBundleFromCloudRemote(bundle);
+  pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set(bundle.projects.map((p) => p.id)));
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
   } catch {

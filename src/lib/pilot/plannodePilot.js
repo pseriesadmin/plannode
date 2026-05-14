@@ -1911,6 +1911,18 @@ function maybeEmitNodeSelect() {
 function render() {
   clearSmartGuides();
   lm = {};
+  
+  // 자식 수 집계 맵 빌드 (parent_id별 직계 자식 수)
+  const childCountByParentId = {};
+  nodes.forEach((n) => {
+    if (n.parent_id) {
+      if (!childCountByParentId[n.parent_id]) {
+        childCountByParentId[n.parent_id] = 0;
+      }
+      childCountByParentId[n.parent_id]++;
+    }
+  });
+  
   if (nodeMapLayoutMode === 'right') {
     let globalRow = 0;
     nodes
@@ -2100,6 +2112,19 @@ function render() {
       nd.appendChild(av);
     }
     w.appendChild(nd);
+    
+    // 자식 수 배지 삽입 (직계 자식 수가 0 초과인 경우)
+    // 배지는 .nd(노드카드) 내부에 추가되어야 position: relative 기준 작동
+    const childCount = childCountByParentId[n.id] || 0;
+    if (childCount > 0) {
+      const childBadge = document.createElement('div');
+      childBadge.className = 'nd-child-count';
+      childBadge.textContent = String(childCount);
+      // 인라인 스타일: 위치 조정(좌측 20%), 크기 축소(30% 줄임), 폰트 축소(20% 줄임)
+      childBadge.style.cssText = 'position:absolute;right:-8px;top:-10px;width:28px;height:28px;border-radius:50%;background:#E6E4FF;color:#333;font-family:Pretendard,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;font-size:13px;font-weight:600;line-height:150%;letter-spacing:0.13px;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:9;box-sizing:border-box;';
+      nd.appendChild(childBadge);  // w가 아닌 nd에 추가 (position: relative 기준)
+    }
+    
     if (nodeHasAnyChild(n.id)) {
       const cb = document.createElement('button');
       cb.type = 'button';

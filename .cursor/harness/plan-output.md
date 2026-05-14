@@ -1,18 +1,19 @@
 # plan-output.md — Plannode Harness Flow
 # 경로: `.cursor/harness/plan-output.md`
-# 생성: @promptor Step2 | 2026-05-11 KST
-# 소스 아젠다: `.cursor/plans/plannode_realtime_sync_redesign_v1.md` 리뷰 → 다중 사용자 동시 작성 시 **로컬·클라우드 실시간 동기화 저장** 재설계를 하네스 작업화
+# 생성: @promptor Step2 | 2026-05-13 KST
+# GATE A 수정: 2026-05-13 — 캔버스 하단 **update** 시각 표시·히스토리 정합·**프로젝트별 누적 저장** 원칙 명시 · 2026-05-14 — **`update` 표시 타임존 Asia/Seoul(한국 시각)** 확정(NOW-HIST-03)
+# 소스 아젠다: 채팅 — (1) 프로젝트·공유 프로젝트 **히스토리 로그 강화 + 클라우드 동기** (2) **부모 노드카드 하위 자식 수 배지 UI** (목업 스펙) + **(3) 하단 update 라벨**
 # 역할: 코드·커밋 없음 — GATE A 승인 후 Step3(TASK.md) 진행
 
 ---
 
 ## 아젠다 요약
 
-1. **플랜 리뷰:** `plannode_realtime_sync_redesign_v1.md`는 폴링·`plannode_workspace` 번들 LWW 한계(A~D)를 정리하고, **Layer 1 Realtime Broadcast**(프리뷰·비보장) / **Layer 2 `postgres_changes`**(DB 확정본·노드 행 전제) / **Layer 3 Vercel Edge(선택)**(ACL·revision 집중) 3계층으로 이원화한다.
-2. **하네스 작업화 목표:** 위 플랜을 **PRD 추적 가능한 NOW 스택**으로 쪼갤 수 있게 범위·제외·단계(Step 0~4)·검증 기준을 확정한다.
-3. **현행 정본 교차:** `docs/plannode_workspace_sync_overview.md`, `plannode-architecture.mdc` §5·§5.1·§10, `sync.ts`·`cloudBackgroundSync.ts`·`projectPresence.ts` — 번들 경로와 Presence는 **유지·병행 축소** 원칙.
-4. **gp-4:** DB 변경은 **신규 마이그레이션 파일만**; 기존 SQL 수정 금지.
-5. **플랜 §0.5·정책 1~9 (한 줄):** 노드카드·트리·**배지 파이프라인(M1 F1-3)** → 동기는 `Node` 스냅샷으로 배지 유실 금지 | **2~4** 소유·공유설정·공유계정(편집 전 메뉴 / 공유·프로젝트 삭제 불가·해제 시 접근 불가) → RLS·ACL·UI | **5** `PresenceAvatarButton`·중복편집 인지·목록 카드 **최종시각(년/월/일 시:분)** | **6** 편집 액션마다 로컬↔클라우드 상호체크·최후 확정본 | **7~8** 소유자 삭제 시 캔버스·로컬·클라우드·공유 목록 정합·공유자 저장 차단·경고·강제 로컬 제거 | **9** 우클릭·히스토리·동기 알림바·아바타 **GP-13** 보호 — 전제·추적표는 **`plannode_realtime_sync_redesign_v1.md` §0.5·§0.5.8**.
+1. **히스토리 강화:** 기존 **히스토리** 메뉴(로그 목록)에, 저장·동기화 시점마다 항목을 **누적(append)** 한다. **제품 원칙(강조):** 프로젝트마다 히스토리는 **이전 항목을 덮어쓰지 않고**, 각 저장 시점의 **최종(마지막) 저장 정보**가 담긴 **새 항목**이 계속 쌓인다(목록만 보는 사용자는 시간순 전체 기록을 본다). 항목에 포함할 메타(아젠다 문구): **최종 업데이트된 노드 개수**(또는 해당 시점 트리의 변경 요약), **파이프라인 설명**(동기/저장 경로에 대한 사람이 읽을 수 있는 이유·단계 라벨로 해석 권장 — PRD **§10 LLM 4-레이어**와 혼동 금지, 아래 P-4.5), **최후 버전 숫자**, **마지막 작성자**, **저장 시각**. **공유 프로젝트 포함** 동일 프로젝트 단위로 언제든 조회 가능해야 하며, **클라우드에 함께 저장**한다. **하단 `update` 라벨과 동일 시각·동일 의미**가 해당 프로젝트 히스토리 목록의 **해당(최신) 항목**에 **정확히** 반영되어야 한다(단일 소스 또는 동기 검증 — 아래 P-3).
+2. **캔버스 하단 `update` 표시(GATE A 추가):** 프로젝트가 열린 편집 상태에서, 하단 **저장** 알림(동기/저장 배지·토스트 인근 UI) **좌측**에 `update 0000.00.00 / 00:00` 형식으로 **현재 반영된(저장·동기 완료 기준) 날짜·시간**을 노출한다. 표기는 **년.월.일 / 시:분**; **표시 타임존은 Asia/Seoul(한국 시각)** — 스냅의 `at`는 ISO(순간)로 저장하고 화면에서만 변환한다(GATE B 실행 반영, 2026-05-14). 이 값은 **히스토리에 기록된 최신 저장 시각**과 **불일치 없이** 맞춘다.
+3. **자식 노드 수 배지:** 캔버스 **상위 부모 노드카드** 우측 상단에 **직계·전체 하위**(아젠다는 “하위 자식 노드카드 합계” — Step3에서 직계 vs 전체 후손 **택일** GATE B 확정) 개수를 원형 배지로 표시. 시각 스펙(구현 시 **요청된 파일·섹션만** — 전역·무관 컴포넌트·파일럿 DOM **id** 변경 금지, `plannode-core`·`plannode-web` 준수):
+   - `width`/`height` **40px**, `position: absolute`, `right: 20px`, `top: -20px`, 배경 **`#E6E4FF`**
+   - 숫자: `color: var(--gray-100, #333)`, `text-align: center`, **Pretendard**, **16px**, **font-weight 600**, `line-height: 150%`, `letter-spacing: 0.16px`
 
 ---
 
@@ -20,53 +21,47 @@
 
 **기본모드**
 
-- Supabase **Realtime·(선택) 신규 테이블·RLS·Publication** 포함 가능 — 플랜 Step 2.
-- **다파일 연쇄:** `sync.ts`, `workspacePush.ts` / `cloudBackgroundSync.ts`, `projectPresence.ts`, `+page.svelte`, `projects.ts`, `pilotBridge.ts` / 파일럿 이벤트 경로 등 **4개 이상** 예상.
-- **복합 목적:** 인가·저장·UI 프리뷰·오프라인/재접속 정합.
-- PRD **M5·F5-2** 및 **F3-2/v2 §11** 방향과 직접 연결(노드 행 모델 시).
+- **복수 목적:** 히스토리 **데이터 모델·클라우드 반영**·**하단 `update` 시각(히스토리 최신 행과 정합)** + 파일럿 **노드카드 DOM/CSS** 동시.
+- **다파일 연쇄 예상:** `nodeSnapshotHistory.ts`(또는 동일 축 스토어), `+page.svelte`(히스토리 UI·**하단 `update` 라벨·저장/동기 배지 행**), `sync.ts` / `workspacePush.ts` / 번들 조립(`gatherWorkspaceBundle` 등), 필요 시 **`docs/supabase/` 신규 마이그레이션**(GP-4: 기존 SQL 수정 금지), **`plannodePilot.js`**(노드카드 렌더·스타일 일부).
+- **DB·RLS 가능성:** 히스토리만 번들 JSON에 넣을지, 별도 테이블·RLS 할지 — **GATE B 전 결정**.
 
-> 경량 단축은 **Stephen이 GATE B에서 Step 1만 1차 NOW**로 묶는 경우에 한함(플랜 §5·P-6.5와 조율).
+> 단일 파일만으로 끝나지 않음. 경량 단축은 **배지만** 1차 NOW로 분리할 때만 부분 적용(히스토리는 기본모드 유지).
 
 ---
 
 ## P-3. 범위 정의
 
-**포함 (이번 설계·구현 사이클에서 진행할 수 있는 것 — 우선순위는 GATE B에서 NOW로 확정):**
+**포함 (이번 사이클에서 설계·구현 후보):**
 
-- **Step 0:** 타임스탬프·LWW 비교 정규화, pull/upload 정합(플랜 §5) — 현행 `sync.ts` 등 안정화.
-- **Step 1:** Layer 1 — `node-delta` **Realtime Broadcast**(채널: `plannode:project:<id>` 또는 분리 채널 `:edit`); 송신: `onPersist`/스토어 확정 직후 쓰로틀; 수신: echo 제외·안전 적용.
-- **Step 2:** Layer 2 — **`plannode_node_rows`(가칭)** 신규 테이블 + RLS + Realtime publication + 클라이언트 `postgres_changes` 구독; 초기 **번들과 이중 쓰기** 허용(플랜 §5).
-- **Step 3 (스코프 선택):** Layer 3 — Edge/API 경로 + revision 정책 — **GATE B에서 필수 vs 나중** 결정(플랜 §8 체크리스트).
-- **Step 4 (장기):** `plannode_workspace` 역할 축소·마이그레이션 — **제품 결정 후** TASK에 편입.
-- 문서·플랜 대비: `plannode_realtime_sync_redesign_v1.md` **§0.5**·§2~§7, §8 결정 항목을 TASK **현재 아젠다** 한 줄과 각 NOW **PRD:**·(필요 시) **정책 1~9** 참조 한 줄에 대응.
+- **히스토리:** 기존 UI 진입점(캔버스 하단·드롭다운 등 **현행 “히스토리” 메뉴**)에 **추가 메타가 담긴 로그 행** 표시; 트리거 후보 — `persistNodesFromPilot`, 클라우드 플러시 성공, 공유 merge 완료, 수동 스냅 등(Step3에서 목록화). **마지막 작성자**는 Supabase Auth 세션 이메일·표시명 등 **기존에 쓰는 식별자**로 제한(GP-9 준수). **누적 정책:** 동일 `projectId`에 대해 **기존 히스토리 행 삭제·치환 없이 append**; merge·LWW로 인한 **원격 덮어쓰기가 히스토리 스트림까지 지우지 않도록** 설계(충돌 시 GATE B에서 “소유자 행 vs 로컬 링” 규칙 명시).
+- **하단 `update` 라벨:** `+page.svelte`(또는 하단 캔버스 툴바를 담당하는 **기존 섹션만**)에서 저장 배지 **좌측**에 고정 또는 갱신 가능한 텍스트; 표시 시각은 **히스토리 최신 항목의 타임스탬프와 동일 필드**에서 파생해 **표시·저장 불일치 버그**를 막는다. **표시는 Asia/Seoul(한국 시각)**; 원본 `at`는 ISO.
+- **클라우드:** 공유·소유 동일 `projectId` 기준으로 **원격에서도 동일 목록을 읽을 수 있게** — 번들(`plannode_workspace` JSON) 확장 vs **프로젝트/워크스페이스 메타 전용 필드** vs 신규 테이블 — **한 축으로 정하되** AGENTS **GP-12·P-6.5**로 최소 스키마.
+- **배지:** 부모 노드 렌더 경로에 자식 수 표시; **레이아웃·z-index**가 간선·미니맵·`.view` 전환을 가리지 않게(GP-13).
 
-**제외 (이번 플랜이 명시 비목표인 것 — 포함으로 끌어들이지 말 것):**
+**제외 (이번 아젠다에 없으면 포함 금지):**
 
-- **CRDT/OT** 수준 문자 동시 편집 — PRD·플랜 §4 비목표.
-- **Realtime만 영구 저장** — 하지 않음; 확정본은 DB(Layer 2).
-- **기존 `plannode_workspace` 즉시 삭제** — 하지 않음; 단계적 이행.
-- PRD **F2-4(IA/와이어)**·**F2-5·§10 LLM 4-레이어** 선제 확장 — 아젠다와 무관(별도 TASK).
-- **Layer 3 전면 도입을 전제로 한 설계만** 먼저 고착 — **P-6.5**: 트래픽·남용 필요 시에만 Step 3 포함.
+- PRD **F2-4(IA/와이어)**·**F2-5·§10 LLM** 파이프라인 본구현·`ai_generations` 테이블 — 히스토리의 “파이프라인 설명”은 **동기/저장 단계 라벨**로 한정(아래 P-4.5).
+- **전역 테마·폰트 로드 방식 전면 변경**, 파일럿 **id·와이어 싱크 버튼 id** 변경.
+- 히스토리 **무제한 성장**으로 번들 폭주 — 상한·링 버퍼·오래된 항목 정리는 **포함하되** 설계 단계에서 정책 명시.
 
 **트리뷰 보호 (GP-13, 필수):**
 
-- 원격 델타 적용은 **파일럿 단일 진실**·`pilotBridge` `hydrateFromStore` / 동일 순서 계약을 깨지 않게 한다. Broadcast가 **간선·미니맵·렌더 타이밍**을 우회하는 직접 DOM 패치를 하지 않도록 설계·검증에 명시한다.
-- 부가 뷰 CSS로 `#V-TREE`·`.view.active` 전환을 가리지 않는다.
+- 노드카드 배지 추가가 **선택·드래그·간선 `drawEdges`·`render()` 타이밍**을 깨지 않게; 변경 후 `npm run build` + 트리 기본 시나리오(GATE C).
 
-**참고 파일 (읽기·구현 시):**
+**참고 파일 (읽기·구현 시, 비한정):**
 
-- `.cursor/plans/plannode_realtime_sync_redesign_v1.md` — 목표 아키텍처·DDL 초안·다이어그램·**§0.5 정책 1~9**.
-- `docs/plannode_workspace_sync_overview.md` — 현행 번들·폴링 정본.
-- `src/lib/supabase/sync.ts`, `workspacePush.ts`, `cloudBackgroundSync.ts` — LWW·플러시.
-- `src/lib/supabase/projectPresence.ts`, `+page.svelte` — Presence·채널 계약(§5.1, `PRESENCE_PEER_MERGE`).
-- `docs/supabase/plannode_project_collab_revision_lock.sql` — 공유 슬라이스·revision 기존 축.
-- `.cursor/rules/plannode-architecture.mdc` — §5.1 Presence, §10 노드 CRUD·클라우드 파이프.
+- `src/lib/stores/nodeSnapshotHistory.ts` — 현행 **로컬 링 스냅샷**, `StoredNodeSnapshot` 필드 확장 vs **별도 “감사 로그”** 분리 검토.
+- `src/routes/+page.svelte` — 히스토리 UI·하단 **저장/동기 배지** 행·**`update` 라벨(저장 알림 좌측)**·토스트·Presence 연동 구간.
+- `src/lib/supabase/sync.ts`, `workspacePush.ts`, `gatherWorkspaceBundle`(스토어/클라이언트) — 번들에 히스토리 포함 시 병합·LWW 영향.
+- `src/lib/pilot/plannodePilot.js` — 노드카드 DOM 생성·클래스; **id 계약 유지**.
+- `.cursor/rules/plannode-ui-identity.mdc` — 배지·레이어·타이포와 충돌 시 조정(Primary 등은 이번 배지 색 `#E6E4FF`가 별도이므로 **로컬 스코프 스타일** 우선).
+- `docs/PILOT_FUNCTIONAL_SPEC.md` §9(갭)·§10(히스토리·협업 후 루트 유지).
 
 ---
 
 ## P-3.5. v4 보기·출력 정본 동기
 
-**P-3.5 해당 없음** — IA/와이어 뷰·`OutputIntent`·내보내기·그리드와 무관한 **클라우드·Realtime·협업 저장** 축.
+**P-3.5 해당 없음** — `OutputIntent`·IA 그리드·내보내기·v4 **§4.0**와 무관.
 
 ---
 
@@ -76,10 +71,12 @@
 
 ```
 관련 갭 항목:
-□ [스토어·노드 계약 / 협업] — 파일럿: `nodes`·`onPersist`가 SSoT | SvelteKit: `projects.ts`·`pilotBridge`·`persistNodesFromPilot` | 리스크: 원격 델타가 스토어·파일럿 순서를 어기면 §9 빈 노드/부모 id 클래스 버그와 **중첩** 가능 → 적용 함수는 기존 persist/hydrate 경로만 사용
-□ [§10 체크리스트] — 협업·클라우드 반영 직후에도 **루트 1개·트리↔탭 동기** 유지 여부를 GATE C에 명시
+□ [노드카드·캔버스] — 파일럿: `.nw` 등 노드 래퍼·렌더 | SvelteKit: 파일럿이 단일 트리 UI | 리스크: 배지 `position`·크기가 **클릭 영역·핸들**과 겹치면 편집 UX 저하 → hit-test·pointer-events 검토
+□ [스토어·SSoT] — 히스토리 메타는 **트리 SSoT를 복제하지 않는** 보조 레코드로 유지(nodeSnapshotHistory 주석 방향과 정합)
+□ [§10 체크리스트] — 히스토리 캡처·클라우드 머지 후에도 **루트 1개·트리↔탭 동기** 회귀
+□ [하단 툴바·동기 UI] — `update` 라벨이 저장 배지와 **겹침·가독성·모바일 줄바꿈**을 해치지 않게; 레이아웃만 바꿀 때도 GP-13·`plannode-ui-identity` 와 충돌 검토
 
-직접 비대상: §9 표의 transform 범위·Canvas `addNodeChild` 등 — 동기화 작업이 해당 파일만 건드리지 않으면 "회귀 시 확인" 수준
+이번 아젠다는 §9 표의 **transform/SVG 형제** 항목과 직접 무관할 수 있으나, **노드카드 DOM 변경** 시 §9 첫 줄(줌·좌표계) 회귀는 GATE C에 한 줄.
 ```
 
 ---
@@ -88,17 +85,18 @@
 
 | 매핑 | 설명 |
 |------|------|
-| **M1 · F1-3** | 노드카드·**배지 파이프라인** — 동기화는 `Node` 직렬화에 배지·메타 포함 시 손실 없이 전파; 제품 정책 **1**·플랜 **§0.5.1**. |
-| **M5** | 협업 — **F5-1** 공유, **F5-2** 실시간 + LWW; 본 아젠다는 F5-2 **체감 품질**(저지연 프리뷰 + DB 확정본 일치)으로 PRD 방향을 구체화. |
-| **F3-2** | Supabase — 현행 번들 + (Step 2) 노드 행 저장 **병행**; PRD **§11** `plan_nodes`·`path`·`metadata`와 컬럼 정합은 **플랜 §8·마이그레이션 설계 시** 결정(GATE B 조건). |
-| **§4 비기능** | RLS, 동시 편집 한계(OT/CRDT 아님) — 플랜 §4·PRD와 정합 유지. |
-| **§6 Phase** | **Phase 2** — F5-2·실시간 강화 구간; MVP 단일 번들만 고수 시 Step 1~2를 **부분 편입**으로 쪼갠다. |
+| **M3 · F3-1** | localStorage — 현행 히스토리 일부가 로컬만; 확장 시 용량·키 정책. |
+| **M3 · F3-2** | Supabase — 히스토리 **클라우드 저장**은 본 아젠다 핵심; RLS·공유자 읽기는 ACL·번들 규칙과 정합. |
+| **M3 · F3-3** | 스냅샷/버전 **Phase 2** — 본 히스토리 강화는 F3-3 방향과 정합; **완전 버전 diff UI**까지는 GATE B에서 범위 확정. |
+| **M1 · F1-1 / F1-2** | 노드 카드·캔버스 — 자식 수 배지. |
+| **M5** | 공유 프로젝트 포함 **동일 프로젝트 단위** 기록·조회. |
+| **§6 로드맵** | F3-3·협업 고도화 구간과 겹침; MVP만 고수한다면 **클라우드 히스토리 최소 스키마**만 편입하고 나머지는 제외에 명시. |
 
-**IA vs LLM:** 본 작업은 **F2-4 정보 구조(IA)·F2-5·§10 LLM**과 무관. 혼동 금지.
+**IA vs LLM:** 본 작업은 **F2-4(정보 구조)·F2-5·§10 LLM 출력 품질**과 축이 다름. 히스토리 필드명 **“파이프라인 설명”**은 **저장/동기 파이프 단계**(예: manual, pre_pull, workspace_flush, merge_remote)의 **사람 읽는 라벨**로 정의하고, §10의 Skeleton/Deepen/Validate와 **동일어 사용을 피함**(혼동 방지).
 
-**편집·저장 귀속:** 노드 편집 SSoT는 **파일럿·스토어·브리지** 유지. Layer 1은 **프리뷰**, Layer 2는 **클라우드 확정본**; 최종 일치는 풀·`postgres_changes`·재접속 경로로 확보. PRD **§11 `ai_generations`** 스냅샷은 본 동기화 NOW에 포함하지 않음.
+**편집·저장 귀속:** 트리 SSoT는 기존대로 **파일럿↔스토어↔`nodes`**; 히스토리는 **부가 로그**로만 추가하고, **둘째 진실 소스**가 되지 않게 한다(P-4.5 택일: 로그는 복원용 보조일 뿐, 단일 복원 경로는 Step3에서 명시). **GATE A(수정):** 프로젝트별 히스토리는 **append-only 누적**; 하단 **`update`에 보이는 시각**은 **히스토리 최신 행의 `at`(또는 동일 의미 필드)**와 **항상 같은 값**에서만 파생(이중 계산·별도 타이머 금지 권장).
 
-**충돌·정합:** PRD §11 **노드 정규 테이블(`plan_nodes`)** 명칭과 플랜 **`plannode_node_rows`(가칭)** 는 **실제 스키마·마이그레이션에서 단일화** — GATE B 전 `§8` 체크리스트·DB 문서에서 명명 합의 권장. 파일럿·`PILOT_FUNCTIONAL_SPEC`과 충돌 시 **브리지·스토어 순서** 우선.
+**충돌·권장:** `nodeSnapshotHistory`가 “로컬 전용”으로 기술되어 있으면, 클라우드 확장 시 **주석·GATE B**에서 “로컬 링 + 서버 병합” 또는 “서버 단일 소스” 중 하나로 문서 정합.
 
 ---
 
@@ -106,36 +104,36 @@
 
 | # | 위험 | 수준 | 대응 |
 |---|------|------|------|
-| 1 | Broadcast 스톰·대형 트리에서 패킷 폭주 | 🟠 | 쓰로틀·변경 노드만·배치(플랜 §7) |
-| 2 | 번들 vs 노드 행 **이중 쓰기 불일치** | 🔴 | feature flag·단일 소스 전환 일정·Step 2 설계에 명시 |
-| 3 | Broadcast-only **인가 약화**·악용 | 🟠 | ACL·Layer 2·기존 Presence 허용 목록 정합; 신뢰 UI 범위 문서화 |
-| 4 | `updated_at`/타임존 문자열 LWW **오판 루프** | 🟠 | Step 0 정규화·플랜 §1.2 C |
-| 5 | 원격 데이트가 파일럿 **render()·간선** 타이밍 깸 | 🔴 | GP-13·적용 경로를 persist/hydrate 계열만으로 제한, GATE C 트리 시나리오 |
-| 6 | RLS·Publication 오설정으로 Realtime 누락/과노출 | 🔴 | 스테이징 ACL 매트릭스·진단 SQL(플랜 §7) |
+| 1 | 번들 JSON에 히스토리 무한 증가 → 업로드 실패·비용 | 🔴 | 항목 상한·링·오래된 항목 삭제; 필요 시 별도 테이블 |
+| 2 | 공유자·소유자 **히스토리 소스 불일치**(merge LWW) | 🔴 | 프로젝트 단위 단일 스트림인지, per-user인지 GATE B 결정 |
+| 3 | “업데이트 노드 개수” 정의 모호(변경 노드 수 vs 전체 노드 수) | 🟠 | 스펙 1문장 확정 |
+| 4 | 자식 수 계산을 `render`마다 전수 순회 | 🟠 | 부모별 캐시·맵 또는 파일럿 내부 자료구조 1회 갱신 |
+| 5 | 배지 `.nw` 밖 시각으로 **클릭·간선** 간섭 | 🟠 | z-index·pointer-events·GP-13 수동 확인 |
+| 6 | 신규 DB 마이그레이션·RLS 오설정(GP-4) | 🔴 | 스테이징에서 ACL 매트릭스 검증 |
+| 7 | 하단 `update` 표시와 히스토리 최신 행 **타임스탬프 불일치**(저장 실패·비동기 경합) | 🔴 | 단일 필드 파생·저장 성공 콜백 후에만 갱신 등 Step3에서 규칙화 |
 
 ---
 
 ## P-6. Step3 지침 (Plan Mode / TASK.md용)
 
 ```
-태스크 크기: GP-5 — Step 0·1은 30분~한 파일 우선 가능; Step 2+ 는 DB·다파일이면 NOW 분할
-PRD 추적: TASK.md `현재 아젠다` + 각 NOW에 M1 F1-3 M5 F5-1 F5-2 F3-2 (및 Step 2 시 PRD §11 조정 한 줄); **플랜 §0.5 정책** 해당 시 정책 번호 1~9 중 관련 항목 1줄
-주의 영역: sync.ts LWW·merge RPC·Presence §5.1·파일럿 onPersist·GP-4 마이그레이션 신규만
-파일럿 갭: §9 스토어 계약·§10 협업 후 루트/동기 — 각 NOW 끝에 회귀 한 줄
-의존 순서: 플랜 §5 권장 — Step 0 검증 → Step 1(체감 실시간) → Step 2(확정본) → Step 3(선택) → Step 4(장기)
-PRD v2: 노드 행 도입 시 path·metadata·트리거(§11)와 **중복 스키마 방지** — 설계 단계에서 한 표로 정리
+태스크 크기: GP-5 — 히스토리(데이터+sync)·**하단 `update` 라벨(+page 하단 기존 행)**·배지(UI)를 NOW 분리 권장; 각 NOW 30분 근방·파일 수 최소화
+PRD 추적: TASK.md `현재 아젠다` + 각 NOW에 M3 F3-1 F3-2 F3-3 · M1 F1-1 · M5 한 줄씩(해당만)
+주의 영역: plannode_workspace 병합·공유 슬라이스·nodeSnapshotHistory·파일럿 render·GP-4 신규 SQL만
+파일럿 갭: §9 노드카드·§10 히스토리 후 루트/동기 — 회귀 한 줄
+의존 순서: 히스토리 **저장 단위**(로컬 스키마) 합의 → **최신 `at` 단일 소스** → 하단 `update` 라벨 바인딩 → 클라우드 반영 경로 → 히스토리 UI 목록; 배지는 파일럿 자식 수 API 합의 후 DOM
+GATE B 조건: “파이프라인 설명” 용어집 · 직계 vs 전체 하손 개수 · 클라우드 저장 위치(번들 vs 테이블) · **`update` 문자열 형식(구분자·0패딩)·표시 타임존 Asia/Seoul(한국 시각)** · append-only 히스토리가 **번들 merge 시 덮어쓰이지 않는지** 예외 시나리오
 ```
 
-**디자인 시스템:** UI 대규모 변경이 아젠다에 없으면 **plannode-ui-identity.mdc** 는 동기화 **배지·토스트** 수준만 참조(필수 아님). Presence 아바타 영역 침범 금지는 `plannode-architecture.mdc` §5.1.
+**디자인 시스템:** 이번 배지는 **지정 hex·Pretendard** 우선; 전역 토큰과 어긋나면 **해당 노드카드 범위 한정** 스타일로 `plannode-ui-identity.mdc` 와 충돌 여부만 Step3에서 확인.
 
 ---
 
 ## P-6.5. 오버 엔지니어링·기술부채 지양
 
-- **Layer 3(Edge)** 를 Step 1과 동시에 강제하지 않음 — 트래픽·보안 필요 시 GATE B 포함.
-- **CRDT/새 추상 저장소·불필요한 `lib/` 래퍼** 금지 — 기존 `sync.ts`·채널 구독 확장 우선.
-- PRD **§10 파이프라인·§11 ai_generations** 선제 구현 **포함 금지**.
-- 프로덕션 잡음 로그·무근거 `any`·승인 없는 신규 npm 패키지 금지.
+- PRD **§10 4-레이어·§11 `ai_generations`** 를 히스토리에 끌어오지 않음 — **명칭 분리**.
+- **범용 감사 프레임워크·새 lib 래퍼** 금지 우선; `nodeSnapshotHistory`·번들 필드 **확장**으로 수용 가능한지 먼저 판단.
+- 프로덕션 잡음 로그·무근거 `any`·승인 없는 npm 패키지 금지.
 
 ---
 
@@ -149,22 +147,33 @@ PRD v2: 노드 행 도입 시 path·metadata·트리거(§11)와 **중복 스키
   📄 .cursor/harness/plan-output.md
 
 확인 항목:
-[ ] 분석 결과가 아젠다(plannode_realtime_sync_redesign_v1 + 작업화) 의도와 일치하는가?
+[ ] 분석 결과가 아젠다(히스토리 클라우드 누적 + 하단 `update`·히스토리 시각 정합 + 부모 노드 자식 수 배지) 의도와 일치하는가?
 [ ] 모드 판별(기본모드)이 올바른가?
-[ ] 제외(CRDT/OT, workspace 즉시 폐기, Layer 3 선제 강제, F2-4/F2-5)에 동의하는가?
-[ ] 파일럿 갭 §9·§10 연관(스토어·hydrate·협업 후 루트)이 식별됐는가?
-[ ] PRD 연계(M1 F1-3, M5 F5-1 F5-2, F3-2, §4, §6 Phase 2, §11 조정)·**플랜 §0.5 정책 1~9(아젠다 요약 5)** 가 채워졌는가? IA/LLM 혼동 없음?
-[ ] P-6.5(YAGNI·Layer 3 선택·§10·§11 선제 금지)가 반영됐는가?
+[ ] 제외(F2-4/F2-5·§10 LLM 본구현·DOM id 변경·전역 스타일 난동)에 동의하는가?
+[ ] 파일럿 갭 §9·§10 연관(노드카드·SSoT·협업 후 루트)이 식별됐는가?
+[ ] PRD 연계(M3 F3-1 F3-2 F3-3, M1, M5, §6)·**IA/LLM 혼동 방지·“파이프라인 설명” 정의**·**히스토리 누적(append)·`update` 정합**이 채워졌는가?
+[ ] P-6.5·YAGNI가 반영됐는가?
 [ ] P-3.5 해당 없음이 맞는가?
-[ ] 핵심 위험(P-5, 특히 이중 쓰기·인가·render 타이밍) 대응에 동의하는가?
-[ ] plannode §8 결정 체크리스트(Step 1 우선?, node_rows 채택?, Edge 시점?, 번들 축소)를 GATE B 전에 합의할 것인가?
+[ ] 핵심 위험(P-5: 번들 크기·merge·자식 수 비용·배지 hit-test) 대응에 동의하는가?
+[ ] GATE B에서 결정할 항목: 히스토리 저장 위치 · **append-only 누적 vs merge 시 보존** · 업데이트 노드 수 정의 · 직계/전체 하손 · 작성자 표시 필드 · **`update` 표기·표시 타임존(Asia/Seoul)** · 단일 타임스탬프 소스
 
-→ 승인: GATE A 승인. Step3(Plan Mode) → TASK.md에 Step 0~4 NOW 분해·PRD 한 줄씩.
+→ 승인: GATE A 승인. Step3(Plan Mode) → TASK.md NOW 분해.
 → 수정: GATE A 수정 요청 → plan-output 갱신.
-→ 반려: Step2부터 아젠다·플랜 §8 재정의.
+→ 반려: Step2부터 아젠다 재정의.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 ---
 
-*@promptor 역할: 코드·커밋 없음 | 본 문서만 갱신 | 소스 플랜: `.cursor/plans/plannode_realtime_sync_redesign_v1.md`*
+## 코드 진실(히스토리 보완 · 2026-05-14, 레포 구현 기준)
+
+- **최신 스냅·하단 `update` 라벨:** `getLatestNodeSnapshot(projectId)` — `listNodeSnapshots` 배열의 **마지막 항목**이 가장 최근(`captureNodeSnapshot`가 push). `+page.svelte`의 `latestSnapshotUpdateLabel`이 동일 소스를 사용.
+- **NOW-HIST-03 표시 시각:** 스냅 `at`는 **ISO 순간**으로 저장; 라벨·모달 열 시각은 `formatLatestSnapshotTime` / `formatHistoryTimestamp`에서 **`Intl.DateTimeFormat` + `timeZone: 'Asia/Seoul'`** 로 **한국 시각**만 노출(UTC 표기 아님).
+- **히스토리 모달 행:** `mergeModalSnapshotRows` — 로컬 링 `listNodeSnapshots` **역순(최신 우선)** 과 `plannode_merged_history_entries_v1`를 `listMergedHistorySnapshotsForProject`로 읽어 **id 기준 병합·시간순 정렬**(클라우드 병합 버퍼 C2).
+- **라벨 DOM:** 캔버스 하단 **`.cw-mm-cluster`** 안 동기 배지 **좌측** `cw-snapshot-update-label`(문서 구식의 `.cw-bottom-bar`·`listNodeSnapshots()[0]` 표기는 폐기).
+- **번들 수집:** `gatherWorkspaceBundle` — **`src/lib/stores/projects.ts`** (경로 오기: `supabase/projects.ts` 아님).
+- **persist 히스토리:** `schedulePersistNodeSnapshotAfterPilot` — **`projects.ts`** 내 **900ms 디바운스** 후 `captureNodeSnapshot(..., 'persist', meta)`; 페이지 이탈 시 `clearPersistSnapshotDebounceTimers()`(`+page.svelte` `onDestroy`).
+
+---
+
+*@promptor 역할: 코드·커밋 없음 | 본 문서만 갱신 | 소스: 채팅 아젠다 2026-05-13 + GATE A 수정 동일일(하단 `update`·누적 원칙)*
