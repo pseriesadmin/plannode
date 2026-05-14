@@ -103,6 +103,11 @@ export function mountPilotBridge(): { destroy: () => void } {
       if (syncingFromStore || !curP) return;
       const mapped = pilotNodesToStore(curP.id, pilotNodes);
       persistNodesFromPilot(curP.id, mapped);
+      
+      // NOW-HIST-02: 10분 idle 타이머 리셋 호출
+      if (typeof window !== 'undefined' && (window as any).__resetIdleSnapshotTimer) {
+        (window as any).__resetIdleSnapshotTimer();
+      }
     },
     getAccessToken: async () => {
       const s = get(authSession);

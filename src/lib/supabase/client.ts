@@ -58,3 +58,12 @@ export type Node = {
   created_at: string;
   updated_at: string;
 };
+
+export type HistoryEntry = {
+  id: string;
+  project_id: string;
+  at: string;
+  reason: string;
+  version?: string;
+  nodes: Node[];
+};

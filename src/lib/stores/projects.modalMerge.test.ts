@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mergeModalListCloudCanon, registerPendingWorkspaceDeletion, getPendingWorkspaceDeletionIds } from './projects';
+import {
+  mergeModalListCloudCanon,
+  registerPendingWorkspaceDeletion,
+  pruneOwnedProjectGhostHideAgainstCloudCanon,
+  registerOwnedProjectGhostHideForModal
+} from './projects';
 import type { Project } from '$lib/supabase/client';
 
 function P(id: string, name: string, updated: string): Project {
@@ -18,9 +23,10 @@ function P(id: string, name: string, updated: string): Project {
 
 describe('mergeModalListCloudCanon', () => {
   beforeEach(() => {
-    // 테스트마다 pending 세트 초기화
+    // 테스트마다 pending·고스트-hide 세트 초기화
     if (typeof window !== 'undefined') {
       localStorage.removeItem('plannode_workspace_pending_delete_ids_v1');
+      localStorage.removeItem('plannode_workspace_modal_owned_ghost_hide_v1');
     }
   });
 
@@ -28,6 +34,7 @@ describe('mergeModalListCloudCanon', () => {
     // 테스트 후 정리
     if (typeof window !== 'undefined') {
       localStorage.removeItem('plannode_workspace_pending_delete_ids_v1');
+      localStorage.removeItem('plannode_workspace_modal_owned_ghost_hide_v1');
     }
   });
 
@@ -79,6 +86,25 @@ describe('mergeModalListCloudCanon', () => {
     // 2. 공유자의 mergeModalListCloudCanon에서 해당 id가 제외되는지 확인
     const m = mergeModalListCloudCanon(cloud, local);
     expect(m.map((x) => x.id)).toEqual(['a', 'del-this', 'local-del', 'c']);
+  });
+
+  it('hides ghost ids when viewerUid is set and ghost-hide marker is registered (browser LS)', () => {
+    const uid = 'u-test-ghost';
+    if (typeof window === 'undefined') return;
+    registerOwnedProjectGhostHideForModal(uid, 'gone');
+    let cloud = [
+      P('a', 'A', '2026-01-01T00:00:00.000Z'),
+      P('gone', 'Ghost', '2026-01-02T00:00:00.000Z')
+    ];
+    const local: typeof cloud = [];
+    expect(mergeModalListCloudCanon(cloud, local, uid).map((x) => x.id)).toEqual(['a']);
+    // 서버 목록에 아직 고스트가 있음 → 마커 유지 → 계속 숨김
+    pruneOwnedProjectGhostHideAgainstCloudCanon(uid, new Set(['a', 'gone']));
+    expect(mergeModalListCloudCanon(cloud, local, uid).map((x) => x.id)).toEqual(['a']);
+    // 정본에서 id 제거 확인됨 → 마커 prune → 새 fetch 시 고스트 행 없음 전제로 동일 결과
+    pruneOwnedProjectGhostHideAgainstCloudCanon(uid, new Set(['a']));
+    cloud = [P('a', 'A', '2026-01-01T00:00:00.000Z')];
+    expect(mergeModalListCloudCanon(cloud, local, uid).map((x) => x.id)).toEqual(['a']);
   });
 });
 
