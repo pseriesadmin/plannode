@@ -174,9 +174,9 @@ function formatSpecBadgeTracksHtml(n) {
 
 const COL_W = 244,
   ROW_H = 122,
-  /** 노드 카드 폭(+20%) — 스타일·연결선·미니맵과 동일 값 */
-  NODE_CARD_W_ROOT = 202,
-  NODE_CARD_W_CHILD = 226,
+  /** 노드 카드 가로폭 — 스타일(+page `:global(.nd)`)·연결선·미니맵과 동일 값(가독성 +30% vs 이전 202/226) */
+  NODE_CARD_W_ROOT = 263,
+  NODE_CARD_W_CHILD = 294,
   /** 하위분포: 깊이(행) 간격 — 부모~자식 간 수직 여유(간선 분기) */
   TOPDOWN_ROW_GAP_MULT = 2.42,
   /** 하위분포 `.pb2` +버튼: 스타일과 동일 `bottom:-22`·높이 20 */
@@ -186,13 +186,15 @@ const COL_W = 244,
   TOPDOWN_DEPTH_STRIP_W = 44,
   /** 하위분포: 뎁스 스트립 오른쪽 ~ 트리 열 사이 간격 */
   TOPDOWN_STRIP_NODE_GAP = 48,
-  /** 우측분포: 열(가로) 간격 배수 — 카드 폭·컬럼 라벨과 정합 */
-  RIGHT_LAYOUT_GAP_MULT = 1.5,
-  /** 우측분포: 행 간격만 확대 — ROW_H×1.5만으로는 카드 실높이(설명·배지) 대비 수직 겹침 발생(NOW-79~80) */
-  RIGHT_ROW_GAP_MULT = 2.25;
+  /** 우측분포: 열(가로) 간격 배수 — 카드 폭·컬럼 라벨과 정합(하위분포 대비 체감 +30%) */
+  RIGHT_LAYOUT_GAP_MULT = 1.95,
+  /** 우측분포: 행 간격만 확대 — ROW_H×1.5만으로는 카드 실높이(설명·배지) 대비 수직 겹침 발생(NOW-79~80) · 열과 동일 +30% */
+  RIGHT_ROW_GAP_MULT = 2.925;
 
 function layoutColW() {
-  return nodeMapLayoutMode === 'right' ? COL_W * RIGHT_LAYOUT_GAP_MULT : COL_W;
+  if (nodeMapLayoutMode === 'right') return COL_W * RIGHT_LAYOUT_GAP_MULT;
+  /* 하위분포: 열 간격이 카드 폭보다 작으면 형제 열이 수평으로 겹침 */
+  return Math.max(COL_W, NODE_CARD_W_CHILD + 18);
 }
 function layoutRowH() {
   if (nodeMapLayoutMode === 'topdown') return ROW_H * TOPDOWN_ROW_GAP_MULT;

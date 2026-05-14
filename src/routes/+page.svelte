@@ -33,7 +33,8 @@
     replaceProjectNodesFromHistory,
     listMergedHistorySnapshotsForProject,
     clearPersistSnapshotDebounceTimers,
-    buildNodeSnapshotCaptureMeta
+    buildNodeSnapshotCaptureMeta,
+    selectProject
   } from '$lib/stores/projects';
   import type { LogoutSessionSnapshotV1 } from '$lib/stores/projects';
   import {
@@ -1003,6 +1004,12 @@
   function pickView(v: 'tree' | 'prd' | 'spec' | 'ia' | 'ai') {
     activeView.set(v);
     closeViewMenu();
+  }
+
+  /** 빈 캔버스로: 열린 프로젝트·노드 해제(브리지 `clearCanvas`) + 트리 탭 */
+  function closeOpenProjectToEmptyCanvas() {
+    selectProject(null);
+    pickView('tree');
   }
 
   /** 상단 출력 → 화면 목록 인텐트: IA 탭으로 전환 후 `IAExportMenu`가 1회 실행 */
@@ -2677,6 +2684,35 @@
           />
         </svg>
       </button>
+      {#if $currentProject}
+        <button
+          type="button"
+          class="cw-close-project-btn"
+          aria-label="프로젝트 닫기"
+          title="프로젝트 닫기"
+          on:click={closeOpenProjectToEmptyCanvas}
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="36"
+            height="36"
+            viewBox="0 0 36 36"
+            fill="none"
+            aria-hidden="true"
+            focusable="false"
+            class="cw-close-project-btn-svg"
+          >
+            <path
+              d="M36 18C36 27.9411 27.9411 36 18 36C8.05887 36 0 27.9411 0 18C0 8.05887 8.05887 0 18 0C27.9411 0 36 8.05887 36 18Z"
+              fill="#E6E4FF"
+            />
+            <path
+              d="M12.1863 22.8995L16.7825 18.3033L12.1863 13.7071C11.7958 13.3166 11.7958 12.6834 12.1863 12.2929C12.5768 11.9024 13.21 11.9024 13.6005 12.2929L18.1967 16.8891L22.7929 12.2929C23.1834 11.9024 23.8166 11.9024 24.2071 12.2929C24.5976 12.6834 24.5976 13.3166 24.2071 13.7071L19.6109 18.3033L24.2071 22.8995C24.5976 23.29 24.5976 23.9232 24.2071 24.3137C23.8166 24.7042 23.1834 24.7042 22.7929 24.3137L18.1967 19.7175L13.6005 24.3137C13.21 24.7042 12.5768 24.7042 12.1863 24.3137C11.7958 23.9232 11.7958 23.29 12.1863 22.8995Z"
+              fill="#AAA3FF"
+            />
+          </svg>
+        </button>
+      {/if}
     {/if}
 
     <div
@@ -2691,9 +2727,33 @@
             <svg id="SG"></svg>
           </div>
           <div id="ES">
-            <div style="font-size:36px;margin-bottom:12px">📋</div>
-            <div style="font-size:14px;color:#bbb;margin-bottom:16px">프로젝트를 선택하거나 새로 만들어줘</div>
-            <button type="button" id="BNE" on:click={() => showProjectModal.set(true)}>+ 새 프로젝트</button>
+            <div class="cw-bne-wrap">
+              <button
+                type="button"
+                id="BNE"
+                class="cw-bne-new-project"
+                aria-label="새 프로젝트"
+                on:click={() => showProjectModal.set(true)}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="45"
+                  height="45"
+                  viewBox="0 0 45 45"
+                  fill="none"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path
+                    fill-rule="evenodd"
+                    clip-rule="evenodd"
+                    d="M33 0C39.6274 0 45 5.37258 45 12V33C45 39.6274 39.6274 45 33 45H12C5.37258 45 0 39.6274 0 33V12C0 5.37258 5.37258 5.15406e-07 12 0H33ZM22.5 13.5C21.6716 13.5 21 14.1716 21 15V21H15C14.1716 21 13.5 21.6716 13.5 22.5C13.5 23.3284 14.1716 24 15 24H21V30C21 30.8284 21.6716 31.5 22.5 31.5C23.3284 31.5 24 30.8284 24 30V24H30C30.8284 24 31.5 23.3284 31.5 22.5C31.5 21.6716 30.8284 21 30 21H24V15C24 14.1716 23.3284 13.5 22.5 13.5Z"
+                    fill="#631EED"
+                  />
+                </svg>
+              </button>
+              <span class="cw-bne-hint" aria-hidden="true">새 프로젝트</span>
+            </div>
           </div>
           <div class="cw-bottom-stack">
             <div class="cw-bottom-bar">
@@ -3313,7 +3373,7 @@
                 aria-label={PLANNODE_TREE_IMPORT_BJI_ARIA_LABEL}
                 on:click={triggerJsonImport}
               >
-                가져오기
+                가져오기(json, md, mdc)
               </button>
               {#if projectImportError}
                 <p class="proj-import-err" role="alert">{projectImportError}</p>
@@ -3724,6 +3784,42 @@
   }
 
   .tb-menu-reveal-svg {
+    display: block;
+    width: 36px;
+    height: 36px;
+  }
+
+  /* 좌측: 우측 `.tb-menu-reveal`(48px)과 세로 중심 맞춤 — 본체 36×36 */
+  .cw-close-project-btn {
+    position: fixed;
+    z-index: 55;
+    top: calc(16px + env(safe-area-inset-top, 0px));
+    left: calc(14px + env(safe-area-inset-left, 0px));
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .cw-close-project-btn:focus-visible {
+    outline: 2px solid #631eed;
+    outline-offset: 3px;
+  }
+
+  .cw-close-project-btn:active {
+    transform: scale(0.96);
+  }
+
+  .cw-close-project-btn-svg {
     display: block;
     width: 36px;
     height: 36px;
@@ -4348,8 +4444,10 @@
 
   .proj-json-import {
     position: relative;
-    /* 프로젝트 생성↔가져오기: `.proj-form-col` gap(15px)의 50% 추가 분리 */
-    margin-top: calc(15px * 0.5);
+    /* 프로젝트 생성↔가져오기: `.proj-form-col` gap(15px)의 50% 추가 분리 → +30% 시각 분리 */
+    margin-top: calc(15px * 0.5 * 1.3);
+    /* 목록 열(`.pl` margin-top 16px)과의 간격도 동일 비율 보강 — 병합 시 max(…,16px) */
+    margin-bottom: calc(16px * 1.3);
   }
 
   .proj-import-err {
@@ -4764,8 +4862,8 @@
     z-index: 0;
     background: #fff;
     border: none;
-    border-radius: 12px;
-    width: 226px;
+    border-radius: calc(12px * 1.3);
+    width: 294px;
     box-sizing: border-box;
     padding: 15px 13px 17px;
     cursor: pointer;
@@ -4823,7 +4921,7 @@
     white-space: nowrap;
   }
   :global(.nd.rnd) {
-    width: 202px;
+    width: 263px;
   }
   :global(.ndt) {
     display: flex;
@@ -5507,6 +5605,54 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
+  }
+
+  .cw-bne-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .cw-bne-hint {
+    font-size: 13px;
+    font-weight: 600;
+    color: #631eed;
+    line-height: 1.2;
+    white-space: nowrap;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: none;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .cw-bne-wrap:hover .cw-bne-hint,
+    .cw-bne-wrap:focus-within .cw-bne-hint {
+      opacity: 1;
+      visibility: visible;
+    }
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    .cw-bne-hint {
+      opacity: 1;
+      visibility: visible;
+    }
+  }
+
+  #BNE.cw-bne-new-project {
+    width: 45px;
+    height: 45px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
   }
 
   #V-PRD {
