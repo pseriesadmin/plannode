@@ -152,6 +152,8 @@ function pipelineLabelForNodeSnapshotReason(reason: NodeSnapshotReason): string 
       return '프로젝트 전환 직전';
     case 'idle_10min':
       return '10분 무편집';
+    case 'cloud_upload':
+      return '클라우드 업로드';
     case 'cloud_history':
       return '클라우드(병합 기록)';
     default:
@@ -951,6 +953,8 @@ export function removeDeletedProjectsFromLocalCache(deletedIds: string[]): void 
  * - 버전 LWW: 같은 버전이면 최신 `at` 우선
  * - 중복 제거: 동일 (projectId, reason, at, version) 조합은 1번만
  * - 최신순 정렬 후 저장
+ *
+ * **축 분리:** `plannode_project_workspace_history`(서버 append·ACL)와 무관 — 모달은 `+page.svelte` `mergeModalSnapshotRows`에서 병합.
  */
 function mergeHistoryEntriesFromCloudRemote(remoteEntries: HistoryEntry[]): void {
   if (typeof window === 'undefined' || !Array.isArray(remoteEntries)) return;
@@ -1148,6 +1152,14 @@ export function dedupeProjectsStoreByLatestUpdatedAt(): void {
   }
 }
 
+/**
+ * 내 워크스페이스 업로드 번들 조립 — `projects` + `nodes_by_project` + **`historyEntries`**.
+ *
+ * **히스토리 이중 축 (NOW-HIST-APP-07 · 서버 중심 로드맵):**
+ * - **`historyEntries` (본 함수):** `plannode_workspace` JSON에 실리는 **전 프로젝트 합산 최대 50건** — 로컬 링 스냅을 모아 전역 최신순으로 자름. 번들 크기·오프라인·LWW 풀과 정합.
+ * - **`plannode_project_workspace_history`:** 별도 테이블 · ACL 공유 타임라인 · `uploadWorkspaceToCloud` 성공 후 디바운스 append (`projectWorkspaceHistory.ts`). 히스토리 모달은 `mergeModalSnapshotRows`에서 링·병합 버퍼·번들·서버 행을 합침.
+ * **클라우드(서버) 단일 소스에 가깝게 이행**할 때는 본 상한·수집을 GATE·TASK로 단계 축소·중복 제거할 것 — 번들 `historyEntries`만 임의 제거하면 업로드·풀·공유 기대와 충돌할 수 있음.
+ */
 export function gatherWorkspaceBundle(): WorkspaceBundle {
   if (typeof window === 'undefined') {
     return { projects: get(projects), nodesByProject: {} };
@@ -1489,6 +1501,8 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
  * - append-only 원칙: 기존 히스토리 덮어쓰기 금지, 신규 항목만 추가
  * - 중복 제거: 같은 `at`, `reason`, `project_id` 조합은 1번만
  * - 최종 정렬: 최신순
+ *
+ * **번들 `historyEntries`만** 병합한다. 서버 `plannode_project_workspace_history`는 별도(`fetchProjectWorkspaceHistorySnapshots`).
  */
 export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): number {
   if (typeof window === 'undefined') return 0;

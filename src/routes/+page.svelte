@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { get } from 'svelte/store';
+  import { get, writable } from 'svelte/store';
   import {
     projects,
     currentProject,
@@ -44,6 +44,12 @@
     summarizeNodeDiff,
     type StoredNodeSnapshot
   } from '$lib/stores/nodeSnapshotHistory';
+  import {
+    appendProjectWorkspaceHistoryFromSnapshot,
+    fetchProjectWorkspaceHistorySnapshots,
+    subscribeProjectWorkspaceHistoryRealtime,
+    projectWorkspaceHistoryRealtimeTick
+  } from '$lib/supabase/projectWorkspaceHistory';
   import {
     parsePlannodeTreeV1ImportText,
     type ParsePlannodeTreeV1Result,
@@ -200,6 +206,24 @@
   /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
   let showSnapshotHistoryModal = false;
   let snapshotListVersion = 0;
+  /** NOW-HIST-APP-05: `plannode_project_workspace_history` Realtime 구독 해제 */
+  let pwhRealtimeUnsub: (() => void) | null = null;
+  let pwhRealtimeBoundPid: string | null = null;
+  /** NOW-HIST-APP: `plannode_project_workspace_history` 조회 결과(현재 모달·프로젝트 기준) */
+  let serverPwhSnapshots: StoredNodeSnapshot[] = [];
+  let serverPwhProjectId: string | null = null;
+  let lastServerPwhModalFetchKey: string | null = null;
+
+  async function refreshServerWorkspaceHistorySnapshots(projectId: string) {
+    if (!isSupabaseCloudConfigured()) {
+      serverPwhSnapshots = [];
+      serverPwhProjectId = null;
+      return;
+    }
+    const rows = await fetchProjectWorkspaceHistorySnapshots(projectId);
+    serverPwhSnapshots = rows;
+    serverPwhProjectId = projectId;
+  }
 
   /** M2-UPDATE-CHANGELOG: Plannode 릴리스 노트 모달 */
   let showPlannodeUpdateModal = false;
@@ -221,10 +245,12 @@
     updateLogOpenId = updateLogOpenId === id ? null : id;
   }
 
-  /** 로컬 링(`listNodeSnapshots`) + `plannode_merged_history_entries_v1` 병합 — id 중복 시 더 최신 `at` 유지(C2). */
+  /** 로컬 링(`listNodeSnapshots`) + `plannode_merged_history_entries_v1` + 서버 `plannode_project_workspace_history` 병합 — id 중복 시 더 최신 `at` 유지(C2). */
   function mergeModalSnapshotRows(projectId: string): StoredNodeSnapshot[] {
     const local = [...listNodeSnapshots(projectId)].reverse();
     const remote = listMergedHistorySnapshotsForProject(projectId);
+    const server =
+      serverPwhProjectId === projectId ? serverPwhSnapshots : [];
     const byId = new Map<string, StoredNodeSnapshot>();
     for (const s of remote) {
       byId.set(s.id, s);
@@ -235,15 +261,64 @@
         byId.set(s.id, s);
       }
     }
+    for (const s of server) {
+      const prev = byId.get(s.id);
+      if (!prev || new Date(s.at).getTime() >= new Date(prev.at).getTime()) {
+        byId.set(s.id, s);
+      }
+    }
     return Array.from(byId.values()).sort(
       (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()
     );
   }
 
+  $: snapshotHistoryModalOpenForPwh.set(showSnapshotHistoryModal);
+
+  /** NOW-HIST-APP-05: 현재 프로젝트 기준 Realtime INSERT 구독 */
+  $: if (typeof window !== 'undefined' && cloudSyncAvailable && $currentProject?.id) {
+    const pid = $currentProject.id;
+    if (pid !== pwhRealtimeBoundPid) {
+      pwhRealtimeUnsub?.();
+      pwhRealtimeBoundPid = pid;
+      pwhRealtimeUnsub = subscribeProjectWorkspaceHistoryRealtime(pid);
+    }
+  } else {
+    pwhRealtimeUnsub?.();
+    pwhRealtimeUnsub = null;
+    pwhRealtimeBoundPid = null;
+  }
+
+  $: if (showSnapshotHistoryModal && $currentProject?.id) {
+    const key = `${$currentProject.id}`;
+    if (lastServerPwhModalFetchKey !== key) {
+      lastServerPwhModalFetchKey = key;
+      void refreshServerWorkspaceHistorySnapshots($currentProject.id);
+    }
+  } else if (!showSnapshotHistoryModal) {
+    lastServerPwhModalFetchKey = null;
+    serverPwhSnapshots = [];
+    serverPwhProjectId = null;
+  }
+
   $: snapshotRows = (() => {
     snapshotListVersion;
     void $nodeSnapshotCatalogRevision;
+    void serverPwhSnapshots;
+    void serverPwhProjectId;
     return $currentProject ? mergeModalSnapshotRows($currentProject.id) : [];
+  })();
+
+  /** 히스토리 모달 첫 행(최신 병합 행)과 동일한 노드 수 — `nodeCount` 없으면 `nodes.length` (표 셀과 동일 소스). */
+  $: latestHistorySnapshotNodeCountLabel = (() => {
+    if (!$currentProject) return '';
+    snapshotListVersion;
+    void $nodeSnapshotCatalogRevision;
+    const row = snapshotRows[0];
+    if (!row) return '—';
+    const n = row.nodeCount ?? row.nodes.length;
+    if (!Number.isFinite(n) || n < 0) return '—';
+    const num = n >= 1000 ? String(n) : String(n).padStart(3, '0');
+    return `${num} nodes`;
   })();
 
   /** NOW-HIST-03: 하단 `update` 라벨 — 스냅 `at`(ISO 순간)과 동일 건을 `getLatestNodeSnapshot`으로 고르고, **화면에만** `Asia/Seoul`로 포맷(`formatLatestSnapshotTime`). */
@@ -279,8 +354,9 @@
 
   function onManualNodeSnapshot() {
     if (!$currentProject) return;
+    const pid = $currentProject.id;
     const ok = captureNodeSnapshot(
-      $currentProject.id,
+      pid,
       get(nodes),
       'manual',
       buildNodeSnapshotCaptureMeta('manual', $currentProject, get(nodes))
@@ -288,6 +364,12 @@
     if (ok) {
       refreshSnapshotList();
       showPilotToast('지금 트리 상태를 히스토리에 남겼어.');
+      const latest = getLatestNodeSnapshot(pid);
+      if (latest && isSupabaseCloudConfigured()) {
+        void appendProjectWorkspaceHistoryFromSnapshot(pid, latest, 'manual').then(() => {
+          if (showSnapshotHistoryModal) void refreshServerWorkspaceHistorySnapshots(pid);
+        });
+      }
     } else {
       showPilotToast('히스토리 저장에 실패했어. 노드 수·용량을 줄이거나 잠시 후 다시 시도해줘.');
     }
@@ -307,6 +389,7 @@
     if (r === 'project_close') return '프로젝트 전환 직전';
     if (r === 'idle_10min') return '10분 무편집 저장';
     if (r === 'persist') return '캔버스 저장';
+    if (r === 'cloud_upload') return '클라우드 업로드';
     if (r === 'manual') return '수동 스냅샷';
     if (r === 'cloud_history') return '클라우드 병합 기록';
     return '수동';
@@ -508,7 +591,8 @@
 
   const cloudSyncAvailable = isSupabaseCloudConfigured();
 
-  /** 새 프로젝트 생성 시에만 캔버스에 적용할 노드맵 배치(캔버스 열린 프로젝트와 무관) */
+  /** 히스토리 Realtime·append 후 fetch — `get()`으로 모달 열림 여부 읽기 */
+  const snapshotHistoryModalOpenForPwh = writable(false);
   const LS_NODE_MAP_NEW_PROJECT = 'plannode.nodeMapLayoutNewProjectDefault';
   function readNodeMapLayoutCreateDefault(): 'right' | 'topdown' {
     if (typeof localStorage === 'undefined') return 'right';
@@ -621,6 +705,11 @@
     }
 
     if (token !== modalProjectListToken) return;
+    /** 첫 페인트 전 스피너·빈 목록: reactive가 `modalProjectListForDisplay`보다 늦게 돌면 잠깐 옛 `projectsForModal`이 보이던 문제 완화 */
+    projectModalListSyncing = true;
+    if (!modalProjectListInitialHydrated) {
+      projectsForModal = null;
+    }
     if (projectsForModalAuthUid !== uid) {
       projectsForModal = [];
       projectsForModalAuthUid = uid;
@@ -632,7 +721,6 @@
     // 동시성 문제 회피(P0): 스토어 스냅샷을 여기서 한 번만 가져온다
     const plist = get(projects);
     let mergedList: Project[];
-    projectModalListSyncing = true;
     try {
       if (cloudSyncAvailable) {
         const cloudRes = await fetchOwnWorkspaceProjectMetasForModal();
@@ -698,6 +786,13 @@
     }
   }
 
+  /** 모달 목록 동기화를 표시용 reactive보다 먼저 돌려, 오픈 직후 `projectModalListSyncing`·`projectsForModal` 초기화가 선반영되게 함 */
+  $: if ($showProjectModal) {
+    void $projects;
+    void $authUser?.id;
+    void syncProjectsForModalList();
+  }
+
   /** ACL 모드에서 `projectsForModal === null` 인 동안 `$projects` 원본을 그대로 쓰면 삭제·필터 전 목록이 통째로 노출됨 */
   $: modalProjectListForDisplay = (() => {
     void $projects;
@@ -705,6 +800,11 @@
     void invitePanelEpoch;
     void $cloudSyncBadge;
     void modalInstantHideEpoch;
+    void projectModalListSyncing;
+    void modalProjectListInitialHydrated;
+    if (isAclEnforced() && projectModalListSyncing && !modalProjectListInitialHydrated) {
+      return [];
+    }
     const tomb = getDeletedProjectTombstoneIds();
     const stripInstantHide = (arr: Project[]) =>
       arr.filter((p) => !modalInstantHideDeletedIds.has(p.id) && !tomb.has(p.id));
@@ -720,12 +820,6 @@
         !tomb.has(p.id)
     );
   })();
-
-  $: if ($showProjectModal) {
-    void $projects;
-    void $authUser?.id;
-    void syncProjectsForModalList();
-  }
 
   let autoLoadAttempted = false;
   let lastAutoLoadTime = 0;
@@ -1572,6 +1666,7 @@
     modelApiKeyDraft = '';
     projectModalListSyncing = false;
     modalProjectListInitialHydrated = false;
+    projectsForModal = null;
   }
 
   function canShowProjectDelete(proj: Project): boolean {
@@ -2028,6 +2123,22 @@
     };
     window.addEventListener('plannode-auto-cloud-sync', onExportSync);
 
+    const unsubPwhRtTick = projectWorkspaceHistoryRealtimeTick.subscribe((tick) => {
+      if (tick <= 0) return;
+      if (!get(snapshotHistoryModalOpenForPwh)) return;
+      const cp = get(currentProject);
+      if (!cp?.id) return;
+      void refreshServerWorkspaceHistorySnapshots(cp.id);
+    });
+
+    const onPwhAfterCloudAppend = (ev: Event) => {
+      const d = (ev as CustomEvent<{ projectId?: string }>).detail;
+      if (!d?.projectId || !get(snapshotHistoryModalOpenForPwh)) return;
+      if (get(currentProject)?.id !== d.projectId) return;
+      void refreshServerWorkspaceHistorySnapshots(d.projectId);
+    };
+    window.addEventListener('plannode-pwh-after-cloud-append', onPwhAfterCloudAppend);
+
     const onModalListSync = () => {
       void syncProjectsForModalList();
     };
@@ -2174,6 +2285,8 @@
       window.removeEventListener('resize', onTbResize);
       stopCloudBackgroundSync();
       window.removeEventListener('plannode-auto-cloud-sync', onExportSync);
+      unsubPwhRtTick();
+      window.removeEventListener('plannode-pwh-after-cloud-append', onPwhAfterCloudAppend);
       window.removeEventListener('plannode-modal-project-list-sync', onModalListSync);
       window.removeEventListener('plannode-presence-peers-joined', onPresencePeersJoined);
       window.removeEventListener('plannode-presence-channel-error', onPresenceChannelError);
@@ -2188,12 +2301,18 @@
       window.removeEventListener('focus', onWinFocus);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('beforeunload', onBeforeUnload);
+      pwhRealtimeUnsub?.();
+      pwhRealtimeUnsub = null;
+      pwhRealtimeBoundPid = null;
       pilotReady = false;
       destroy();
     };
   });
 
   onDestroy(() => {
+    pwhRealtimeUnsub?.();
+    pwhRealtimeUnsub = null;
+    pwhRealtimeBoundPid = null;
     clearPersistSnapshotDebounceTimers();
     disposePrdDraftTimers();
     unsubscribeProjectPresence();
@@ -2668,6 +2787,11 @@
                 <span class="cw-snapshot-update-label" title={`히스토리 최신 행과 동일 시각(한국 시각, Asia/Seoul): ${latestSnapshotUpdateLabel}`}
                   >{latestSnapshotUpdateLabel}</span
                 >
+                <span
+                  class="cw-snapshot-node-count-label"
+                  title="워크스페이스 히스토리 목록 맨 위 행과 같은 노드 수(병합·시간 정렬 기준 최신 1건)"
+                  >{latestHistorySnapshotNodeCountLabel}</span
+                >
               {/if}
               {#if cloudSyncAvailable}
                 <span
@@ -2989,7 +3113,7 @@
             <button type="button" class="mcl" on:click={() => (showSnapshotHistoryModal = false)}>✕</button>
           </div>
           <p class="snap-hist-hint">
-            로컬 링 버퍼와 클라우드 동기로 병합된 기록을 함께 보여 줘요. 클라우드·가져오기 직전에 자동으로 저장된 노드 목록이며, 한 항목을 선택해 <strong>트리 전체를 그 시점으로 복원</strong>할 수
+            <strong>이 브라우저</strong>의 로컬 링과 <strong>내 워크스페이스</strong> 클라우드 번들에서 온 기록을 합쳐 보여 줘요. 같은 프로젝트를 공유한 상대와는 <strong>목록이나 순서가 같지 않을 수 있어요</strong>(상대 기기·상대 번들에는 자동으로 붙지 않아요). 클라우드·가져오기 직전에 자동으로 저장된 노드 목록이며, 한 항목을 선택해 <strong>트리 전체를 그 시점으로 복원</strong>할 수
             있어요. 노드 데이터가 없는 행은 복원할 수 없어요. 상단 「되돌리기」(Ctrl+Z)는 <strong>현재 세션 안에서의 캔버스 편집만</strong> 되돌립니다.
           </p>
           <div class="snap-hist-actions">
@@ -5123,6 +5247,15 @@
     line-height: 1.4;
     letter-spacing: 0.02em;
   }
+  /** 히스토리 모달 최신 행 `노드 수`와 동일 값(3자리 0 패딩·1000 이상은 그대로) */
+  .cw-snapshot-node-count-label {
+    flex-shrink: 0;
+    font-size: 9px;
+    color: #8a8680;
+    white-space: nowrap;
+    line-height: 1.4;
+    letter-spacing: 0.02em;
+  }
   .cw-snapshot-hist-btn {
     flex-shrink: 0;
     font-size: 10px;
@@ -6065,6 +6198,25 @@
 
   :global(.mo.mo-wide) {
     width: min(520px, calc(100vw - 32px));
+  }
+
+  /* NOW-HIST-MODAL-UI-01: 동일 파일 내 :global(.mo.mo-wide)보다 뒤에 두어 520px 한도만 히스토리 모달에서 완화 */
+  :global(.mo.mo-wide.snap-hist-modal) {
+    width: min(920px, calc(100vw - 24px));
+    max-width: calc(100vw - 16px);
+    box-sizing: border-box;
+  }
+
+  :global(.snap-hist-table-wrapper) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  :global(.snap-hist-table) {
+    min-width: 760px;
+    width: max-content;
+    border-collapse: collapse;
   }
 
   /* 프로젝트 관리 모달: 패딩 + 헤더 고정(쉘은 flex·본문만 스크롤) */

@@ -27,6 +27,7 @@ import { isWorkspaceMissingOrCacheError, WORKSPACE_SETUP_MSG } from '$lib/supaba
 import { markCloudWorkspaceSynced, markCloudWorkspaceFailed } from '$lib/stores/workspaceDirty';
 import { getAuthEmail, getAuthUserId } from '$lib/stores/authSession';
 import { captureNodeSnapshot } from '$lib/stores/nodeSnapshotHistory';
+import { scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess } from '$lib/supabase/projectWorkspaceHistory';
 import {
   CLOUD_MERGE_SLICE_LOCK_TTL_SECONDS,
   CLOUD_MERGE_SLICE_MAX_ATTEMPTS,
@@ -460,6 +461,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
         }
         clearPendingWorkspaceDeletions();
         markCloudWorkspaceSynced();
+        scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
         return { ok: true, message: '클라우드에 올렸어 ✓' };
       }
       markCloudWorkspaceFailed();
@@ -488,6 +490,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
       if (import.meta.env.DEV) {
         console.info('[uploadWorkspaceToCloud] 서버 타임스탬프 충돌 반복 → 무조건 upsert로 마무리했어.');
       }
+      scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
       return { ok: true, message: '클라우드에 올렸어 ✓' };
     }
 
@@ -511,6 +514,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
     if (lastConflict && import.meta.env.DEV) {
       console.info('[uploadWorkspaceToCloud] 충돌 후 재병합·재시도로 저장 완료.');
     }
+    scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
     return { ok: true, message: '클라우드에 올렸어 ✓' };
   }
 

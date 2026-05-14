@@ -23,6 +23,8 @@ export type NodeSnapshotReason =
   | 'idle_10min'
   /** 파일럿→스토어 노드 영속 직후(GATE A 단일 소스·히스토리 최신 행 정합) */
   | 'persist'
+  /** `uploadWorkspaceToCloud` 성공 후 서버 히스토리 append(GATE B 2단계) */
+  | 'cloud_upload'
   /** `plannode_merged_history_entries_v1` 등에서 사유 문자열이 알려진 집합 밖일 때 */
   | 'cloud_history';
 
@@ -34,6 +36,7 @@ const KNOWN_REASONS: readonly NodeSnapshotReason[] = [
   'project_close',
   'idle_10min',
   'persist',
+  'cloud_upload',
   'cloud_history'
 ];
 
