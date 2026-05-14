@@ -19,6 +19,40 @@
 
 ## 이력
 
+[2026-05-14 KST] ✅ GATE D:👤승인 | NOW-ACL-BG-*·DEL-WS 후속 | Stephen 채팅 → `@qa` Step5
+
+[2026-05-14 KST] ✅ GATE C:👤승인 | NOW-ACL-BG-* | 프로젝트 모달 삭제·초대·ACL 토스트·재시도 | Stephen 채팅
+
+[2026-05-14 KST] ⚡ GSD | NOW-ACL-BG-02 | Vitest `projects.modalMerge.test.ts`(5) · `npm run build` ✓ | → GATE C:👤ACL-BG 스프린트 수동 권장
+
+[2026-05-14 KST] ⚡ GSD | NOW-ACL-BG-01 | `+page.svelte` `handleDeleteProjectCard` | ACL purge 토스트·2.5s 1회 재시도·성공 시 epoch 중복 제거 | → GATE C:👤ACL-BG 스프린트 수동 권장
+
+[2026-05-14 KST] ✅ GATE C:👤승인 | NOW-DEL-WS-* | 삭제·톰브스톤·원격 prune·모달 목록·낙관 삭제·캐시+새로고침 부활 0 | Stephen 채팅
+
+[2026-05-14 KST] ⚡ GSD | NOW-DEL-WS-00~05 | `projects.ts` · `sync.ts` · `+page.svelte` · `projects.modalMerge.test.ts` · `TASK.md` | 톰브스톤·원격 병합 후 prune·모달 표시 필터·Vitest 보강 | GATE C:☑
+
+[2026-05-14 KST] 🔍 QA Step5 | NOW-HIST 스프린트 | **PASS(조건부)** — `npm run build` ✓ · 규칙·보안 샘플 grep 통과 · TASK `NOW` 00~05·GATE B 표 #4~5(UTC)는 구현·plan-output(Asia/Seoul)과 불일치 → 문서 정리 **BACKLOG 권장** · 시나리오 1~4·히스토리 구간은 Stephen GATE C 완료 전제
+
+[2026-05-14 KST] ✅ GATE D:👤스프린트 전체 확인 승인 | NOW-HIST-* | Stephen 채팅 → `@qa` Step5
+
+[2026-05-14 KST] ✅ GATE C:👤수동 검증 | NOW-HIST-09 | 빌드·트리 CRUD·탭·update↔히스토리·모달·공유·PILOT §9·§10 | Stephen 채팅 검증 완료
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-06 구현 생략 확정 | `TASK.md` NOW 제거·DONE 반영 | — | Stephen 채팅 지시·번들·로컬 링 유지
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-07·NOW-HIST-08 완료 기록 | `TASK.md` DONE·NOW ☑ · 정본 `src/lib/pilot/plannodePilot.js` `render()` `.nd-child-count` 인라인 | — | Stephen 채팅 지시·하네스 문서 동기
+
+[2026-05-13 19:53 KST] ⚡ GSD | 배지 UI & CSS (`.nd-child-count` 클래스) | `src/routes/+page.svelte` | ~15분 | 빌드: ✓
+  - **구현 사항:**
+    * `.nd-child-count` CSS 클래스 추가 (‹style› 섹션 끝)
+    * 40px × 40px 원형 배지, 우상단 모서리 절반 겹침 위치
+    * 배경: #E6E4FF (밝은 보라색), 텍스트: #333 Pretendard 16px 600
+    * 이미 plannodePilot.js에서 자식 수 배지 DOM 생성 완료 (라인 2116-2123)
+    * CSS만 최종 처리해 배지 시각적 표현 완성
+  - **npm run build:** ✓ (58.31s, 빌드 성공)
+  - → **GATE C:👤수동 검증** 대기
+
+[2026-05-14 — KST] ✅ **결정 확정** | NOW-HIST-08 자식 수 배지 시각 스펙 | 정본 **`src/lib/pilot/plannodePilot.js` `render()` `.nd-child-count` 인라인**(28×28, right:-8px, top:-10px 등)으로 채택 | plan-output 초안 40px·좌표와 불일치해도 **현행 UX 정상·교체 불필요**(Stephen 채팅 확정) | `TASK.md` 아젠다·NOW-HIST-08 줄 동기
+
 [2026-05-12 ~18:10 KST] 🛑 **BACKLOG 구현 취소 확정** — TASK **NOW-RT-L3** (Edge Layer 3)·**NOW-RT-S4** (번들 역할 축소·노드 이전) **전부 구현 취소** 기록 (`TASK.md` **CANCELLED / BACKLOG 승격 없음**) · 채팅 지시(Stephen) · 재개 시 plan-output·플랜 §8 재합의
 
 [2026-05-12 ~18:00 KST] ✅ **GATE D:👤전체 구현 확인 승인** — 채팅「GATE D 승인」(Stephen) · NOW 잔여 없음·스프린트 범위 마감
@@ -532,6 +566,56 @@
 
 [2026-05-13 19:25 KST] ✅ **Toast 안내 추가 — 삭제된 프로젝트 저장 시도** | 정책 8 보강: 공유자 노드 저장 거부 시 toast로 사용자 친화 안내 | `src/lib/stores/projects.ts` (L508~514 이벤트 발행) · `src/routes/+page.svelte` (L1821~1829 리스너, L1880 cleanup) | ~10분 | **구현:** (1) `persistNodesFromPilot` pending deletion 체크 시 `plannode-deleted-project-persist-attempt` CustomEvent 발행 (2) +page.svelte onMount에서 이벤트 리스너 추가 → `showPilotToast('이 프로젝트는 삭제되었어. 작성한 내용은 저장되지 않아요.')` 호출 (3) onMount cleanup에서 리스너 제거 | **검증:** npm run build ✅ 성공 | **기능 명칭:** showPilotToast(msg) / #TST (DOM id) / plannode-deleted-project-persist-attempt (이벤트) / 2800ms (toast 지속 시간) | **영향:** 공유자가 삭제된 프로젝트 노드 저장 시 브라우저에서 즉시 안내 메시지 표시
 
+[2026-05-13 16:55 KST] ⚡ GSD | **NOW-HIST-04** 히스토리 모달 행 메타 (author·nodeCount·pipelineLabel·version) | `src/routes/+page.svelte` | ~10분 | ✅ 포맷팅 함수 `formatHistoryTimestamp()` 추가 · 테이블 마크업 변환 (리스트→테이블) · 4개 컬럼 추가 · null/undefined 처리 (`??` 연산자) · `npm run build` ✓ | **GATE C:👤승인대기**
+  - 구현: 포맷 함수는 NOW-HIST-03 `formatLatestSnapshotTime`을 재사용하는 래퍼 (동일 `YYYY.MM.DD / HH:mm` UTC 포맷)
+  - 마크업: `<ul class="snap-hist-list">` → `<table class="snap-hist-table">` (7개 헤더 + 7개 데이터 컬럼)
+  - 메타 필드: `author ?? '-'` / `nodeCount ?? '-'` / `pipelineLabel ?? '-'` / `version ?? '-'`
+  - 범위: 히스토리 모달 섹션만 수정, 전역 스타일·파일럿 DOM id 변경 없음 (GP-13 준수)
+  - PRD 연계: M3 F3-3 · M5 협업 · StoredNodeSnapshot 타입 기존 필드 활용
+
 ---
+
+**2026-05-13 19:05 — NOW-HIST-07:** 자식 수 집계 및 배지: `render()` 시작에서 `childCountByParentId` 맵 빌드 (O(n) 타입); 노드 DOM 생성 후 자식 수 > 0이면 `.nd-child-count` div 생성·삽입. 배지는 `.nw` 내부, 텍스트는 숫자만. CSS는 NOW-HIST-08에서 정의. 기존 `.nw`, `#V-TREE`, `#CV`, `#EG`, `drawEdges`/`updMM` 타이밍 무손상 (GP-13 준수). 빌드 성공 (0 TS errors).
+
+---
+
+**2026-05-13 21:00 KST — 코드 리뷰 완료: GATE A 수정 사항 3개 항목 검증 ✅**
+
+| # | 검증 항목 | 상태 | 근거 |
+|----|----------|------|------|
+| 1 | `update` 라벨 단일 소스 정합 | ✅ PASS | `listNodeSnapshots()[0].at`에서만 파생, 별도 타이머 없음 |
+| 2 | 하단 라벨 ↔ 히스토리 시각 정합 | ✅ PASS | 동일 `formatLatestSnapshotTime()` 함수, UTC 일관성 |
+| 3 | 배지 시각적 배치 정상 | ✅ CONFIRMED | 현재 구현(28px, -8px, -10px) 시각적·기능적 정상 확정 |
+
+**문서:**
+- 📄 `code-review-GATE-A-amendment-2026-05-13.md` 작성 (상세 리뷰 기록)
+- 📄 플랜 파일 (`plannode_히스토리_강화_하네스_f7af5122.plan.md`) 갱신:
+  * GATE A 수정 반영 검증 표 추가
+  * NOW-HIST-08 배지 스펙 현재 구현 정상 확정 기록
+  * 완성도 섹션 갱신 (8개 NOW 완료, GATE A 3개 항목 모두 검증 완료)
+
+**다음 단계:**
+- ⏳ append-only merge 검증 → 다음 요청에서 `sync.ts` 코드 리뷰 (STEP 2 추가 검증 예정)
+- 🎯 NOW-HIST-09 (GATE C 회귀 검증) 진행 준비 완료
+
+---
+
+[2026-05-14 01:44 KST] 🔍 **GATE C 회귀 검증 시작** | NOW-HIST-01~08 (8개 태스크) | TASK.md 체크리스트 기준 | — | **코드 검증 완료 ✅ · 수동 검증 ⏳**
+  - **빌드 상태:** npm run build ✅ 성공 (0 TS errors, 19.02초)
+  - **코드 검증:** ✅ 완료
+    * ✅ `update` 라벨 단일 소스 정합 (GATE A 1/3)
+    * ✅ 하단 라벨 ↔ 히스토리 시각 정합 (GATE A 2/3)
+    * ✅ 배지 시각적 배치 정상 (GATE A 3/3)
+    * ✅ append-only merge 정책 정합 (추가 검증)
+  - **수동 검증 대기 항목:**
+    * ⏳ 트리 CRUD (노드 추가/삭제/이동) 정상 (localhost 테스트)
+    * ⏳ 탭 전환 (Tree/PRD/Spec) 정상
+    * ⏳ 캔버스 줌/팬/미니맵 정상
+    * ⏳ 히스토리 기능 (project_close, idle_10min, update 라벨, 모달 메타)
+    * ⏳ 배지 UI (크기, 위치, 색상, 레벨 번호, 클릭 통과)
+    * ⏳ 공유 프로젝트 (히스토리, 배지, 클라우드 sync)
+    * ⏳ 파일럿 갭 검증 (DOM 계약, drawEdges/updMM, 루트 노드, 트리↔탭 동기)
+  - **검증 기록:** `GATE-C-回帰-check-2026-05-14.md` 작성 (상세 체크리스트 및 진행 상태)
+  - **다음:** 👤 Stephen localhost 수동 검증 → GATE D 승인 → @qa STEP5
 
 *GSD_LOG.md | Plannode | Harness Flow v1.0*
