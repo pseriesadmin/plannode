@@ -54,8 +54,220 @@ const NORMALIZED_NODE_TYPES = new Set([
   'spec',
   'constraint',
   'decision',
-  'risk'
+  'risk',
+  /** 루트 `global_*` 등 외부 키를 잃지 않도록 이식하는 합성 노드(plan-output 방안 01) */
+  'global'
 ]);
+
+/** 루트에만 오는 키 → 합성 노드(부모는 `node_type === 'root'` 노드 id, 없으면 `project.id + '-r'` 폴백). `buildPlannodeExportV1` 재호이스트와 짝. */
+const PLANNODE_GLOBAL_ROOT_MIRROR_SPECS: { rootKey: string; nodeId: string; displayName: string }[] = [
+  { rootKey: 'global_schema', nodeId: '__global_schema__', displayName: '🗄 전역 DB 스키마 규칙' },
+  { rootKey: 'global_api', nodeId: '__global_api__', displayName: '🌐 전역 API 규격' },
+  { rootKey: 'global_module', nodeId: '__global_module__', displayName: '⚙ 전역 모듈 구조' },
+  { rootKey: 'tech_stack', nodeId: '__global_tech_stack__', displayName: '🔧 tech_stack' },
+  { rootKey: 'schema_notes', nodeId: '__global_schema_notes__', displayName: '📝 schema_notes' },
+  { rootKey: '_import_lock', nodeId: '__global_import_lock__', displayName: '🔒 _import_lock' }
+];
+
+/** 미등록 최상위 루트 키 집계 미러 노드 id — `buildPlannodeExportV1` / `rehoistGlobalMirrorNodes`와 짝(NOW-TREE-JSON-09). */
+export const PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID = '__global_unknown_roots__';
+
+/** `project` 비표준 필드 보존 미러 노드 id */
+export const PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID = '__global_project_extras__';
+
+/** `parsePlannodeTreeV1Json`이 소비하는 루트 키 외는 성공 시 `unknownRootKeys`로 전달(NOW-TREE-JSON-05). 집계 미러 id는 JSON 루트에 오지 않아도 “알려진 키”로 넣어 중복 토스트를 막는다. */
+const PLANNODETREE_V1_KNOWN_ROOT_KEYS = new Set<string>([
+  'format',
+  'version',
+  'project',
+  'nodes',
+  'exportedAt',
+  ...PLANNODE_GLOBAL_ROOT_MIRROR_SPECS.map((s) => s.rootKey),
+  PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID,
+  PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID
+]);
+
+/** `parsePlannodeTreeV1Json`이 `Project`에 직접 매핑하는 필드 외는 `__global_project_extras__`로 이전(NOW-TREE-JSON-09). */
+const KNOWN_PROJECT_FIELDS = new Set([
+  'id',
+  'name',
+  'author',
+  'start_date',
+  'end_date',
+  'description',
+  'owner_user_id',
+  'cloud_workspace_source_user_id',
+  'plan_project_id',
+  'prd_section_drafts',
+  'created_at',
+  'updated_at'
+]);
+
+function collectUnknownPlannodeTreeRootKeys(o: Record<string, unknown>): string[] {
+  return Object.keys(o)
+    .filter((k) => !PLANNODETREE_V1_KNOWN_ROOT_KEYS.has(k))
+    .sort();
+}
+
+function cloneJsonForMetadata(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * JSON 루트에만 있던 키를 노드로 승격(import 시 DROP 방지).
+ * 이미 동일 id 노드가 있으면 스킵(수동·재보내기 호환).
+ * @returns 집계 미러(`__unknown_roots__`)에 넣은 루트 키 — `unknownRootKeys` 토스트에서 제외
+ */
+function appendMirroredGlobalRootNodes(
+  root: Record<string, unknown>,
+  projectId: string,
+  rows: RawNodeRow[]
+): Set<string> {
+  const packedUnknownRootKeys = new Set<string>();
+  const idSet = new Set<string>();
+  for (const row of rows) {
+    const id = String(row?.id ?? '').trim();
+    if (id) idSet.add(id);
+  }
+  const rootRow = rows.find((r) => String(r?.node_type ?? '').trim() === 'root');
+  const rootNodeId = rootRow
+    ? String(rootRow.id ?? '').trim()
+    : `${projectId}-r`;
+  if (!rootNodeId || !idSet.has(rootNodeId)) return packedUnknownRootKeys;
+
+  const specKeys = new Set(PLANNODE_GLOBAL_ROOT_MIRROR_SPECS.map((s) => s.rootKey));
+
+  for (const spec of PLANNODE_GLOBAL_ROOT_MIRROR_SPECS) {
+    if (!Object.prototype.hasOwnProperty.call(root, spec.rootKey)) continue;
+    const rawVal = root[spec.rootKey];
+    if (rawVal === undefined) continue;
+    if (idSet.has(spec.nodeId)) continue;
+    idSet.add(spec.nodeId);
+    rows.push({
+      id: spec.nodeId,
+      parent_id: rootNodeId,
+      name: spec.displayName,
+      description: '',
+      num: 'GLOBAL',
+      badges: [],
+      node_type: 'global',
+      metadata: {
+        plannodeGlobalRootKey: spec.rootKey,
+        plannodeGlobalPayload: cloneJsonForMetadata(rawVal)
+      } as NodeMetadata
+    });
+  }
+
+  const knownAtRoot = new Set<string>([
+    'format',
+    'version',
+    'project',
+    'nodes',
+    'exportedAt',
+    ...specKeys
+  ]);
+
+  const unknownRootEntries: Record<string, unknown> = {};
+  for (const key of Object.keys(root)) {
+    if (!knownAtRoot.has(key)) {
+      unknownRootEntries[key] = cloneJsonForMetadata(root[key]);
+      packedUnknownRootKeys.add(key);
+    }
+  }
+
+  if (
+    Object.keys(unknownRootEntries).length > 0 &&
+    !idSet.has(PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID)
+  ) {
+    idSet.add(PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID);
+    rows.push({
+      id: PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID,
+      parent_id: rootNodeId,
+      name: '📦 기타 최상위 확장 키 (자동 집계)',
+      description: `미등록 최상위 키 ${Object.keys(unknownRootEntries).length}개: ${Object.keys(unknownRootEntries).join(', ')}`,
+      num: 'GLOBAL',
+      badges: [],
+      node_type: 'global',
+      metadata: {
+        plannodeGlobalRootKey: '__unknown_roots__',
+        plannodeGlobalPayload: unknownRootEntries
+      } as NodeMetadata
+    });
+  }
+
+  return packedUnknownRootKeys;
+}
+
+function extractProjectExtras(pr: Record<string, unknown>): Record<string, unknown> | null {
+  const extras: Record<string, unknown> = {};
+  for (const key of Object.keys(pr)) {
+    if (!KNOWN_PROJECT_FIELDS.has(key)) {
+      extras[key] = cloneJsonForMetadata(pr[key]);
+    }
+  }
+  return Object.keys(extras).length > 0 ? extras : null;
+}
+
+/**
+ * 파일럿 `nodes`의 합성 `global` 미러를 export JSON 루트·`project`에 역호이스트(NOW-TREE-JSON-03·09).
+ */
+export function rehoistGlobalMirrorNodes(
+  nodes: { node_type?: string; metadata?: Record<string, unknown> }[],
+  output: Record<string, unknown>,
+  outputProject: Record<string, unknown>
+): void {
+  for (const node of nodes) {
+    if (node.node_type !== 'global') continue;
+    const meta = node.metadata;
+    if (!meta || typeof meta !== 'object') continue;
+    const rootKey = meta['plannodeGlobalRootKey'];
+    const payload = meta['plannodeGlobalPayload'];
+    if (typeof rootKey !== 'string' || payload === undefined) continue;
+
+    if (rootKey === '__unknown_roots__') {
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+          try {
+            output[k] = JSON.parse(JSON.stringify(v)) as unknown;
+          } catch {
+            output[k] = v;
+          }
+        }
+      }
+    } else if (rootKey === '__project_extras__') {
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+          try {
+            outputProject[k] = JSON.parse(JSON.stringify(v)) as unknown;
+          } catch {
+            outputProject[k] = v;
+          }
+        }
+      }
+    } else {
+      try {
+        output[rootKey] = JSON.parse(JSON.stringify(payload)) as unknown;
+      } catch {
+        output[rootKey] = payload;
+      }
+    }
+  }
+}
+
+/** JSON 루트 `global_*` 등 미러 노드 — 파일럿 편집·삭제·부모변경 가드(NOW-TREE-JSON-04) */
+export function isPlannodeJsonGlobalMirrorNode(
+  n: Pick<Node, 'node_type' | 'metadata'> | null | undefined
+): boolean {
+  if (!n || n.node_type !== 'global') return false;
+  const m = n.metadata;
+  if (!m || typeof m !== 'object') return false;
+  const key = (m as { plannodeGlobalRootKey?: unknown }).plannodeGlobalRootKey;
+  return typeof key === 'string' && key.length > 0;
+}
 
 function parseFileVersion(o: Record<string, unknown>): ParsePlannodeTreeV1Result | PlannodeTreeFileVersion {
   const verRaw = o.version;
@@ -103,7 +315,7 @@ function computeDepth(
 }
 
 export type ParsePlannodeTreeV1Result =
-  | { ok: true; project: Project; nodes: Node[] }
+  | { ok: true; project: Project; nodes: Node[]; unknownRootKeys?: string[] }
   | { ok: false; message: string };
 
 /**
@@ -207,10 +419,41 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
     return { ok: false, message: 'nodes가 배열이 아니야.' };
   }
 
+  const sourceRows: RawNodeRow[] = [...(o.nodes as RawNodeRow[])];
+  const packedUnknownRootKeys = appendMirroredGlobalRootNodes(o, pid, sourceRows);
+
+  const extras = extractProjectExtras(pr);
+  if (extras) {
+    const idSetForExtras = new Set(sourceRows.map((r) => String(r?.id ?? '').trim()).filter(Boolean));
+    const rootRowForExtras = sourceRows.find((r) => String(r?.node_type ?? '').trim() === 'root');
+    const rootNodeIdForExtras = rootRowForExtras
+      ? String(rootRowForExtras.id ?? '').trim()
+      : `${pid}-r`;
+    if (
+      rootNodeIdForExtras &&
+      idSetForExtras.has(rootNodeIdForExtras) &&
+      !idSetForExtras.has(PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID)
+    ) {
+      sourceRows.push({
+        id: PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID,
+        parent_id: rootNodeIdForExtras,
+        name: '🗂 project 확장 필드 (자동 보존)',
+        description: `비표준 project 필드 ${Object.keys(extras).length}개: ${Object.keys(extras).join(', ')}`,
+        num: 'GLOBAL',
+        badges: [],
+        node_type: 'global',
+        metadata: {
+          plannodeGlobalRootKey: '__project_extras__',
+          plannodeGlobalPayload: extras
+        } as NodeMetadata
+      });
+    }
+  }
+
   const idSet = new Set<string>();
   const flatForDepth: { id: string; parent_id?: string | null }[] = [];
 
-  for (const row of o.nodes as RawNodeRow[]) {
+  for (const row of sourceRows) {
     const id = String(row?.id ?? '').trim();
     if (!id) return { ok: false, message: '노드에 빈 id가 있어.' };
     if (idSet.has(id)) return { ok: false, message: `중복 노드 id: ${id}` };
@@ -227,7 +470,7 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
     }
   }
 
-  const nodes: Node[] = (o.nodes as RawNodeRow[]).map((row) => {
+  const nodes: Node[] = sourceRows.map((row) => {
     const id = String(row?.id ?? '').trim();
     const p = row.parent_id;
     const parentRaw =
@@ -275,5 +518,13 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
     return applySanitizeImportedPlannodeNodeV1(built);
   });
 
-  return { ok: true, project, nodes };
+  const unknownRootKeys = collectUnknownPlannodeTreeRootKeys(o).filter(
+    (k) => !packedUnknownRootKeys.has(k)
+  );
+  return {
+    ok: true,
+    project,
+    nodes,
+    ...(unknownRootKeys.length ? { unknownRootKeys } : {})
+  };
 }

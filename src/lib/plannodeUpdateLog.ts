@@ -14,6 +14,13 @@ export type PlannodeUpdateLogEntry = {
 
 export const PLANNODE_UPDATE_LOG: PlannodeUpdateLogEntry[] = [
   {
+    id: 'history-modal-save-merge-2026-05-14',
+    at: '2026-05-14',
+    title: '노드 히스토리(스냅샷) 목록이 쌓이는 방식',
+    body:
+      '「히스토리」 모달에는 이 브라우저에서 잡아 둔 최근 기록과, 클라우드에 로그인해 동기할 때 따라온 기록이 합쳐져 보여요. 프로젝트마다 최근 몇 건만 남기고 오래된 건은 자연히 밀려나며, 동기에 실리는 건도 전체 한도 안에서만 오갑니다.\n\n공유로 같이 보고 있는 프로젝트라도, 상대 계정이 남긴 히스토리까지 한 목록으로 붙어 보이지는 않아요(각자 PC·계정 기준). 시간 표시는 한국 시간 기준이에요.'
+  },
+  {
     id: 'collab-share-limit-presence-peers-2026-05-07',
     at: '2026-05-07',
     title: '공유 멤버 상한(소유자 포함 5계정)·Presence 아바타·ACL 동기',
