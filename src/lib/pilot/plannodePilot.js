@@ -20,7 +20,11 @@ import { buildTreeText } from '$lib/ai/contextSerializer';
 import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
-import { PLANNODETREE_EXPORT_ROOT_VERSION } from '$lib/plannodeTreeV1';
+import {
+  PLANNODETREE_EXPORT_ROOT_VERSION,
+  isPlannodeJsonGlobalMirrorNode,
+  rehoistGlobalMirrorNodes
+} from '$lib/plannodeTreeV1';
 import { slugExportName } from '$lib/ai/iaGridCsvExport';
 import {
   unionNodeBoundsAndViewport,
@@ -576,6 +580,7 @@ function canDropOnParent(newParentId) {
   if (!relinkArm || !newParentId) return false;
   const parentNode = find(newParentId);
   if (!parentNode) return false;
+  if (isPlannodeJsonGlobalMirrorNode(parentNode)) return false;
   if (relinkArm.mode === 'single') {
     const nid = relinkArm.nodeIds[0];
     if (!nid || nid === newParentId) return false;
@@ -837,6 +842,10 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
 }
 
 function armRelinkCard(n) {
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    toast('가져온 JSON 전역 노드는 여기서 부모를 바꿀 수 없어.');
+    return;
+  }
   clearRelinkArm();
   clearRelinkHold();
   relinkArm = { mode: 'single', nodeIds: [n.id] };
@@ -855,6 +864,10 @@ function armRelinkCard(n) {
 function armRelinkChildrenGroup(anchorId) {
   const root = find(anchorId);
   if (!root) return;
+  if (isPlannodeJsonGlobalMirrorNode(root)) {
+    toast('가져온 JSON 전역 노드 아래에서는 이 동작을 쓸 수 없어.');
+    return;
+  }
   const kids = nodes.filter((x) => x.parent_id === anchorId);
   if (!kids.length) {
     toast('옮길 직속 하위 노드가 없어');
@@ -872,6 +885,23 @@ function armRelinkChildrenGroup(anchorId) {
 
 function applyRelinkDrop(newParentId) {
   if (!relinkArm) return;
+  if (relinkArm.mode === 'single') {
+    const moving0 = find(relinkArm.nodeIds[0]);
+    if (isPlannodeJsonGlobalMirrorNode(moving0)) {
+      toast('가져온 JSON 전역 노드는 이동할 수 없어.');
+      clearRelinkArm();
+      render();
+      return;
+    }
+  } else {
+    const kids0 = nodes.filter((x) => x.parent_id === relinkArm.anchorId);
+    if (kids0.some((k) => isPlannodeJsonGlobalMirrorNode(k))) {
+      toast('선택한 하위에 JSON 전역 노드가 있어서 묶어 옮길 수 없어.');
+      clearRelinkArm();
+      render();
+      return;
+    }
+  }
   if (!canDropOnParent(newParentId)) {
     toast('여기엔 붙일 수 없어');
     clearRelinkArm();
@@ -1653,35 +1683,56 @@ function buildPlannodeExportV1() {
         start_date: curP.start_date,
         end_date: curP.end_date,
         description: curP.description || '',
-        ...(curP.owner_user_id ? { owner_user_id: curP.owner_user_id } : {})
+        created_at: curP.created_at,
+        updated_at: curP.updated_at,
+        ...(curP.owner_user_id ? { owner_user_id: curP.owner_user_id } : {}),
+        ...(curP.prd_section_drafts
+          ? { prd_section_drafts: JSON.parse(JSON.stringify(curP.prd_section_drafts)) }
+          : {})
       }
     : null;
-  const nodeRows = nodes.map((n) => {
+  const nodeRows = [];
+  for (const n of nodes) {
+    const meta = n.metadata;
+    const isGlobalMirror =
+      n.node_type === 'global' &&
+      meta &&
+      typeof meta === 'object' &&
+      Object.prototype.hasOwnProperty.call(meta, 'plannodeGlobalRootKey');
+    if (isGlobalMirror) {
+      continue;
+    }
     const s = sanitizeNodeBadgesForTreeV1(n);
-    const meta =
+    const metaOut =
       s.metadata && Object.keys(s.metadata).length > 0
         ? JSON.parse(JSON.stringify(s.metadata))
         : undefined;
-    return {
+    nodeRows.push({
       id: n.id,
       parent_id: n.parent_id ?? null,
       name: n.name,
       description: n.description ?? '',
       num: n.num ?? '',
       badges: s.badges,
-      ...(meta ? { metadata: meta } : {}),
+      ...(metaOut ? { metadata: metaOut } : {}),
       node_type: n.node_type || 'detail',
       mx: n.mx == null ? null : n.mx,
       my: n.my == null ? null : n.my
-    };
-  });
-  return {
+    });
+  }
+  const out = {
     format: 'plannode.tree',
     version: PLANNODETREE_EXPORT_ROOT_VERSION,
     exportedAt,
     project,
     nodes: nodeRows
   };
+  rehoistGlobalMirrorNodes(
+    nodes,
+    out,
+    project && typeof project === 'object' ? /** @type {Record<string, unknown>} */ (out.project) : {}
+  );
+  return out;
 }
 
 function downloadPlannodeJson() {
@@ -2009,10 +2060,17 @@ function render() {
       (selId === n.id ? ' sel' : '') +
       (multiSel.has(n.id) ? ' msel' : '') +
       (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '') +
-      (presenceConflict ? ' nd--conflict' : '');
+      (presenceConflict ? ' nd--conflict' : '') +
+      (isPlannodeJsonGlobalMirrorNode(n) ? ' nd--json-global-mirror' : '');
     nd.id = 'nd-' + n.id;
     if (presenceConflict) {
       nd.style.boxShadow = '0 0 0 2px rgba(239, 68, 68, 0.88)';
+    } else if (isPlannodeJsonGlobalMirrorNode(n)) {
+      nd.title =
+        'JSON 루트 전역 스냅샷 — 이름·배지·삭제·이동은 JSON 가져오기·보내기로 맞춰줘.';
+      nd.style.boxSizing = 'border-box';
+      nd.style.border = '1px dashed rgba(100,116,139,0.55)';
+      nd.style.background = 'rgba(248,250,252,0.6)';
     }
     // 설명(description)이 없으면 name만으로 추론하지 않음 — user/AI학습 규칙 오추론 차단
     const _descEmpty = !String(n.description ?? '').trim();
@@ -2094,10 +2152,10 @@ function render() {
     // 노드 제목: 짧은 탭 → 편집 모달은 pointerup(startRelinkHoldOrDeferDrag)에서만 연동 — click은 DOM 치환·합성 누락에 취약
     const titleEl = nd.querySelector('.nn-line');
     if (titleEl) {
-      titleEl.style.cursor = 'pointer';
+      titleEl.style.cursor = isPlannodeJsonGlobalMirrorNode(n) ? 'default' : 'pointer';
     }
     const na = nd.querySelector('#na-' + n.id);
-    if (n.parent_id) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
+    if (n.parent_id && !isPlannodeJsonGlobalMirrorNode(n)) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
     nd.style.position = 'relative';
     for (let ai = 0; ai < peersPresence.length; ai++) {
       const pr = peersPresence[ai];
@@ -2172,68 +2230,70 @@ function render() {
       cb.addEventListener('pointerdown', (e) => e.stopPropagation());
       w.appendChild(cb);
     }
-    const pb = document.createElement('button');
-    pb.type = 'button';
-    pb.className = 'pb2' + (relinkArm && !relinkDragActive ? ' pb2-drop' : '');
-    pb.textContent = '+';
-    pb.setAttribute('data-relink-parent-id', n.id);
-    pb.title =
-      '짧게 누름: 하위 노드 추가 · 1.5초 누름: 직속 하위만 새 상위로(이 노드는 그대로) — 끌어서 다른 노드의 + 근처에서 놓기';
-    pb.setAttribute('aria-label', '노드 추가 또는 하위만 상위 바꾸기');
-    pb.setAttribute(
-      'style',
-      nodeMapLayoutMode === 'topdown'
-        ? `position:absolute;left:50%;bottom:-22px;top:auto;right:auto;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
-        : `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
-    );
-    pb.addEventListener('pointerdown', (e) => {
-      e.stopPropagation();
-      if (relinkDragActive) return;
-      if (relinkArm) return;
-      clearTimeout(plusHoldTimer);
-      plusHoldTimer = null;
-      plusDownTs = Date.now();
-      plusLongFired = false;
-      plusDownPointerId = e.pointerId;
-      plusHoldAnchorId = n.id;
-      lastPlusPt = { x: e.clientX, y: e.clientY };
-      plusHoldTimer = setTimeout(() => {
+    if (!isPlannodeJsonGlobalMirrorNode(n)) {
+      const pb = document.createElement('button');
+      pb.type = 'button';
+      pb.className = 'pb2' + (relinkArm && !relinkDragActive ? ' pb2-drop' : '');
+      pb.textContent = '+';
+      pb.setAttribute('data-relink-parent-id', n.id);
+      pb.title =
+        '짧게 누름: 하위 노드 추가 · 1.5초 누름: 직속 하위만 새 상위로(이 노드는 그대로) — 끌어서 다른 노드의 + 근처에서 놓기';
+      pb.setAttribute('aria-label', '노드 추가 또는 하위만 상위 바꾸기');
+      pb.setAttribute(
+        'style',
+        nodeMapLayoutMode === 'topdown'
+          ? `position:absolute;left:50%;bottom:-22px;top:auto;right:auto;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+          : `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+      );
+      pb.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        if (relinkDragActive) return;
+        if (relinkArm) return;
+        clearTimeout(plusHoldTimer);
         plusHoldTimer = null;
-        plusLongFired = true;
-        armRelinkChildrenGroup(n.id);
-        queueMicrotask(() =>
-          beginRelinkDragSession(plusDownPointerId, lastPlusPt.x, lastPlusPt.y)
-        );
-      }, RELINK_HOLD_MS);
-    });
-    pb.addEventListener('pointermove', (e) => {
-      if (e.pointerId === plusDownPointerId && (e.buttons & 1)) {
+        plusDownTs = Date.now();
+        plusLongFired = false;
+        plusDownPointerId = e.pointerId;
+        plusHoldAnchorId = n.id;
         lastPlusPt = { x: e.clientX, y: e.clientY };
-      }
-    });
-    pb.addEventListener('pointerup', (e) => {
-      e.stopPropagation();
-      clearTimeout(plusHoldTimer);
-      plusHoldTimer = null;
-      if (relinkDragActive) {
+        plusHoldTimer = setTimeout(() => {
+          plusHoldTimer = null;
+          plusLongFired = true;
+          armRelinkChildrenGroup(n.id);
+          queueMicrotask(() =>
+            beginRelinkDragSession(plusDownPointerId, lastPlusPt.x, lastPlusPt.y)
+          );
+        }, RELINK_HOLD_MS);
+      });
+      pb.addEventListener('pointermove', (e) => {
+        if (e.pointerId === plusDownPointerId && (e.buttons & 1)) {
+          lastPlusPt = { x: e.clientX, y: e.clientY };
+        }
+      });
+      pb.addEventListener('pointerup', (e) => {
+        e.stopPropagation();
+        clearTimeout(plusHoldTimer);
+        plusHoldTimer = null;
+        if (relinkDragActive) {
+          plusDownPointerId = null;
+          return;
+        }
+        if (!plusLongFired && Date.now() - plusDownTs < RELINK_HOLD_MS + 80) {
+          addChild(n.id);
+        }
+        plusLongFired = false;
         plusDownPointerId = null;
-        return;
-      }
-      if (!plusLongFired && Date.now() - plusDownTs < RELINK_HOLD_MS + 80) {
-        addChild(n.id);
-      }
-      plusLongFired = false;
-      plusDownPointerId = null;
-    });
-    pb.addEventListener('pointercancel', () => {
-      clearTimeout(plusHoldTimer);
-      plusHoldTimer = null;
-      plusLongFired = false;
-      plusDownPointerId = null;
-    });
-    pb.onmouseenter = () => (pb.style.opacity = '.8');
-    pb.onmouseleave = () => (pb.style.opacity = '1');
-    w.appendChild(pb);
+      });
+      pb.addEventListener('pointercancel', () => {
+        clearTimeout(plusHoldTimer);
+        plusHoldTimer = null;
+        plusLongFired = false;
+        plusDownPointerId = null;
+      });
+      pb.onmouseenter = () => (pb.style.opacity = '.8');
+      pb.onmouseleave = () => (pb.style.opacity = '1');
+      w.appendChild(pb);
+    }
     CV.appendChild(w);
   });
   drawEdges();
@@ -2336,10 +2396,14 @@ function drawEdges() {
 }
 
 function sDrag(e, n, isShiftPressed) {
-  pushUndoSnapshot();
   // Shift 누르고 있을 때만 multiSel 사용 (그룹 드래그)
   // 아니면 현재 노드만 (단일 드래그)
   const ids = isShiftPressed && multiSel && multiSel.size ? Array.from(multiSel) : [n.id];
+  if (ids.some((id) => isPlannodeJsonGlobalMirrorNode(find(id)))) {
+    toast('가져온 JSON 전역 노드는 드래그로 옮길 수 없어.');
+    return;
+  }
+  pushUndoSnapshot();
   const start = new Map();
   for (const id of ids) {
     const node = find(id);
@@ -2396,6 +2460,10 @@ function sDrag(e, n, isShiftPressed) {
 function addChild(pid) {
   const p = find(pid);
   if (!p) return;
+  if (isPlannodeJsonGlobalMirrorNode(p)) {
+    toast('가져온 JSON 전역 노드 아래에는 하위를 붙일 수 없어.');
+    return;
+  }
   pushUndoSnapshot();
   const id = 'n' + ++nc;
   const d = getDepth(pid),
@@ -2427,6 +2495,10 @@ function addChild(pid) {
 function cDel(id) {
   const n = find(id);
   if (!n) return;
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    toast('가져온 JSON 전역 노드는 삭제할 수 없어. 필요하면 JSON을 다시 가져오기로 맞춰줘.');
+    return;
+  }
   const gAll = (nid) => [nid, ...nodes.filter((x) => x.parent_id === nid).flatMap((c) => gAll(c.id))];
   const ids = gAll(id),
     cc = ids.length - 1;
@@ -2451,6 +2523,10 @@ function cDel(id) {
 }
 
 function showEdit(n) {
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    toast('가져온 JSON 전역 노드는 여기서 편집하지 말고, JSON 가져오기·보내기로 맞춰줘.');
+    return;
+  }
   // 모달 편집 시 명시 저장된 배지만 로드 (추론 배지는 모달에 표시하지 않음)
   const working = cloneBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: false }));
   const pool = getEffectiveBadgePool();
@@ -2463,7 +2539,7 @@ function showEdit(n) {
   showIM(
     `<input class="fi ein" type="text" value="${esc(n.name)}" placeholder="${esc('노드 이름 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off">
     <textarea class="fi eid" rows="2" placeholder="${esc('노드 설명 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;resize:vertical;margin-bottom:10px" autocomplete="off">${esc(n.description || '')}</textarea>
-    <input class="fi einum" type="text" value="${esc(String(n.num ?? '').slice(0, 10))}" placeholder="${esc('분류 기호 및 번호 입력')}" maxlength="10" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off" title="최대 10자(영·숫자·한글)">
+    <input class="fi einum" type="text" value="${esc(String(n.num ?? '').slice(0, 20))}" placeholder="${esc('분류 기호 및 번호 입력')}" maxlength="20" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off" title="최대 20자(영·숫자·한글)">
     <label class="fl">배지 (${nPool} · 3트랙)</label><div style="max-height:min(52vh,420px);overflow-y:auto;padding-right:4px;margin-top:4px">${bh}</div>`,
     [
       ['취소', GY, null],
@@ -2490,7 +2566,7 @@ function showEdit(n) {
           target.description = desc;
           const numIn = String(document.querySelector('.einum')?.value ?? '')
             .trim()
-            .slice(0, 10);
+            .slice(0, 20);
           target.num = numIn || defaultNumForNode(target);
           applyBadgeSetToNode(target, working);
           const san = sanitizeNodeBadgesForTreeV1({
@@ -2666,26 +2742,37 @@ function touchCtxMaybeStart(e, n) {
 
 function showCtx(e, n) {
   if (!CTX) return;
-  const bset = getBadgeSetFromNode(n);
-  const pool = getEffectiveBadgePool();
-  const ctxTrack = (track, title, keys) =>
-    `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">${title}</div>` +
-    keys
-      .map(
-        (k) =>
-          `<div class="cx" data-a="bgt" data-track="${track}" data-key="${k}" data-id="${n.id}">${
-            bset[track].includes(k) ? '✓' : '○'
-          }  ${k}</div>`
-      )
-      .join('');
-  const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
-  const rootLayoutCtx = !n.parent_id
-    ? `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">노드맵 배치</div>
+  const ar = R_.getBoundingClientRect();
+  const cx = typeof e.clientX === 'number' ? e.clientX : ar.left + 24;
+  const cy = typeof e.clientY === 'number' ? e.clientY : ar.top + 24;
+  let lx = cx - ar.left + 2,
+    ly = cy - ar.top + 2;
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    CTX.innerHTML = `
+    <div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">JSON 전역 스냅샷</div>
+    <div class="cx" style="cursor:default;opacity:0.88;font-size:11px;color:#64748b;padding:6px 10px;line-height:1.55">표시만 — 이름·배지는 JSON 가져오기·보내기로 맞춰줘.</div>
+    <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>`;
+  } else {
+    const bset = getBadgeSetFromNode(n);
+    const pool = getEffectiveBadgePool();
+    const ctxTrack = (track, title, keys) =>
+      `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">${title}</div>` +
+      keys
+        .map(
+          (k) =>
+            `<div class="cx" data-a="bgt" data-track="${track}" data-key="${k}" data-id="${n.id}">${
+              bset[track].includes(k) ? '✓' : '○'
+            }  ${k}</div>`
+        )
+        .join('');
+    const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
+    const rootLayoutCtx = !n.parent_id
+      ? `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">노드맵 배치</div>
     <div class="cx" data-a="nml" data-mode="right" data-id="${n.id}">${nodeMapLayoutMode === 'right' ? '✓' : '○'}  우측분포</div>
     <div class="cx" data-a="nml" data-mode="topdown" data-id="${n.id}">${nodeMapLayoutMode === 'topdown' ? '✓' : '○'}  하위분포</div>
     <div class="cxsp"></div>`
-    : '';
-  CTX.innerHTML = `
+      : '';
+    CTX.innerHTML = `
     ${rootLayoutCtx}
     <div class="cx" data-a="edit" data-id="${n.id}">✎  이름·설명 편집</div>
     <div class="cx" data-a="add" data-id="${n.id}">+  하위 노드 추가</div>
@@ -2696,11 +2783,7 @@ function showCtx(e, n) {
     <div class="cxsp"></div>
     <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>
     ${n.parent_id ? `<div class="cxsp"></div><div class="cx dng" data-a="del" data-id="${n.id}">✕  삭제</div>` : ''}`;
-  const ar = R_.getBoundingClientRect();
-  const cx = typeof e.clientX === 'number' ? e.clientX : ar.left + 24;
-  const cy = typeof e.clientY === 'number' ? e.clientY : ar.top + 24;
-  let lx = cx - ar.left + 2,
-    ly = cy - ar.top + 2;
+  }
   CTX.style.cssText = `display:block;left:${lx}px;top:${ly}px`;
   requestAnimationFrame(() => {
     const pad = 6;

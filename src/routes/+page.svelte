@@ -1383,10 +1383,18 @@
       const r = await trySelectProject(latest);
       if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
       else {
+        let importDoneTail = '';
+        if (parsed.unknownRootKeys?.length) {
+          const u = parsed.unknownRootKeys;
+          importDoneTail =
+            u.length === 1
+              ? ` · 루트 미인식 키: ${u[0]}`
+              : ` · 루트 미인식 키 ${u.length}개: ${u.slice(0, 3).join(', ')}${u.length > 3 ? '…' : ''}`;
+        }
         showPilotToast(
-          importUsedOutlineFallback
+          (importUsedOutlineFallback
             ? `가져오기 완료(제목·목차 초안): ${latest.name}`
-            : `가져오기 완료: ${latest.name}`
+            : `가져오기 완료: ${latest.name}`) + importDoneTail
         );
       }
     }

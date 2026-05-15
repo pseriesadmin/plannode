@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID,
+  PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID,
   PLANNODE_TREE_UNSUPPORTED_VERSION_MESSAGE,
   PLANNODE_TREE_VERSION_INVALID_MESSAGE,
   PLANNODETREE_EXPORT_ROOT_VERSION,
+  isPlannodeJsonGlobalMirrorNode,
   parsePlannodeTreeV1ImportText,
-  parsePlannodeTreeV1Json
+  parsePlannodeTreeV1Json,
+  rehoistGlobalMirrorNodes
 } from './plannodeTreeV1';
 import { outlinePlainTextToPlannodeTreeV1 } from './outlineToPlannodeTreeV1';
 
@@ -86,6 +90,18 @@ describe('parsePlannodeTreeV1ImportText', () => {
   it('parsePlannodeTreeV1Json still rejects non-json', () => {
     const r = parsePlannodeTreeV1Json('# only md');
     expect(r.ok).toBe(false);
+  });
+
+  it('NOW-TREE-JSON-05: reports unknown root keys on success (sorted)', () => {
+    const tree = {
+      ...minimalTree,
+      extra_vendor_root: { foo: 1 },
+      another_unknown: 'x'
+    };
+    const r = parsePlannodeTreeV1Json(JSON.stringify(tree));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.unknownRootKeys).toEqual(['another_unknown', 'extra_vendor_root']);
   });
 
   it('drops non-standard badges on import (CRAZYSHOT-style noise)', () => {
@@ -301,6 +317,382 @@ describe('plannode.tree file version 2 (import)', () => {
 
   it('NOW-58: app export root version constant stays 1 (pilot re-export contract)', () => {
     expect(PLANNODETREE_EXPORT_ROOT_VERSION).toBe(1);
+  });
+});
+
+/** NOW-TREE-JSON-02: 루트 `global_*` 등 → 합성 `global` 노드 · v1/v2에서 `detail` 오염 없음 */
+describe('plannode.tree global root mirror (NOW-TREE-JSON-02)', () => {
+  const baseProject = {
+    id: 'p-gmirror',
+    name: 'Global mirror',
+    author: 't',
+    start_date: '2026-01-01',
+    end_date: '2026-12-31',
+    description: ''
+  };
+
+  const rootRow = {
+    id: 'p-gmirror-r',
+    parent_id: null,
+    name: 'PRD',
+    description: '',
+    num: 'PRD',
+    badges: [],
+    node_type: 'root'
+  };
+
+  function treeWithGlobals(version: 1 | 2) {
+    return {
+      format: 'plannode.tree',
+      version,
+      project: baseProject,
+      nodes: [rootRow],
+      global_schema: { tables: ['orders'] },
+      global_api: { baseUrl: 'https://api.example' },
+      tech_stack: ['SvelteKit', 'Postgres'],
+      schema_notes: 'keep rls',
+      _import_lock: false
+    };
+  }
+
+  it('uses root node id from node_type=root when it differs from projectId-r', () => {
+    const customRootId = 'p-gmirror-custom-root';
+    const tree = {
+      format: 'plannode.tree' as const,
+      version: 1,
+      project: baseProject,
+      nodes: [
+        {
+          id: customRootId,
+          parent_id: null,
+          name: 'PRD',
+          description: '',
+          num: 'PRD',
+          badges: [],
+          node_type: 'root'
+        }
+      ],
+      global_schema: { tables: ['a'] }
+    };
+    const r = parsePlannodeTreeV1Json(JSON.stringify(tree));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const schema = r.nodes.find((n) => n.id === '__global_schema__');
+    expect(schema?.parent_id).toBe(customRootId);
+  });
+
+  it('v1: injects synthetic global nodes under project id-r with plannodeGlobal* metadata', () => {
+    const r = parsePlannodeTreeV1Json(JSON.stringify(treeWithGlobals(1)));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.nodes.map((n) => n.id).sort();
+    expect(ids).toEqual(
+      ['__global_api__', '__global_import_lock__', '__global_schema__', '__global_schema_notes__', '__global_tech_stack__', 'p-gmirror-r'].sort()
+    );
+    const schema = r.nodes.find((n) => n.id === '__global_schema__');
+    expect(schema?.node_type).toBe('global');
+    expect(schema?.parent_id).toBe('p-gmirror-r');
+    expect(schema?.metadata?.plannodeGlobalRootKey).toBe('global_schema');
+    expect(schema?.metadata?.plannodeGlobalPayload).toEqual({ tables: ['orders'] });
+    const tech = r.nodes.find((n) => n.id === '__global_tech_stack__');
+    expect(tech?.node_type).toBe('global');
+    expect(tech?.metadata?.plannodeGlobalPayload).toEqual(['SvelteKit', 'Postgres']);
+  });
+
+  it('v2: keeps node_type global (not coerced to detail)', () => {
+    const r = parsePlannodeTreeV1Json(JSON.stringify(treeWithGlobals(2)));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    for (const id of ['__global_schema__', '__global_api__', '__global_tech_stack__']) {
+      expect(r.nodes.find((n) => n.id === id)?.node_type).toBe('global');
+    }
+  });
+
+  it('v2: explicit node_type Global normalizes to global', () => {
+    const tree = {
+      ...treeWithGlobals(2),
+      nodes: [
+        rootRow,
+        {
+          id: 'n-g',
+          parent_id: 'p-gmirror-r',
+          name: 'G',
+          description: '',
+          num: 'x',
+          badges: [],
+          node_type: 'Global'
+        }
+      ]
+    };
+    const r = parsePlannodeTreeV1Json(JSON.stringify(tree));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.nodes.find((n) => n.id === 'n-g')?.node_type).toBe('global');
+  });
+
+  it('skips mirror when synthetic id already present in nodes', () => {
+    const tree = treeWithGlobals(1);
+    const preExisting = {
+      id: '__global_schema__',
+      parent_id: 'p-gmirror-r',
+      name: 'Already',
+      description: '',
+      num: 'GLOBAL',
+      badges: [],
+      node_type: 'global',
+      metadata: { plannodeGlobalRootKey: 'global_schema', plannodeGlobalPayload: { custom: true } }
+    };
+    const r = parsePlannodeTreeV1Json(
+      JSON.stringify({
+        ...tree,
+        nodes: [rootRow, preExisting]
+      })
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const schemas = r.nodes.filter((n) => n.id === '__global_schema__');
+    expect(schemas).toHaveLength(1);
+    expect(schemas[0].metadata?.plannodeGlobalPayload).toEqual({ custom: true });
+  });
+
+  it('skips all mirrors when no root row and projectId-r is absent from nodes', () => {
+    const badRootId = {
+      ...treeWithGlobals(1),
+      nodes: [{ ...rootRow, id: 'wrong-root-id', node_type: 'module' }]
+    };
+    const r = parsePlannodeTreeV1Json(JSON.stringify(badRootId));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.nodes).toHaveLength(1);
+    expect(r.nodes[0].id).toBe('wrong-root-id');
+  });
+
+  it('v1: injects __global_module__ when global_module root key present', () => {
+    const tree = { ...treeWithGlobals(1), global_module: { routes: ['/a'] } };
+    const r = parsePlannodeTreeV1Json(JSON.stringify(tree));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const m = r.nodes.find((n) => n.id === '__global_module__');
+    expect(m?.node_type).toBe('global');
+    expect(m?.metadata?.plannodeGlobalPayload).toEqual({ routes: ['/a'] });
+  });
+
+  /** `buildPlannodeExportV1`(파일럿)과 동일: 미러 제거 + 루트 키 복원 → 재파싱 동치 */
+  it('NOW-TREE-JSON-03: round-trip re-import after hoist matches original mirrors', () => {
+    const t = treeWithGlobals(1);
+    const r1 = parsePlannodeTreeV1Json(JSON.stringify(t));
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const mirrorsOut = {};
+    const plainRows = [];
+    for (const n of r1.nodes) {
+      const meta = n.metadata;
+      const isMirror =
+        n.node_type === 'global' &&
+        meta &&
+        typeof meta === 'object' &&
+        Object.prototype.hasOwnProperty.call(meta, 'plannodeGlobalRootKey');
+      if (isMirror) {
+        const k = String(meta.plannodeGlobalRootKey ?? '').trim();
+        if (k) {
+          try {
+            mirrorsOut[k] = JSON.parse(JSON.stringify(meta.plannodeGlobalPayload));
+          } catch {
+            mirrorsOut[k] = meta.plannodeGlobalPayload;
+          }
+        }
+        continue;
+      }
+      plainRows.push({
+        id: n.id,
+        parent_id: n.parent_id ?? null,
+        name: n.name,
+        description: n.description ?? '',
+        num: n.num ?? '',
+        badges: n.badges ?? [],
+        ...(meta && Object.keys(meta).length > 0
+          ? { metadata: JSON.parse(JSON.stringify(meta)) }
+          : {}),
+        node_type: n.node_type,
+        ...(n.mx != null ? { mx: n.mx } : {}),
+        ...(n.my != null ? { my: n.my } : {})
+      });
+    }
+    const body = {
+      format: 'plannode.tree',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      project: t.project,
+      ...mirrorsOut,
+      nodes: plainRows
+    };
+    const r2 = parsePlannodeTreeV1Json(JSON.stringify(body));
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.nodes.map((n) => n.id).sort()).toEqual(r1.nodes.map((n) => n.id).sort());
+    const g1 = r1.nodes.find((x) => x.id === '__global_schema__');
+    const g2 = r2.nodes.find((x) => x.id === '__global_schema__');
+    expect(g2?.metadata?.plannodeGlobalPayload).toEqual(g1?.metadata?.plannodeGlobalPayload);
+  });
+
+  it('NOW-TREE-JSON-09: unknown root keys aggregate + rehoist + double parse lossless', () => {
+    const tree = {
+      ...treeWithGlobals(1),
+      ai_blob: { n: 1 },
+      custom_list: ['x']
+    };
+    const r1 = parsePlannodeTreeV1Json(JSON.stringify(tree));
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.unknownRootKeys).toBeUndefined();
+    const unk = r1.nodes.find((n) => n.id === PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID);
+    expect(unk?.metadata?.plannodeGlobalRootKey).toBe('__unknown_roots__');
+    expect(unk?.metadata?.plannodeGlobalPayload).toEqual({
+      ai_blob: { n: 1 },
+      custom_list: ['x']
+    });
+
+    const plainRows = (nodes: (typeof r1 & { ok: true })['nodes']) => {
+      const out: Record<string, unknown>[] = [];
+      for (const n of nodes) {
+        const meta = n.metadata;
+        const isMirror =
+          n.node_type === 'global' &&
+          meta &&
+          typeof meta === 'object' &&
+          Object.prototype.hasOwnProperty.call(meta, 'plannodeGlobalRootKey');
+        if (isMirror) continue;
+        out.push({
+          id: n.id,
+          parent_id: n.parent_id ?? null,
+          name: n.name,
+          description: n.description ?? '',
+          num: n.num ?? '',
+          badges: n.badges ?? [],
+          ...(meta && Object.keys(meta).length > 0
+            ? { metadata: JSON.parse(JSON.stringify(meta)) }
+            : {}),
+          node_type: n.node_type,
+          ...(n.mx != null ? { mx: n.mx } : {}),
+          ...(n.my != null ? { my: n.my } : {})
+        });
+      }
+      return out;
+    };
+
+    const buildExport = (
+      nodes: (typeof r1 & { ok: true })['nodes'],
+      project: (typeof r1 & { ok: true })['project']
+    ) => {
+      const out: Record<string, unknown> = {
+        format: 'plannode.tree',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        project: JSON.parse(JSON.stringify(project)),
+        nodes: plainRows(nodes)
+      };
+      rehoistGlobalMirrorNodes(nodes, out, out.project as Record<string, unknown>);
+      return out;
+    };
+
+    const body1 = buildExport(r1.nodes, r1.project);
+    expect(body1.ai_blob).toEqual({ n: 1 });
+    expect(body1.custom_list).toEqual(['x']);
+
+    const r2 = parsePlannodeTreeV1Json(JSON.stringify(body1));
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    const body2 = buildExport(r2.nodes, r2.project);
+    const r3 = parsePlannodeTreeV1Json(JSON.stringify(body2));
+    expect(r3.ok).toBe(true);
+    if (!r3.ok) return;
+    expect(r3.nodes.find((n) => n.id === PLANNODE_GLOBAL_UNKNOWN_ROOTS_NODE_ID)?.metadata?.plannodeGlobalPayload).toEqual(
+      unk?.metadata?.plannodeGlobalPayload
+    );
+  });
+
+  it('NOW-TREE-JSON-09: project non-standard fields → __global_project_extras__ + rehoist', () => {
+    const tree = {
+      format: 'plannode.tree',
+      version: 1,
+      project: {
+        ...baseProject,
+        schema_version: 7,
+        flags: { beta: true }
+      },
+      nodes: [rootRow]
+    };
+    const r = parsePlannodeTreeV1Json(JSON.stringify(tree));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ex = r.nodes.find((n) => n.id === PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID);
+    expect(ex?.metadata?.plannodeGlobalRootKey).toBe('__project_extras__');
+    expect(ex?.metadata?.plannodeGlobalPayload).toEqual({ schema_version: 7, flags: { beta: true } });
+
+    const plainRows: Record<string, unknown>[] = [];
+    for (const n of r.nodes) {
+      const meta = n.metadata;
+      const isMirror =
+        n.node_type === 'global' &&
+        meta &&
+        typeof meta === 'object' &&
+        Object.prototype.hasOwnProperty.call(meta, 'plannodeGlobalRootKey');
+      if (isMirror) continue;
+      plainRows.push({
+        id: n.id,
+        parent_id: n.parent_id ?? null,
+        name: n.name,
+        description: n.description ?? '',
+        num: n.num ?? '',
+        badges: n.badges ?? [],
+        ...(meta && Object.keys(meta).length > 0
+          ? { metadata: JSON.parse(JSON.stringify(meta)) }
+          : {}),
+        node_type: n.node_type
+      });
+    }
+    const out: Record<string, unknown> = {
+      format: 'plannode.tree',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      project: JSON.parse(JSON.stringify(r.project)),
+      nodes: plainRows
+    };
+    rehoistGlobalMirrorNodes(r.nodes, out, out.project as Record<string, unknown>);
+    expect((out.project as Record<string, unknown>).schema_version).toBe(7);
+    expect((out.project as Record<string, unknown>).flags).toEqual({ beta: true });
+
+    const r2 = parsePlannodeTreeV1Json(JSON.stringify(out));
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.nodes.find((n) => n.id === PLANNODE_GLOBAL_PROJECT_EXTRAS_NODE_ID)?.metadata?.plannodeGlobalPayload).toEqual(
+      ex?.metadata?.plannodeGlobalPayload
+    );
+  });
+});
+
+describe('isPlannodeJsonGlobalMirrorNode', () => {
+  it('true when node_type global and plannodeGlobalRootKey is non-empty string', () => {
+    expect(
+      isPlannodeJsonGlobalMirrorNode({
+        node_type: 'global',
+        metadata: { plannodeGlobalRootKey: 'global_schema' }
+      })
+    ).toBe(true);
+  });
+  it('false for global without root key', () => {
+    expect(isPlannodeJsonGlobalMirrorNode({ node_type: 'global', metadata: {} })).toBe(false);
+  });
+  it('false for detail even with plannodeGlobalRootKey', () => {
+    expect(
+      isPlannodeJsonGlobalMirrorNode({
+        node_type: 'detail',
+        metadata: { plannodeGlobalRootKey: 'x' }
+      })
+    ).toBe(false);
+  });
+  it('false for null', () => {
+    expect(isPlannodeJsonGlobalMirrorNode(null)).toBe(false);
   });
 });
 
