@@ -1634,10 +1634,15 @@
     void invitePanelEpoch;
     void aclInviteRows;
     void $projects;
+    void $authUser?.id;
     const pendingDel = getPendingWorkspaceDeletionIds();
+    const tomb = getDeletedProjectTombstoneIds();
+    const ghostHide = getOwnedProjectGhostHideIdsForModal($authUser?.id ?? '');
     return aclInviteRows.filter((r) => {
       if ($projects.some((p) => p.id === r.project_id)) return false;
       if (pendingDel.has(r.project_id)) return false;
+      if (tomb.has(r.project_id)) return false;
+      if (ghostHide.has(r.project_id)) return false;
       return true;
     });
   })();
@@ -2769,7 +2774,11 @@
                 <button type="button" class="zb" id="ZO">−</button><span class="zp" id="ZP">85%</span><button type="button" class="zb" id="ZI">+</button><span
                   class="zc-hint"
                   >축소확대: Ctrl+스크롤</span
-                ><span class="zc-hint">그룹이동: Shift+노드</span><span class="zc-hint" title="노드 1.5초: 카드가 따라 움직이며 다른 노드 + 근처에 놓기 · + 1.5초: 직속 하위 카드만 같이 이동(앵커 유지)"
+                ><span
+                  class="zc-hint"
+                  title="Shift+빈 캔버스 드래그로 범위 선택 · 선택된 카드를 Shift 없이 끌면 다른 노드 +에 붙이기 · Shift+카드 드래그는 캔버스 위치 이동"
+                  >그룹선택: Shift+드래그</span
+                ><span class="zc-hint" title="노드 1.5초: 카드가 따라 움직이며 다른 노드 + 근처에 놓기 · + 1.5초: 직속 하위 카드만 같이 이동(앵커 유지)"
                   >상위바꿈: 노드 1.5초 드래그 / + 1.5초 하위만</span
                 >
               </div>
