@@ -1368,6 +1368,11 @@ export function upsertImportedPlannodeTreeV1(
     return null;
   }
 
+  const curOpen = get(currentProject);
+  if (curOpen?.id === merged.id) {
+    nodes.set(nodesForStore);
+  }
+
   try {
     /** 원본 가져오기 노드(`description` 포함)로 배지 학습 병합 — 저장 sanitize 전 스냅샷 */
     mergeLearnedBadgeRulesFromImportedNodes(nodeList);
@@ -1408,18 +1413,24 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
 
 /**
  * 동접·다기기: 원격 워크스페이스 스냅샷과 로컬 노드를 id 단위로 합침.
- * - remoteProjectMetaNewer: 프로젝트 메타가 원격이 더 최신 → 원격 목록에 없는 id는 삭제로 간주, 동일 id는 updated_at이 같거나 더 새로운 쪽(원격 동률 시 원격 우선).
+ * - remoteProjectMetaNewer: 프로젝트 메타가 원격이 더 최신으로 간주될 때 **원격 목록에 없는 id는 삭제로 간주**,
+ *   동일 id는 `updated_at`이 같거나 더 새로운 쪽(동률 시 원격 우선). OT/CRDT가 아니므로 **번들·슬라이스 풀에서는
+ *   이 플래그를 쓰지 않는 것이 안전**하다(프로젝트 `updated_at`만 앞서고 노드 JSON이 뒤처진 순간 로컬 신규 노드가 통째로 사라질 수 있음).
  *   **반환 배열의 평면 순서는 `remoteNodes`와 동일**하게 유지(형제 드래그 순서·파일럿 렌더 정합).
- * - 그렇지 않음: 로컬 메타가 같거나 더 최신 → 원격에서 더 새로운 updated_at인 노드만 흡수(로컬 전용 id·삭제 유지).
+ * - 그렇지 않음: 원격에서 더 새로운 `updated_at`인 노드만 흡수(로컬 전용 id·로컬 삭제 유지).
  * `suppressRecentDeletesProjectId`가 있으면 `registerRecentlyDeletedNodeIdsForCloudMerge`로 등록된 id는
  * **원격 메타가 더 최신이어도** 로컬에 없을 때는 넣지 않음(소유자 슬라이스가 merge 실패 등으로 옛 목록을 유지할 때 되살림 방지).
+ * `preserveLocalNewIds`: `remoteProjectMetaNewer === true`일 때 원격 목록에 없는 로컬 id를 통째 삭제하지 않도록
+ * **예외 집합**(아직 소유자 슬라이스에 안 올라간 신규 노드 등). 보존된 노드는 원격 순서 뒤에 **로컬 배열 순서**로 붙인다.
  */
 export function mergeNodeListsForCloud(
   localNodes: Node[],
   remoteNodes: Node[],
   remoteProjectMetaNewer: boolean,
   /** 최근 삭제 억제를 적용할 프로젝트 id(선택) */
-  suppressRecentDeletesProjectId?: string | null
+  suppressRecentDeletesProjectId?: string | null,
+  /** `remoteProjectMetaNewer`일 때만 적용 — 원격 부재 로컬 id 삭제 예외(선택) */
+  preserveLocalNewIds?: ReadonlySet<string> | null
 ): Node[] {
   const byId = new Map<string, Node>();
   for (const n of localNodes) {
@@ -1428,8 +1439,12 @@ export function mergeNodeListsForCloud(
   if (remoteProjectMetaNewer) {
     const suppress = recentDeleteIdsForCloudMerge(suppressRecentDeletesProjectId ?? null);
     const remoteIds = new Set(remoteNodes.map((x) => x.id));
+    const preserve = preserveLocalNewIds ?? null;
     for (const id of [...byId.keys()]) {
-      if (!remoteIds.has(id)) byId.delete(id);
+      if (!remoteIds.has(id)) {
+        if (preserve?.has(id)) continue;
+        byId.delete(id);
+      }
     }
     for (const rn of remoteNodes) {
       const cur = byId.get(rn.id);
@@ -1443,6 +1458,18 @@ export function mergeNodeListsForCloud(
     for (const rn of remoteNodes) {
       const v = byId.get(rn.id);
       if (v) ordered.push(v);
+    }
+    if (preserve && preserve.size) {
+      const inOrdered = new Set(ordered.map((x) => x.id));
+      for (const n of localNodes) {
+        if (!remoteIds.has(n.id) && preserve.has(n.id) && !inOrdered.has(n.id)) {
+          const v = byId.get(n.id);
+          if (v) {
+            ordered.push(v);
+            inOrdered.add(n.id);
+          }
+        }
+      }
     }
     return ordered;
   } else {
@@ -1478,6 +1505,40 @@ export function mergeNodeListsForCloud(
   return [...byId.values()];
 }
 
+/**
+ * 프로젝트 `updated_at` 선후에 따라 노드 병합 모드를 고른다(공유·소유자 동일 정책).
+ * - 원격 메타가 더 새로우면: 원격에 없는 로컬 id 제거 + `preserveLocalNewIds`(노드 `updated_at` > 원격 프로젝트 메타).
+ * - 로컬 메타가 더 새로워도: 원격 슬라이스에 없고 노드 `updated_at` ≤ 원격 프로젝트 메타인 id는 **소유자 삭제**로 보고 제거
+ *   (공유 쪽 메타만 앞선 채로 풀할 때 삭제가 안 보이던 회귀 방지).
+ * - 그 외 로컬 전용 id: LWW 흡수만(`false`) 후 위 삭제 필터.
+ */
+export function mergeNodeListsForCloudByProjectMeta(
+  localNodes: Node[],
+  remoteNodes: Node[],
+  localProjectUpdatedAt: string | undefined,
+  remoteProjectUpdatedAt: string | undefined,
+  projectId: string
+): Node[] {
+  const rTime = parseTs(remoteProjectUpdatedAt);
+  const lTime = parseTs(localProjectUpdatedAt);
+  const remoteIds = new Set(remoteNodes.map((x) => x.id));
+
+  const dropStaleLocalOnlyAbsentOnRemote = (list: Node[]): Node[] =>
+    list.filter((n) => remoteIds.has(n.id) || parseTs(n.updated_at) > rTime);
+
+  if (rTime > lTime) {
+    const preserve = new Set(
+      localNodes
+        .filter((n) => !remoteIds.has(n.id) && parseTs(n.updated_at) > rTime)
+        .map((n) => n.id)
+    );
+    return mergeNodeListsForCloud(localNodes, remoteNodes, true, projectId, preserve);
+  }
+  return dropStaleLocalOnlyAbsentOnRemote(
+    mergeNodeListsForCloud(localNodes, remoteNodes, false, projectId)
+  );
+}
+
 function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
   return (
     a.name !== b.name ||
@@ -1491,9 +1552,10 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
 
 /**
  * 내 plannode_workspace 행 기준: 원격 번들과 로컬을 합침.
- * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
- * - remoteProjectMetaNewer: 원격 목록에 없는 id를 삭제로 간주 + 동일 id는 updated_at 비교
- * - !remoteProjectMetaNewer: 원격에서 더 새로운 노드만 흡수(로컬 전용 노드·순서 유지)
+ * 프로젝트 **메타**(이름·기간 등)는 `remoteProjectMetaNewer`로 원격/로컬 중 어느 객체를 베이스로 쓸지 고르고,
+ * **노드 배열**은 항상 보수적 LWW만 적용한다(`mergeNodeListsForCloud` 세 번째 인자 고정 `false`).
+ * 동시·근접 편집에서 프로젝트 `updated_at`만 앞선 스냅샷이 오면 `true` 경로가 로컬 전용 노드를 삭제로 처리하는 회귀를 막기 위함.
+ * (원격에서 실제로 삭제된 노드는 별도 톰스톤 없이 즉시 모든 기기에 반영되지 않을 수 있음 — 비실시간 번들 한계.)
  *
  * **히스토리 병합(append-only, LWW):**
  * - 로컬 `historyEntries` 있으면, 원격 항목과 병합
@@ -1524,8 +1586,13 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
     const lTime = local ? parseTs(local.updated_at) : -1;
     const remoteProjectMetaNewer = !local || rTime > lTime;
     const localNodes = local ? loadProjectNodesFromLocalStorage(project.id) : [];
-    /** 로컬 메타가 더 새더라도 노드 수준 LWW는 항상 수행 — 배지·순서 변경 반영 */
-    const mergedNodes = mergeNodeListsForCloud(localNodes, remoteList, remoteProjectMetaNewer, project.id);
+    const mergedNodes = mergeNodeListsForCloudByProjectMeta(
+      localNodes,
+      remoteList,
+      local?.updated_at,
+      project.updated_at,
+      project.id
+    );
     const keepSrc = local?.cloud_workspace_source_user_id ?? project.cloud_workspace_source_user_id;
 
     const mergedProject: Project = remoteProjectMetaNewer

@@ -8,7 +8,9 @@ import {
   updateProjectMeta,
   upsertImportedPlannodeTreeV1,
   deleteProject,
-  getPendingWorkspaceDeletionIds
+  getPendingWorkspaceDeletionIds,
+  getDeletedProjectTombstoneIds,
+  getOwnedProjectGhostHideIdsForModal
 } from '$lib/stores/projects';
 import { isMissingRelationError, userFacingAclErrorFromSupabase } from '$lib/supabase/aclErrors';
 import { isPlatformMaster } from '$lib/supabase/platformMaster';
@@ -139,6 +141,8 @@ export async function canAccessProject(project: Project): Promise<boolean> {
 
   // 삭제 직후~클라우드 정본 반영 전: 옛 projects_json 스냅샷이 모달에 남지 않도록(소유자 조기 허용보다 우선)
   if (getPendingWorkspaceDeletionIds().has(project.id)) return false;
+  if (getDeletedProjectTombstoneIds().has(project.id)) return false;
+  if (getOwnedProjectGhostHideIdsForModal(uid).has(project.id)) return false;
 
   // 내 소유 프로젝트: uid 일치 시 바로 허용
   if (project.owner_user_id && project.owner_user_id === uid) return true;
@@ -386,6 +390,10 @@ export async function importSharedProjectFromWorkspace(
     return { ok: false, message: '클라우드 소스 정보가 없어. 소유자가 접근 목록을 다시 저장한 뒤 시도해줘.' };
   }
 
+  if (getDeletedProjectTombstoneIds().has(projectId)) {
+    return { ok: false, message: '이 프로젝트는 이 기기에서 삭제되었어요.' };
+  }
+
   const email = getAuthEmail();
   if (import.meta.env.DEV) {
     console.info('[importSharedProjectFromWorkspace]', {
@@ -444,6 +452,7 @@ export async function autoLoadInvitedProjects(
   if (aclErr || !acl.length) return empty;
 
   const localIds = new Set(localProjectIds || []);
+  const tombstoned = getDeletedProjectTombstoneIds();
 
   let loaded = 0;
   let skippedAlreadyLocal = 0;
@@ -455,6 +464,10 @@ export async function autoLoadInvitedProjects(
     // 로컬에 이미 있으면 스킵
     if (localIds.has(inv.project_id)) {
       skippedAlreadyLocal++;
+      continue;
+    }
+
+    if (tombstoned.has(inv.project_id)) {
       continue;
     }
 

@@ -231,7 +231,7 @@ let scale = 0.85,
   selId = null,
   /** 접기: 노드 id가 있으면 해당 노드의 직·간접 자손을 트리에서 숨김 — 세션만(프로젝트 전환 시 초기화) */
   collapsedNodeIds = new Set(),
-  /** Shift+클릭으로 묶인 다중 선택(그룹 이동). 영속 필드 아님. */
+  /** Shift+클릭/범위 선택으로 묶인 다중 선택. 영속 필드 아님. */
   multiSel = new Set(),
   selectionBox = null, // Shift+드래그 범위 선택용
   /** §4.0.1 재연결: 카드 1.5초 또는 `+` 1.5초 후 드래그로 대상 `+`에 놓기 */
@@ -582,11 +582,16 @@ function canDropOnParent(newParentId) {
   if (!parentNode) return false;
   if (isPlannodeJsonGlobalMirrorNode(parentNode)) return false;
   if (relinkArm.mode === 'single') {
-    const nid = relinkArm.nodeIds[0];
-    if (!nid || nid === newParentId) return false;
-    if (subtreeIdSet(nid).has(newParentId)) return false;
-    const m = find(nid);
-    return !!(m && m.parent_id !== newParentId);
+    const ids = relinkArm.nodeIds;
+    if (!ids.length || ids.includes(newParentId)) return false;
+    for (const nid of ids) {
+      if (!nid) return false;
+      if (subtreeIdSet(nid).has(newParentId)) return false;
+    }
+    return ids.some((nid) => {
+      const m = find(nid);
+      return !!(m && m.parent_id !== newParentId);
+    });
   }
   if (relinkArm.mode === 'children') {
     const aid = relinkArm.anchorId;
@@ -689,6 +694,48 @@ function findRelinkDropPb(clientX, clientY, flyEl) {
   return findDropPbAt(clientX, clientY);
 }
 
+/** `+` 또는 부모 노드 카드(`.nd`) 위 — 재연결 드롭 대상 parent id */
+function findRelinkDropParentIdAt(clientX, clientY, flyEl) {
+  if (!relinkArm) return null;
+  const pb = findRelinkDropPb(clientX, clientY, flyEl);
+  if (pb) {
+    const pid = pb.getAttribute('data-relink-parent-id');
+    if (pid && canDropOnParent(pid)) return pid;
+  }
+  try {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (const el of stack) {
+      if (el.closest?.('.relink-ghost-layer')) continue;
+      const nd = el.closest?.('.nd');
+      if (!nd || nd.classList.contains('relink-source-dim')) continue;
+      const raw = nd.id || '';
+      if (!raw.startsWith('nd-')) continue;
+      const pid = raw.slice(3);
+      if (!pid || !canDropOnParent(pid)) continue;
+      const pr = nd.getBoundingClientRect();
+      const ex = relinkInflateRect(pr, RELINK_CARD_HIT_PAD);
+      if (clientX < ex.left || clientX > ex.right || clientY < ex.top || clientY > ex.bottom) continue;
+      return pid;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/** @param {string[]} nodeIds @returns {boolean} */
+function tryApplyRelinkDropAtPointer(clientX, clientY, nodeIds) {
+  const ids = normalizeRelinkNodeIds(nodeIds);
+  if (!ids.length) return false;
+  if (!armRelinkCards(ids)) return false;
+  const pid = findRelinkDropParentIdAt(clientX, clientY, null);
+  if (pid && canDropOnParent(pid)) {
+    applyRelinkDrop(pid);
+    return true;
+  }
+  clearRelinkArm();
+  render();
+  return false;
+}
+
 /** 1.5초 완료 후: 실제 노드 카드(또는 직속 하위 카드 묶음) 복제 고스트가 포인터를 따라가며 대상 `+`에 드롭 */
 function beginRelinkDragSession(pointerId, clientX, clientY) {
   endRelinkDragSession();
@@ -715,8 +762,47 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
   const idsToDim = [];
 
   if (relinkArm.mode === 'single') {
-    const nid = relinkArm.nodeIds[0];
-    idsToDim.push(nid);
+    const relinkIds = relinkArm.nodeIds;
+    idsToDim.push(...relinkIds);
+    if (relinkIds.length > 1) {
+      const sorted = relinkIds
+        .map((id) => find(id))
+        .filter(Boolean)
+        .sort((a, b) => {
+          const pa = gp(a),
+            pb = gp(b);
+          if (pa.y !== pb.y) return pa.y - pb.y;
+          return pa.x - pb.x;
+        });
+      let minL = Infinity;
+      let minT = Infinity;
+      let anyRect = false;
+      for (const kn of sorted) {
+        const ndEl = document.getElementById('nd-' + kn.id);
+        if (!ndEl) continue;
+        const rect = ndEl.getBoundingClientRect();
+        minL = Math.min(minL, rect.left);
+        minT = Math.min(minT, rect.top);
+        anyRect = true;
+      }
+      if (anyRect && minL !== Infinity) {
+        grabDx = clientX - minL;
+        grabDy = clientY - minT;
+        fly.classList.add('relink-ghost-fly--stack');
+        for (const kn of sorted) {
+          const ndEl = document.getElementById('nd-' + kn.id);
+          if (!ndEl) continue;
+          fly.appendChild(cloneNdForGhost(ndEl));
+        }
+      } else {
+        const pill = document.createElement('div');
+        pill.className = 'relink-ghost-fallback';
+        pill.textContent = `선택 ${relinkIds.length}개`;
+        fly.appendChild(pill);
+        useCenterTransform = true;
+      }
+    } else {
+    const nid = relinkIds[0];
     const ndEl = document.getElementById('nd-' + nid);
     if (ndEl) {
       const rect = ndEl.getBoundingClientRect();
@@ -732,6 +818,7 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
       pill.textContent = label;
       fly.appendChild(pill);
       useCenterTransform = true;
+    }
     }
   } else {
     const aid = relinkArm.anchorId;
@@ -818,16 +905,15 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
   };
   const up = (ev) => {
     if (ev.pointerId !== pointerId) return;
-    const pb = findRelinkDropPb(ev.clientX, ev.clientY, fly);
-    const pid = pb?.getAttribute('data-relink-parent-id') || null;
-    const ok = !!(pid && canDropOnParent(pid));
+    const pid = findRelinkDropParentIdAt(ev.clientX, ev.clientY, fly);
+    const ok = !!pid;
     endRelinkDragSession();
     if (ok) {
       applyRelinkDrop(pid);
     } else {
       clearRelinkArm();
       render();
-      toast('연결 안 함 — 대상 노드의 + 위에서 손을 떼 줘');
+      toast('연결 안 함 — 붙일 부모 노드 카드 또는 + 위에서 손을 떼 줘');
     }
   };
   document.addEventListener('pointermove', move, true);
@@ -841,23 +927,70 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
   };
 }
 
-function armRelinkCard(n) {
-  if (isPlannodeJsonGlobalMirrorNode(n)) {
-    toast('가져온 JSON 전역 노드는 여기서 부모를 바꿀 수 없어.');
-    return;
+function normalizeRelinkNodeIds(nodeIds) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of nodeIds) {
+    const id = String(raw || '').trim();
+    if (!id || seen.has(id)) continue;
+    const node = find(id);
+    if (!node || !node.parent_id) continue;
+    if (isPlannodeJsonGlobalMirrorNode(node)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** @param {string[]} nodeIds @returns {boolean} */
+function armRelinkCards(nodeIds) {
+  const ids = normalizeRelinkNodeIds(nodeIds);
+  if (!ids.length) {
+    toast('붙일 수 있는 노드가 없어 — 루트·JSON 전역 노드는 제외돼.');
+    return false;
   }
   clearRelinkArm();
   clearRelinkHold();
-  relinkArm = { mode: 'single', nodeIds: [n.id] };
-  selId = n.id;
+  relinkArm = { mode: 'single', nodeIds: ids };
+  selId = ids[ids.length - 1];
   maybeEmitNodeSelect();
   relinkSuppressClick = true;
   setTimeout(() => {
     relinkSuppressClick = false;
   }, 400);
-  toast('노드 이동 모드 — 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소', {
-    persistRelink: true
-  });
+  const msg =
+    ids.length > 1
+      ? `선택 ${ids.length}개 붙이기 — 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소`
+      : '노드 이동 모드 — 카드를 끌어 붙일 노드의 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소';
+  toast(msg, { persistRelink: true });
+  return true;
+}
+
+function armRelinkCard(n) {
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    toast('가져온 JSON 전역 노드는 여기서 부모를 바꿀 수 없어.');
+    return;
+  }
+  armRelinkCards([n.id]);
+}
+
+/** Shift로 선택된 카드(1개 이상)를 끌어 다른 부모 `+`에 붙이기 */
+function startMultiSelRelinkDragFromCard(e, n) {
+  if (e.shiftKey || multiSel.size < 1 || !multiSel.has(n.id)) return false;
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    toast('가져온 JSON 전역 노드는 여기서 부모를 바꿀 수 없어.');
+    return true;
+  }
+  const ids = Array.from(multiSel);
+  selId = n.id;
+  render();
+  try {
+    e.preventDefault();
+  } catch (_) {}
+  clearRelinkHold();
+  if (!armRelinkCards(ids)) return true;
+  queueMicrotask(() => beginRelinkDragSession(e.pointerId, e.clientX, e.clientY));
+  return true;
 }
 
 /** `+` 1.5초: 앵커 노드는 그대로 두고 직속 하위만 새 부모로 */
@@ -886,12 +1019,14 @@ function armRelinkChildrenGroup(anchorId) {
 function applyRelinkDrop(newParentId) {
   if (!relinkArm) return;
   if (relinkArm.mode === 'single') {
-    const moving0 = find(relinkArm.nodeIds[0]);
-    if (isPlannodeJsonGlobalMirrorNode(moving0)) {
-      toast('가져온 JSON 전역 노드는 이동할 수 없어.');
-      clearRelinkArm();
-      render();
-      return;
+    for (const nid of relinkArm.nodeIds) {
+      const moving0 = find(nid);
+      if (isPlannodeJsonGlobalMirrorNode(moving0)) {
+        toast('가져온 JSON 전역 노드는 이동할 수 없어.');
+        clearRelinkArm();
+        render();
+        return;
+      }
     }
   } else {
     const kids0 = nodes.filter((x) => x.parent_id === relinkArm.anchorId);
@@ -909,23 +1044,37 @@ function applyRelinkDrop(newParentId) {
     return;
   }
   if (relinkArm.mode === 'single') {
-    const nid = relinkArm.nodeIds[0];
-    const moving = find(nid);
-    if (!moving) {
+    const toMove = relinkArm.nodeIds
+      .filter((nid) => {
+        const m = find(nid);
+        return !!(m && m.parent_id !== newParentId);
+      })
+      .sort((a, b) => getDepth(b) - getDepth(a));
+    if (!toMove.length) {
       clearRelinkArm();
       render();
       return;
     }
-    const oldPid = moving.parent_id;
+    const oldPids = new Set();
     pushUndoSnapshot();
-    moving.parent_id = newParentId;
-    moving.mx = null;
-    moving.my = null;
+    for (const nid of toMove) {
+      const moving = find(nid);
+      if (!moving) continue;
+      if (moving.parent_id != null) oldPids.add(moving.parent_id);
+      moving.parent_id = newParentId;
+      moving.mx = null;
+      moving.my = null;
+    }
     nodes = [...nodes];
+    oldPids.add(newParentId);
+    for (const pid of oldPids) {
+      if (pid != null) {
+        reorderFlatSiblingsByVisualY(pid);
+        clearSiblingManualLayout(pid);
+      }
+    }
     reorderFlatSiblingsByVisualY(newParentId);
-    if (oldPid !== newParentId && oldPid != null) reorderFlatSiblingsByVisualY(oldPid);
     clearSiblingManualLayout(newParentId);
-    if (oldPid !== newParentId && oldPid != null) clearSiblingManualLayout(oldPid);
     applyHierarchyNumsFromTreeOrder();
     nodes = [...nodes];
   } else {
@@ -945,11 +1094,17 @@ function applyRelinkDrop(newParentId) {
     applyHierarchyNumsFromTreeOrder();
     nodes = [...nodes];
   }
+  const movedCount =
+    relinkArm?.mode === 'single' ? relinkArm.nodeIds.length : 0;
   clearRelinkArm();
   render();
   flushPersistNow();
   emitAutoCloudSync('node-relink');
-  toast('노드 연결을 바꿨어 · 순서·분류번호 자동 반영됨');
+  toast(
+    movedCount > 1
+      ? `노드 ${movedCount}개 연결을 바꿨어 · 순서·분류번호 자동 반영됨`
+      : '노드 연결을 바꿨어 · 순서·분류번호 자동 반영됨'
+  );
 }
 
 /** 카드(또는 제목)에서: 1.5초 유지 → 재연결 / 그 전에 움직이면 기존 위치 드래그(제목 제외). 제목 짧은 탭은 pointerup에서 편집 모달(click 합성 불신) */
@@ -1951,7 +2106,16 @@ function presenceAvatarLetter(email) {
   return /[a-zA-Z가-힣0-9]/.test(ch) ? ch.toUpperCase() : '?';
 }
 
+/** Presence `selected_node_id` — 현재 트리에 없는 id는 아바타·충돌 표시에 쓰지 않음(plan-output P-3 #6). */
+function normalizePresenceSelectedNodeIdForTree(raw, validNodeIds) {
+  const s = raw != null ? String(raw).trim() : '';
+  if (!s || !validNodeIds.has(s)) return null;
+  return s;
+}
+
 function maybeEmitNodeSelect() {
+  /* render() 꼬리에서도 호출되므로 hydrate·undo 등 syncing 동안 중간 emit 억제(plan-output P-3 #5). */
+  if (syncing) return;
   if (lastEmittedSelIdForPresence === selId) return;
   lastEmittedSelIdForPresence = selId;
   try {
@@ -2034,6 +2198,7 @@ function render() {
     CV.appendChild(strip);
   }
   const relinkHi = relinkHighlightIds();
+  const pilotNodeIdSet = new Set(nodes.map((x) => String(x.id)));
   nodes.forEach((n) => {
     if (!isTreeNodeShown(n)) return;
     const d = getDepth(n.id),
@@ -2047,8 +2212,8 @@ function render() {
     let presenceConflict = false;
     for (let pi = 0; pi < peersPresence.length; pi++) {
       const pr = peersPresence[pi];
-      const sid = pr && pr.selected_node_id ? String(pr.selected_node_id).trim() : '';
-      if (sid === n.id && selId === n.id) {
+      const sid = normalizePresenceSelectedNodeIdForTree(pr?.selected_node_id, pilotNodeIdSet);
+      if (sid && sid === n.id && selId === n.id) {
         presenceConflict = true;
         break;
       }
@@ -2128,6 +2293,7 @@ function render() {
         sDrag(e, n, true);
         return;
       }
+      if (startMultiSelRelinkDragFromCard(e, n)) return;
       if (e.target.closest('.nn-line')) {
         selId = n.id;
         requestAnimationFrame(() => render());
@@ -2154,13 +2320,14 @@ function render() {
     if (titleEl) {
       titleEl.style.cursor = isPlannodeJsonGlobalMirrorNode(n) ? 'default' : 'pointer';
     }
-    const na = nd.querySelector('#na-' + n.id);
-    if (n.parent_id && !isPlannodeJsonGlobalMirrorNode(n)) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
+    /** id에 `.` 등 CSS 특수문자가 있으면 `#na-…` querySelector가 SyntaxError — 카드당 `.na` 1개 */
+    const na = nd.querySelector('.na');
+    if (na && n.parent_id && !isPlannodeJsonGlobalMirrorNode(n)) na.appendChild(mkNodeDeleteBtn(() => cDel(n.id)));
     nd.style.position = 'relative';
     for (let ai = 0; ai < peersPresence.length; ai++) {
       const pr = peersPresence[ai];
-      const psid = pr && pr.selected_node_id ? String(pr.selected_node_id).trim() : '';
-      if (psid !== n.id) continue;
+      const psid = normalizePresenceSelectedNodeIdForTree(pr?.selected_node_id, pilotNodeIdSet);
+      if (!psid || psid !== n.id) continue;
       const av = document.createElement('div');
       av.className = 'np-avatar';
       av.setAttribute('aria-hidden', 'true');
@@ -3212,10 +3379,13 @@ export function initPlannode(opts = {}) {
     }
     redoLast();
   });
+  const isPilotTypingTarget = (t) =>
+    !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable));
+
   const onGlobalKeyDown = (e) => {
     if (e.key === 'Escape' && (relinkArm || relinkDragActive)) {
       const t = e.target;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (isPilotTypingTarget(t)) return;
       e.preventDefault();
       clearRelinkArm();
       clearRelinkHold();
@@ -3224,7 +3394,7 @@ export function initPlannode(opts = {}) {
       return;
     }
     const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (isPilotTypingTarget(t)) return;
 
     /** 다시 실행: Ctrl+Shift+Z / ⌘⇧Z 또는 Ctrl+Y / ⌘Y */
     const isZ =
@@ -3632,9 +3802,6 @@ export function initPlannode(opts = {}) {
           collapsedNodeIds.clear();
         }
         if (selId && !find(selId)) selId = null;
-        const primary =
-          nodes.find((n) => !n.parent_id) ?? (nodes.length ? nodes[0] : null);
-        if (primary && (!selId || !find(selId))) selId = primary.id;
         const pnt = document.getElementById('PNT');
         if (pnt) pnt.textContent = project.name;
         if (ES) ES.style.display = 'none';
@@ -3643,6 +3810,10 @@ export function initPlannode(opts = {}) {
       } finally {
         syncing = false;
       }
+      /* 동기 스택·스토어 후속이 끝난 뒤 한 번 emit — syncing 가드와 짝(plan-output P-3 #5·이어하기 플랜). */
+      queueMicrotask(() => {
+        maybeEmitNodeSelect();
+      });
     },
     clearCanvas() {
       syncing = true;

@@ -4,6 +4,7 @@ import {
   gatherWorkspaceBundle,
   mergeWorkspaceBundleFromCloudRemote,
   mergeNodeListsForCloud,
+  mergeNodeListsForCloudByProjectMeta,
   loadProjectNodesFromLocalStorage,
   replaceWorkspaceFromBundle,
   upsertImportedPlannodeTreeV1,
@@ -13,6 +14,7 @@ import {
   projectWorkspaceNodesJsonSnapshot,
   clearPendingWorkspaceDeletions,
   pruneDeletedProjectTombstonesAgainstCloudProjectIds,
+  getDeletedProjectTombstoneIds,
   type WorkspaceBundle
 } from '$lib/stores/projects';
 import {
@@ -141,6 +143,14 @@ function rpcBigintToNumber(data: unknown): number | null {
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+/** `revision_stale` 예외의 `detail`(현재 서버 revision 문자열) → 재시도 `p_base_revision` 힌트 */
+function parseStaleRevisionFromCollabError(err: {
+  message?: string;
+  details?: string;
+}): number | null {
+  return rpcBigintToNumber(String(err.details ?? '').trim() || null);
 }
 
 type UpsertBundleRpcResult = {
@@ -285,6 +295,8 @@ function warnMergeSliceThrottled(projectId: string, message: string): void {
 }
 
 async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string): Promise<void> {
+  /** 플랜(공유 동시편집 보완): push 루프 전에 공유 슬라이스를 한 번 당겨 로컬·gather 번들이 소유자 쪽 최신과 어긋나지 않게 한다. */
+  await pullSharedProjectSlicesIfNewer();
   for (const p of bundle.projects) {
     const src = p.cloud_workspace_source_user_id;
     if (!src || src === userId) continue;
@@ -293,6 +305,8 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
 
     let lastErr: { message?: string; details?: string; code?: string } | null = null;
     let revisionStaleNotifiedThisPush = false;
+    /** 첫 `revision_stale`의 `details`(서버 revision)로 2차 시도 시 불필요한 400·null 우회를 줄임 */
+    let revisionHintFromStale: number | null = null;
     for (let attempt = 0; attempt < CLOUD_MERGE_SLICE_MAX_ATTEMPTS; attempt++) {
       if (attempt > 0) {
         const delay =
@@ -303,12 +317,22 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       const fresh = gatherWorkspaceBundle();
       const proj = fresh.projects.find((x) => x.id === p.id);
       if (!proj) break;
-      const nodes = fresh.nodesByProject[p.id] ?? [];
+      let nodes = fresh.nodesByProject[p.id] ?? [];
+      /** push 전 소유자 슬라이스 병합: 공유자 메타가 더 새로우면 삭제·이동을 `p_nodes`에 반영, 아니면 LWW 흡수만. */
+      const ownerSlice = await fetchProjectSliceFromCloud(src, p.id);
+      if (ownerSlice) {
+        nodes = mergeNodeListsForCloudByProjectMeta(
+          nodes,
+          ownerSlice.nodes,
+          proj.updated_at,
+          ownerSlice.project.updated_at,
+          p.id
+        );
+      }
       const { cloud_workspace_source_user_id: _cw, ...meta } = proj;
 
-      // revision_stale 경합 발생 시 다음 시도부터 null로 전환(get_revision 생략)
-      let baseRevision: number | null = null;
-      if (!revisionStaleNotifiedThisPush) {
+      let baseRevision: number | null = revisionHintFromStale;
+      if (baseRevision === null && !revisionStaleNotifiedThisPush) {
         const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
           p_workspace_user_id: src,
           p_project_id: p.id
@@ -351,17 +375,19 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
         });
         if (!mErr) {
           lastErr = null;
+          revisionHintFromStale = null;
           break;
         }
         lastErr = mErr;
         const msg = String(mErr.message ?? '');
         const det = String((mErr as { details?: string }).details ?? '');
         if (msg.includes('revision_stale') || det.includes('revision_stale')) {
+          const hinted = parseStaleRevisionFromCollabError(mErr);
+          if (hinted !== null) revisionHintFromStale = hinted;
           await pullSharedProjectSlicesIfNewer();
           if (!revisionStaleNotifiedThisPush) {
             revisionStaleNotifiedThisPush = true;
             notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
-            // revision_stale 첫 발생 후 다음 시도는 baseRevision=null로 경합 탈출
           }
           continue;
         }
@@ -382,6 +408,13 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       }
     }
     if (lastErr) {
+      console.warn(
+        '[pushProjectSlicesToOwners] plannode_workspace_merge_project_slice',
+        p.id,
+        lastErr.message,
+        (lastErr as { details?: string; code?: string }).details ?? '',
+        (lastErr as { code?: string }).code ?? ''
+      );
       warnMergeSliceThrottled(p.id, lastErr.message ?? '');
       if (!isMergeLockOrBusyError(lastErr)) {
         notifyMergeSliceFailureToastThrottled(p.id, p.name, lastErr);
@@ -666,6 +699,8 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   const src = local.cloud_workspace_source_user_id;
   if (!src || src === uid) return false;
 
+  if (getDeletedProjectTombstoneIds().has(local.id)) return false;
+
   const slice = await fetchProjectSliceFromCloud(src, local.id);
   if (!slice) return false;
 
@@ -678,12 +713,13 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   const lTime = parseTs(local.updated_at);
   const remoteMetaNewer = rTime > lTime;
   const localNodes = loadProjectNodesFromLocalStorage(local.id);
-  /**
-   * 프로젝트 메타 최신 여부와 무관하게 노드 수준 LWW는 항상 적용한다.
-   * `remoteMetaNewer = false`여도 소유자가 배지·순서만 바꾼 경우 updated_at이 같거나
-   * 더 새로운 노드는 로컬로 흡수해야 한다.
-   */
-  const mergedNodes = mergeNodeListsForCloud(localNodes, slice.nodes, remoteMetaNewer, local.id);
+  const mergedNodes = mergeNodeListsForCloudByProjectMeta(
+    localNodes,
+    slice.nodes,
+    local.updated_at,
+    slice.project.updated_at,
+    local.id
+  );
   const mergedProject = remoteMetaNewer
     ? { ...slice.project, cloud_workspace_source_user_id: src }
     : { ...local, cloud_workspace_source_user_id: src };
