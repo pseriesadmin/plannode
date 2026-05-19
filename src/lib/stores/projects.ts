@@ -1507,7 +1507,8 @@ export function mergeNodeListsForCloud(
 
 /**
  * 프로젝트 `updated_at` 선후에 따라 노드 병합 모드를 고른다(공유·소유자 동일 정책).
- * - 원격 메타가 더 새로우면: 원격에 없는 로컬 id 제거 + `preserveLocalNewIds`(노드 `updated_at` > 원격 프로젝트 메타).
+ * - 원격 메타가 더 새로우면: 원격에 없는 로컬 id 제거 + 보존 — 노드 `updated_at` > 원격 프로젝트 메타,
+ *   또는 동시 편집 시 `touchProjectUpdatedAt`과 같은 시각으로 저장된 로컬 전용 id(`updated_at` ≥ 로컬 프로젝트 메타).
  * - 로컬 메타가 더 새로워도: 원격 슬라이스에 없고 노드 `updated_at` ≤ 원격 프로젝트 메타인 id는 **소유자 삭제**로 보고 제거
  *   (공유 쪽 메타만 앞선 채로 풀할 때 삭제가 안 보이던 회귀 방지).
  * - 그 외 로컬 전용 id: LWW 흡수만(`false`) 후 위 삭제 필터.
@@ -1529,7 +1530,11 @@ export function mergeNodeListsForCloudByProjectMeta(
   if (rTime > lTime) {
     const preserve = new Set(
       localNodes
-        .filter((n) => !remoteIds.has(n.id) && parseTs(n.updated_at) > rTime)
+        .filter((n) => {
+          if (remoteIds.has(n.id)) return false;
+          const nt = parseTs(n.updated_at);
+          return nt > rTime || nt >= lTime;
+        })
         .map((n) => n.id)
     );
     return mergeNodeListsForCloud(localNodes, remoteNodes, true, projectId, preserve);
