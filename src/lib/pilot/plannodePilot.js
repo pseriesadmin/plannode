@@ -281,6 +281,50 @@ let redoStack = [];
 let applyingUndo = false;
 /** addChild 직후 첫 showEdit「저장」은 addChild에서 이미 undo 스냅을 쌓았으므로 중복 push 방지 */
 const skipFirstEditSaveUndo = new Set();
+/** 노드 상세(showEdit) 모달이 열려 있는 동안 id — 클라우드 hydrate가 작성 중 필드를 덮지 않도록 */
+let nodeEditModalNodeId = null;
+
+function isNodeEditModalDomOpen() {
+  return !!(nodeEditModalNodeId && document.querySelector('.mbg .ein'));
+}
+
+/** 모달 입력란 → 파일럿 노드(동기화 hydrate 직전·보호 병합용) */
+function applyNodeEditModalDraftToPilot(nodeId) {
+  if (!nodeId || nodeEditModalNodeId !== nodeId || !isNodeEditModalDomOpen()) return null;
+  const target = find(nodeId);
+  if (!target) return null;
+  const nm = String(document.querySelector('.mbg .ein')?.value ?? '')
+    .trim()
+    .slice(0, NODE_TITLE_MAX_LEN);
+  const desc = document.querySelector('.mbg .eid')?.value?.trim() ?? '';
+  target.name = nm.length > 0 ? nm : target.name || '새 노드';
+  target.description = desc;
+  const numIn = String(document.querySelector('.mbg .einum')?.value ?? '')
+    .trim()
+    .slice(0, 20);
+  if (numIn) target.num = numIn;
+  return target;
+}
+
+function mergeProtectedNodeIntoHydrateList(list, protectId) {
+  if (!protectId) return list;
+  applyNodeEditModalDraftToPilot(protectId);
+  const live = find(protectId);
+  if (!live) return list;
+  const snap = {
+    ...live,
+    badges: live.badges || [],
+    parent_id: live.parent_id ?? null
+  };
+  let found = false;
+  const merged = list.map((nn) => {
+    if (nn.id !== protectId) return nn;
+    found = true;
+    return { ...snap };
+  });
+  if (!found) merged.push({ ...snap });
+  return merged;
+}
 
 function clearUndoStack() {
   undoStack = [];
@@ -447,6 +491,8 @@ function isStrictDescendantOf(nid, ancId) {
 }
 /** 트리 접기 버튼 표시 크기(22px 대비 30% 축소). viewBox는 22 유지 */
 const NODE_COLLAPSE_BTN_PX = 22 * 0.7;
+/** 노드 카드·상세 모달 제목 입력 상한(한·영·숫자 공통 글자 수) */
+const NODE_TITLE_MAX_LEN = 50;
 /**
  * 트리 접기 토글 SVG 내부 — `right`: 펼침→우측, 접힘→좌측 · `topdown`: 펼침→위, 접힘→아래
  * @param {boolean} isCollapsed
@@ -1385,12 +1431,14 @@ function schedulePersist() {
 }
 
 /** 기능명세 등 그리드 편집 후 지연 저장을 즉시 실행 — 탭 이탈·SSoT 정합 */
-function flushPersistNow() {
+function flushPersistNow(opts) {
+  const force = !!(opts && opts.force);
   if (persistTimer != null) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
-  if (!onPersist || syncing || !curP) return;
+  if (!onPersist || !curP) return;
+  if (!force && syncing) return;
   try {
     onPersist({ nodes: JSON.parse(JSON.stringify(nodes)), curP });
   } catch (_) {}
@@ -2254,7 +2302,7 @@ function render() {
       ? '<div class="nn-tooltip" role="tooltip"><div class="nn-tooltip-t">제목 미리보기</div><div class="nn-tooltip-b"></div></div>'
       : '';
     const numDisp = esc(n.num && String(n.num).trim() ? n.num : defaultNumForNode(n));
-    nd.innerHTML = `<div class="ndt"><div class="nb" style="background:${bc}"></div><div class="nn-wrap${hasLongTitle ? ' nn-wrap--tip' : ''}" style="flex:1;min-width:0"><div class="nn-line"><span class="nn">${esc(displayLabel)}</span><span class="ndepth">L${d}</span></div>${titleTipBlock}</div></div>${
+    nd.innerHTML = `<div class="ndt"><div class="nb" style="background:${bc}"></div><div class="nn-wrap${hasLongTitle ? ' nn-wrap--tip' : ''}" style="flex:1;min-width:0"><div class="nn-line"><span class="nn" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${esc(displayLabel)}</span><span class="ndepth">L${d}</span></div>${titleTipBlock}</div></div>${
       hasDesc
         ? `<div class="nds-wrap"><div class="nds">${esc(n.description || '')}</div><div class="nds-tooltip" role="tooltip"><div class="nds-tooltip-t">미리보기</div><div class="nds-tooltip-b"></div></div></div>`
         : ''
@@ -2694,6 +2742,7 @@ function showEdit(n) {
     toast('가져온 JSON 전역 노드는 여기서 편집하지 말고, JSON 가져오기·보내기로 맞춰줘.');
     return;
   }
+  nodeEditModalNodeId = n.id;
   // 모달 편집 시 명시 저장된 배지만 로드 (추론 배지는 모달에 표시하지 않음)
   const working = cloneBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: false }));
   const pool = getEffectiveBadgePool();
@@ -2704,7 +2753,7 @@ function showEdit(n) {
     buildTrackChipsHtml('prj', '🟢 기획 (PRJ)', [...pool.prj], working)
   ].join('');
   showIM(
-    `<input class="fi ein" type="text" value="${esc(n.name)}" placeholder="${esc('노드 이름 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off">
+    `<input class="fi ein" type="text" value="${esc(String(n.name ?? '').slice(0, NODE_TITLE_MAX_LEN))}" placeholder="${esc('노드 이름 입력')}" maxlength="${NODE_TITLE_MAX_LEN}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off" title="최대 ${NODE_TITLE_MAX_LEN}자(영·숫자·한글)">
     <textarea class="fi eid" rows="2" placeholder="${esc('노드 설명 입력')}" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;resize:vertical;margin-bottom:10px" autocomplete="off">${esc(n.description || '')}</textarea>
     <input class="fi einum" type="text" value="${esc(String(n.num ?? '').slice(0, 20))}" placeholder="${esc('분류 기호 및 번호 입력')}" maxlength="20" style="width:100%;background:#faf9f7;border:1.5px solid #e0dbd4;border-radius:8px;color:#1a1a1a;font-size:13px;padding:8px 10px;outline:none;font-family:inherit;margin-bottom:10px" autocomplete="off" title="최대 20자(영·숫자·한글)">
     <label class="fl">배지 (${nPool} · 3트랙)</label><div style="max-height:min(52vh,420px);overflow-y:auto;padding-right:4px;margin-top:4px">${bh}</div>`,
@@ -2715,13 +2764,19 @@ function showEdit(n) {
         V,
         () => {
           // hydrateFromStore(스토어 동기) 후 이전 노드 참조 n은 nodes 배열에 없을 수 있음 — id로 최신 객체를 잡는다
-          const target = find(n.id) ?? n;
+          const target = find(n.id);
+          if (!target) {
+            toast('동기화 직후 노드를 찾지 못했어요. 잠시 뒤 다시 저장해줘');
+            return;
+          }
           if (skipFirstEditSaveUndo.has(n.id)) {
             skipFirstEditSaveUndo.delete(n.id);
           } else {
             pushUndoSnapshot();
           }
-          const nm = document.querySelector('.ein')?.value?.trim() ?? '';
+          const nm = String(document.querySelector('.ein')?.value ?? '')
+            .trim()
+            .slice(0, NODE_TITLE_MAX_LEN);
           const desc = document.querySelector('.eid')?.value?.trim() ?? '';
           // 제목·설명 둘 다 비어 있으면 working 배지 전부 초기화 (빈 노드 저장 시 DEV 강제 매핑 차단)
           if (!nm && !desc) {
@@ -2746,6 +2801,7 @@ function showEdit(n) {
           target.metadata = san.metadata !== undefined ? san.metadata : {};
           nodes = [...nodes];
           render();
+          flushPersistNow({ force: true });
           toast('저장됨(이 기기) · 클라우드 자동 반영');
         }
       ]
@@ -2768,6 +2824,7 @@ function showEdit(n) {
       });
     },
     (how) => {
+      if (nodeEditModalNodeId === n.id) nodeEditModalNodeId = null;
       if (how !== 'ok' && skipFirstEditSaveUndo.has(n.id)) {
         skipFirstEditSaveUndo.delete(n.id);
       }
@@ -3752,6 +3809,7 @@ export function initPlannode(opts = {}) {
       getAccessToken = null;
       getPlanProjectId = null;
       clearUndoStack();
+      nodeEditModalNodeId = null;
     },
     /** Svelte 스토어에서 프로젝트+노드 주입 */
     /** 스토어 프로젝트 메타만 갱신 — 노드·Undo 유지 (`touchProjectUpdatedAt` 등) */
@@ -3770,12 +3828,16 @@ export function initPlannode(opts = {}) {
         const projectChanged = prevPid !== project.id;
         curP = project;
         loadNodeMapLayoutForProject(project.id);
+        const protectId =
+          nodeEditModalNodeId && isNodeEditModalDomOpen() ? nodeEditModalNodeId : null;
         if (pilotNodes?.length) {
-          nodes = pilotNodes.map((n) => ({
+          let mapped = pilotNodes.map((n) => ({
             ...n,
             badges: n.badges || [],
             parent_id: n.parent_id ?? null
           }));
+          if (protectId) mapped = mergeProtectedNodeIntoHydrateList(mapped, protectId);
+          nodes = mapped;
         } else {
           nodes = [
             {
