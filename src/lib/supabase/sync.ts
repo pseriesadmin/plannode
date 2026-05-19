@@ -179,6 +179,36 @@ async function canPushMergeSliceForProject(projectId: string, workspaceUserId: s
   return true;
 }
 
+/** collab_meta.revision — Realtime·폴백 poll 중복 pull 방지 (키: workspaceUserId:projectId) */
+const collabRevisionCache = new Map<string, number>();
+
+function collabRevisionCacheKey(workspaceUserId: string, projectId: string): string {
+  return `${workspaceUserId}:${projectId}`;
+}
+
+export function getCachedCollabRevision(workspaceUserId: string, projectId: string): number | null {
+  const v = collabRevisionCache.get(collabRevisionCacheKey(workspaceUserId, projectId));
+  return v === undefined ? null : v;
+}
+
+export function setCachedCollabRevision(workspaceUserId: string, projectId: string, revision: number): void {
+  collabRevisionCache.set(collabRevisionCacheKey(workspaceUserId, projectId), revision);
+}
+
+async function fetchCollabRevision(workspaceUserId: string, projectId: string): Promise<number | null> {
+  const { data, error } = await supabase.rpc('plannode_project_collab_get_revision', {
+    p_workspace_user_id: workspaceUserId,
+    p_project_id: projectId
+  });
+  if (error) {
+    if (!isCollabRevisionRpcMissing(error) && import.meta.env.DEV) {
+      console.warn('[fetchCollabRevision]', projectId, error.message);
+    }
+    return null;
+  }
+  return rpcBigintToNumber(data);
+}
+
 const mergeSliceWarnAt = new Map<string, number>();
 const mergeSliceUserToastAt = new Map<string, number>();
 const mergeLockUserToastAt = new Map<string, number>();
@@ -751,6 +781,213 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
     if (ref) selectProject(ref);
   }
   return true;
+}
+
+/**
+ * collab_meta.revision 신호·폴백 poll 전용 pull-only (업로드·`runBidirectionalCloudSync` 없음).
+ * 멤버(`cloud_workspace_source_user_id` ≠ 본인): `mergeSharedProjectSliceFromCloudIfApplicable`
+ * 소유자(출처 없음 또는 본인 uid): `pullOwnWorkspaceIfChanged` + 현재 프로젝트면 `selectProject`
+ */
+export async function pullCollabSliceForProject(
+  project: Project,
+  reason: string,
+  opts?: { knownRemoteRevision?: number | null }
+): Promise<boolean> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
+  const uid = getAuthUserId();
+  if (!uid || !project?.id) return false;
+
+  const workspaceUserId = project.cloud_workspace_source_user_id ?? uid;
+  const remoteRev =
+    opts?.knownRemoteRevision != null
+      ? opts.knownRemoteRevision
+      : await fetchCollabRevision(workspaceUserId, project.id);
+  if (remoteRev !== null) {
+    const cached = getCachedCollabRevision(workspaceUserId, project.id);
+    if (cached !== null && cached === remoteRev) {
+      return false;
+    }
+  }
+
+  const src = project.cloud_workspace_source_user_id;
+  let changed = false;
+  if (src && src !== uid) {
+    const ref = get(projects).find((p) => p.id === project.id) ?? project;
+    changed = await mergeSharedProjectSliceFromCloudIfApplicable(ref);
+  } else {
+    const n = await pullOwnWorkspaceIfChanged();
+    changed = n > 0;
+    if (changed) {
+      const cur = get(currentProject);
+      if (cur?.id === project.id) {
+        const ref = get(projects).find((p) => p.id === project.id);
+        if (ref) selectProject(ref);
+      }
+    }
+  }
+
+  if (remoteRev !== null) {
+    setCachedCollabRevision(workspaceUserId, project.id, remoteRev);
+  } else if (changed) {
+    const revAfter = await fetchCollabRevision(workspaceUserId, project.id);
+    if (revAfter !== null) setCachedCollabRevision(workspaceUserId, project.id, revAfter);
+  }
+
+  if (import.meta.env.DEV && changed) {
+    console.info('[pullCollabSliceForProject]', { projectId: project.id, reason, workspaceUserId });
+  }
+  return changed;
+}
+
+/** Realtime 누락·미배포 SQL 대비 — revision 변경 시에만 pull-only */
+export async function pollCollabRevisionFallback(project: Project): Promise<boolean> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
+  const uid = getAuthUserId();
+  if (!uid || !project?.id) return false;
+
+  const workspaceUserId = project.cloud_workspace_source_user_id ?? uid;
+  const remoteRev = await fetchCollabRevision(workspaceUserId, project.id);
+  if (remoteRev === null) return false;
+
+  const cached = getCachedCollabRevision(workspaceUserId, project.id);
+  if (cached !== null && cached === remoteRev) return false;
+
+  const ref = get(projects).find((p) => p.id === project.id) ?? project;
+  return pullCollabSliceForProject(ref, 'collab-rev-poll');
+}
+
+const COLLAB_REV_PULL_DEBOUNCE_MS = 200;
+const COLLAB_REV_BUSY_RETRY_MS = 500;
+const COLLAB_REV_BUSY_RETRY_MAX = 4;
+
+let collabRevisionChannel: ReturnType<typeof supabase.channel> | null = null;
+let collabRevisionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let collabRevisionBusyRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let collabRevisionBusyRetryCount = 0;
+
+function clearCollabRevisionPullTimers(): void {
+  if (collabRevisionDebounceTimer != null) {
+    clearTimeout(collabRevisionDebounceTimer);
+    collabRevisionDebounceTimer = null;
+  }
+  if (collabRevisionBusyRetryTimer != null) {
+    clearTimeout(collabRevisionBusyRetryTimer);
+    collabRevisionBusyRetryTimer = null;
+  }
+  collabRevisionBusyRetryCount = 0;
+}
+
+function revisionFromCollabRow(row: Record<string, unknown> | null | undefined): number | null {
+  if (!row) return null;
+  return rpcBigintToNumber(row.revision);
+}
+
+function scheduleCollabRevisionPull(projectId: string, reason: string, revisionHint: number | null): void {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  if (get(currentProject)?.id !== projectId) return;
+
+  const ref = get(projects).find((p) => p.id === projectId);
+  if (!ref) return;
+
+  const uid = getAuthUserId();
+  if (!uid) return;
+  const workspaceUserId = ref.cloud_workspace_source_user_id ?? uid;
+  if (revisionHint !== null) {
+    const cached = getCachedCollabRevision(workspaceUserId, projectId);
+    if (cached !== null && cached === revisionHint) return;
+  }
+
+  if (collabRevisionDebounceTimer != null) clearTimeout(collabRevisionDebounceTimer);
+  collabRevisionDebounceTimer = setTimeout(() => {
+    collabRevisionDebounceTimer = null;
+    void flushCollabRevisionPull(projectId, reason, revisionHint);
+  }, COLLAB_REV_PULL_DEBOUNCE_MS);
+}
+
+async function flushCollabRevisionPull(
+  projectId: string,
+  reason: string,
+  revisionHint: number | null = null
+): Promise<void> {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  if (get(currentProject)?.id !== projectId) return;
+
+  const { isCloudBidirectionalSyncBusy } = await import('$lib/supabase/workspacePush');
+  if (isCloudBidirectionalSyncBusy()) {
+    if (collabRevisionBusyRetryCount < COLLAB_REV_BUSY_RETRY_MAX) {
+      collabRevisionBusyRetryCount += 1;
+      collabRevisionBusyRetryTimer = setTimeout(() => {
+        collabRevisionBusyRetryTimer = null;
+        void flushCollabRevisionPull(projectId, reason, revisionHint);
+      }, COLLAB_REV_BUSY_RETRY_MS * collabRevisionBusyRetryCount);
+    }
+    return;
+  }
+  collabRevisionBusyRetryCount = 0;
+
+  const ref = get(projects).find((p) => p.id === projectId);
+  if (!ref) return;
+  await pullCollabSliceForProject(ref, reason, {
+    knownRemoteRevision: revisionHint
+  });
+}
+
+/**
+ * `plannode_project_collab_meta` revision UPDATE/INSERT — Realtime `postgres_changes`.
+ * 선행: `docs/supabase/20260520_plannode_collab_meta_realtime_rls.sql`
+ */
+export function subscribeCollabRevisionRealtime(project: Project): void {
+  unsubscribeCollabRevisionRealtime();
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return;
+  const uid = getAuthUserId();
+  if (!uid || !project?.id?.trim()) return;
+
+  const pid = project.id.trim();
+  const workspaceUserId = (project.cloud_workspace_source_user_id ?? uid).trim();
+  if (!workspaceUserId) return;
+
+  const onCollabMetaChange = (row: Record<string, unknown> | null | undefined) => {
+    if (!row || String(row.project_id ?? '').trim() !== pid) return;
+    const rev = revisionFromCollabRow(row);
+    scheduleCollabRevisionPull(pid, 'collab-rev-rt', rev);
+  };
+
+  const channelFilter = `workspace_user_id=eq.${workspaceUserId}`;
+  collabRevisionChannel = supabase
+    .channel(`collab-rev:${workspaceUserId}:${pid}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'plannode_project_collab_meta',
+        filter: channelFilter
+      },
+      (payload) => {
+        onCollabMetaChange(payload.new as Record<string, unknown> | undefined);
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'plannode_project_collab_meta',
+        filter: channelFilter
+      },
+      (payload) => {
+        onCollabMetaChange(payload.new as Record<string, unknown> | undefined);
+      }
+    )
+    .subscribe();
+}
+
+export function unsubscribeCollabRevisionRealtime(): void {
+  clearCollabRevisionPullTimers();
+  if (collabRevisionChannel) {
+    void supabase.removeChannel(collabRevisionChannel);
+    collabRevisionChannel = null;
+  }
 }
 
 /** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영 */

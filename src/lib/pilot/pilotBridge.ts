@@ -115,7 +115,17 @@ export function mountPilotBridge(): { destroy: () => void } {
       const { data } = await supabase.auth.getSession();
       return data.session?.access_token ?? null;
     },
-    getPlanProjectId: () => get(currentProject)?.plan_project_id ?? null
+    getPlanProjectId: () => get(currentProject)?.plan_project_id ?? null,
+    getStoreNodesForCollabMerge: () => {
+      const p = get(currentProject);
+      if (!p?.id) return [];
+      const list = get(nodesStore);
+      if (list.length > 0) {
+        const pid = list[0]?.project_id;
+        if (pid && pid !== p.id) return [];
+      }
+      return storeNodesToPilot(list);
+    }
   });
 
   if (!pilotApi) {

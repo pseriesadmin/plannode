@@ -12,6 +12,11 @@ import { dedupeProjectsStoreByLatestUpdatedAt } from '$lib/stores/projects';
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let bidirectionalBusy = false;
 
+/** `sync.ts` collab revision pull — `runBidirectionalCloudSync` 업로드와 직렬화 */
+export function isCloudBidirectionalSyncBusy(): boolean {
+  return bidirectionalBusy;
+}
+
 function bumpModalProjectListSync(reason: string): void {
   if (!browser) return;
   try {

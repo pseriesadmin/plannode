@@ -126,6 +126,15 @@ describe('mergeNodeListsForCloud', () => {
     expect(out.map((x) => x.id)).toEqual(['keep']);
   });
 
+  it('mergeNodeListsForCloudByProjectMeta: remote meta newer preserves local-only id saved with local project touch (concurrent add)', () => {
+    const lMeta = '2026-05-19T10:00:00.000Z';
+    const rMeta = '2026-05-19T10:00:01.000Z';
+    const local = [N('keep', '2026-05-18T00:00:00.000Z'), N('just_added', lMeta)];
+    const remote = [N('keep', '2026-05-18T00:00:00.000Z')];
+    const out = mergeNodeListsForCloudByProjectMeta(local, remote, lMeta, rMeta, PID);
+    expect(out.map((x) => x.id)).toEqual(['keep', 'just_added']);
+  });
+
   it('mergeNodeListsForCloudByProjectMeta: remote meta newer preserves collab-only id newer than owner meta', () => {
     const local = [N('keep', '2026-05-18T00:00:00.000Z'), N('collab_new', '2026-05-19T13:00:00.000Z')];
     const remote = [N('keep', '2026-05-18T00:00:00.000Z')];
