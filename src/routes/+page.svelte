@@ -123,8 +123,7 @@
     dismissPilotRelinkGuide,
     pilotSetNodeMapLayout
   } from '$lib/pilot/pilotBridge';
-  import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
-  import type { IAExportIntent } from '$lib/ai/iaExportRunner';
+  import { pendingIaTemplateExport, type IaTemplateKind } from '$lib/stores/iaExportIntent';
   import { slugExportName } from '$lib/ai/iaGridCsvExport';
   import type { PageData } from './$types';
   import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
@@ -1012,10 +1011,10 @@
     pickView('tree');
   }
 
-  /** 상단 출력 → 화면 목록 인텐트: IA 탭으로 전환 후 `IAExportMenu`가 1회 실행 */
-  function goIaFromOutput(intent: IAExportIntent) {
+  /** 상단 출력 → IA 탭 구조보내기(템플릿, LLM 없음) — `IAExportMenu.runTemplate` 1회 */
+  function goIaTemplateFromOutput(kind: IaTemplateKind) {
     closeOutputMenu();
-    pendingIaExportIntent.set(intent);
+    pendingIaTemplateExport.set(kind);
     pickView('ia');
   }
 
@@ -2611,17 +2610,17 @@
                 role="menuitem"
                 class="tb-output-menu-item"
                 title={outputFileSlug
-                  ? `IA 탭으로 이동 후 초안 실행 — 저장 시 권장: ${outputFileSlug}-ia.md (PRD F4-3)`
-                  : '정보 구조(IA) 탭으로 이동 후 메뉴·계층 초안 실행 (F2-4)'}
-                on:click={() => goIaFromOutput('IA_STRUCTURE')}>정보 구조(IA)</button>
+                  ? `IA 탭 → 구조보내기(템플릿, LLM 없음) — ${outputFileSlug}-ia.md (PRD F4-3)`
+                  : '정보 구조(IA) 탭 → 트리 기반 IA MD (F2-4·F4-3)'}
+                on:click={() => goIaTemplateFromOutput('ia')}>정보 구조(IA)</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
                 title={outputFileSlug
-                  ? `IA 탭에서 화면 목록 초안 — 저장 시 권장: ${outputFileSlug}-wireframes.md (PRD F4-4)`
-                  : 'IA 탭에서 화면 목록·와이어 키트 초안 (F2-4·F4-4 방향)'}
-                on:click={() => goIaFromOutput('SCREEN_LIST')}>화면·와이어 목록</button>
+                  ? `IA 탭 → 와이어 뼈대(템플릿) — ${outputFileSlug}-wireframes.md (PRD F4-4)`
+                  : '정보 구조(IA) 탭 → 와이어프레임 키트 MD (F2-4·F4-4)'}
+                on:click={() => goIaTemplateFromOutput('wireframes')}>화면·와이어 목록</button>
             </div>
           {/if}
         </div>
@@ -3037,6 +3036,9 @@
                 <strong>지금 모드</strong> · 로그인 전. 누르면 <em>복사용 글(프롬프트)</em>만 나와요. 위에서 로그인하면 서버를 거쳐 AI 답을 받을 수 있어요.
               </p>
             {/if}
+            <p class="ai-impl-hint__line">
+              트리에서 <strong>노드를 선택</strong>한 뒤 실행하면 계층 맥락(LAYER1)이 프롬프트에 들어가요. 하위가 없거나 맥락이 부족하면 API는 건너뛰고, 아래·상단 토스트 안내와 함께 <em>복사용 프롬프트</em>만 표시돼요.
+            </p>
           </div>
           <div class="ai-btn-grid">
             <button type="button" class="ai-btn" id="ai-prd">
