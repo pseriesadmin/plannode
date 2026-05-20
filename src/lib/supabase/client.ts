@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import type { BadgePoolTracks } from '$lib/ai/badgePoolConfig';
 import type { NodeMetadata } from '$lib/ai/types';
 
 const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL ?? '').trim();
@@ -36,6 +37,8 @@ export type Project = {
   plan_project_id?: string | null;
   /** PRD 탭 섹션별 사용자 초안(s1~s5) — 로컬·워크스페이스 JSON 동기 */
   prd_section_drafts?: Partial<Record<'s1' | 's2' | 's3' | 's4' | 's5', string>>;
+  /** 프로젝트별 표준 배지 풀 — 미설정 시 기기 전역 `plannode.standardBadgePool.v1` 폴백 */
+  badge_pool?: BadgePoolTracks;
   created_at: string;
   updated_at: string;
 };

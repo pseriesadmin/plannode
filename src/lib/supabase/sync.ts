@@ -15,6 +15,8 @@ import {
   clearPendingWorkspaceDeletions,
   pruneDeletedProjectTombstonesAgainstCloudProjectIds,
   getDeletedProjectTombstoneIds,
+  mergeProjectMetaForCloudSync,
+  reconcileProjectRecord,
   type WorkspaceBundle
 } from '$lib/stores/projects';
 import {
@@ -751,19 +753,28 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
     slice.project.updated_at,
     local.id
   );
-  const mergedProject = remoteMetaNewer
-    ? { ...slice.project, cloud_workspace_source_user_id: src }
-    : { ...local, cloud_workspace_source_user_id: src };
+  const remoteProj = reconcileProjectRecord({
+    ...slice.project,
+    cloud_workspace_source_user_id: src
+  });
+  const mergedProject = mergeProjectMetaForCloudSync(
+    reconcileProjectRecord({ ...local, cloud_workspace_source_user_id: src }),
+    remoteProj
+  );
 
   const nodesChanged =
     projectWorkspaceNodesJsonSnapshot(mergedNodes) !== projectWorkspaceNodesJsonSnapshot(localNodes);
+  const projectSettingsMetaSignature = (proj: Project): string =>
+    JSON.stringify({
+      name: proj.name,
+      author: proj.author,
+      start_date: proj.start_date,
+      end_date: proj.end_date,
+      description: proj.description ?? '',
+      badge_pool: proj.badge_pool ?? null
+    });
   const metaChanged =
-    remoteMetaNewer &&
-    (mergedProject.name !== local.name ||
-      mergedProject.author !== local.author ||
-      mergedProject.start_date !== local.start_date ||
-      mergedProject.end_date !== local.end_date ||
-      (mergedProject.description ?? '') !== (local.description ?? ''));
+    projectSettingsMetaSignature(mergedProject) !== projectSettingsMetaSignature(local);
   const projectTsChanged =
     remoteMetaNewer && String(mergedProject.updated_at || '') !== String(local.updated_at || '');
 

@@ -1,6 +1,7 @@
 /**
  * 표준 배지 풀 — 기본값(DEV/UX/PRJ) + 브라우저 localStorage 오버라이드.
- * `badgePromptInjector`·파일럿 칩·가져오기 정리(sanitize)가 동일 풀을 참조한다.
+ * 프로젝트 `badge_pool`이 있으면 해당 프로젝트 우선(`registerProjectBadgePoolLookup`).
+ * `badgePromptInjector`·파일럿 칩·가져오기 정리(sanitize)가 `getEffectiveBadgePool()`을 참조한다.
  */
 
 import { writable } from 'svelte/store';
@@ -30,6 +31,25 @@ export type BadgePoolTracks = {
 };
 
 const TOKEN_RE = /^[A-Z][A-Z0-9]{1,14}$/;
+
+const GLOBAL_MEMO_KEY = '__device__';
+
+type ProjectBadgePoolLookup = (projectId: string) => BadgePoolTracks | null | undefined;
+type CurrentProjectIdLookup = () => string | null;
+
+let projectBadgePoolLookup: ProjectBadgePoolLookup | null = null;
+let currentProjectIdLookup: CurrentProjectIdLookup | null = null;
+const memoByKey = new Map<string, BadgePoolTracks>();
+
+/** `projects.ts` 부트 시 등록 — 순환 import 방지용 콜백 */
+export function registerProjectBadgePoolLookup(fn: ProjectBadgePoolLookup): void {
+  projectBadgePoolLookup = fn;
+}
+
+/** 현재 열린 프로젝트 id — 인자 없는 `getEffectiveBadgePool()`용 */
+export function registerCurrentProjectIdLookup(fn: CurrentProjectIdLookup): void {
+  currentProjectIdLookup = fn;
+}
 
 export function defaultBadgePool(): BadgePoolTracks {
   return {
@@ -68,13 +88,15 @@ export function normalizeBadgePool(input: unknown): BadgePoolTracks {
   };
 }
 
-let memoPool: BadgePoolTracks | null = null;
-
-export function clearBadgePoolRuntimeCache(): void {
-  memoPool = null;
+export function clearBadgePoolRuntimeCache(projectId?: string): void {
+  if (projectId) {
+    memoByKey.delete(projectId);
+    return;
+  }
+  memoByKey.clear();
 }
 
-export function loadBadgePoolConfig(): BadgePoolTracks {
+function loadDeviceBadgePoolConfig(): BadgePoolTracks {
   if (typeof localStorage === 'undefined') return defaultBadgePool();
   try {
     const raw = localStorage.getItem(BADGE_POOL_STORAGE_KEY);
@@ -85,10 +107,35 @@ export function loadBadgePoolConfig(): BadgePoolTracks {
   }
 }
 
-export function getEffectiveBadgePool(): BadgePoolTracks {
-  if (memoPool) return memoPool;
-  memoPool = loadBadgePoolConfig();
-  return memoPool;
+function resolvePoolCacheKey(projectId: string | null | undefined): string {
+  return projectId ? projectId : GLOBAL_MEMO_KEY;
+}
+
+function loadPoolForCacheKey(cacheKey: string, projectId: string | null | undefined): BadgePoolTracks {
+  if (projectId && projectBadgePoolLookup) {
+    const fromProject = projectBadgePoolLookup(projectId);
+    if (fromProject) return fromProject;
+  }
+  return loadDeviceBadgePoolConfig();
+}
+
+/**
+ * 유효 배지 풀 — 프로젝트 `badge_pool` → 기기 전역 LS → 기본 21개.
+ * @param projectId 생략 시 `registerCurrentProjectIdLookup`으로 연 프로젝트 사용.
+ */
+export function getEffectiveBadgePool(projectId?: string | null): BadgePoolTracks {
+  const pid =
+    projectId === undefined ? (currentProjectIdLookup?.() ?? null) : projectId;
+  const cacheKey = resolvePoolCacheKey(pid);
+  const hit = memoByKey.get(cacheKey);
+  if (hit) return hit;
+  const pool = loadPoolForCacheKey(cacheKey, pid);
+  memoByKey.set(cacheKey, pool);
+  return pool;
+}
+
+export function loadBadgePoolConfig(): BadgePoolTracks {
+  return loadDeviceBadgePoolConfig();
 }
 
 export function saveBadgePoolConfig(pool: BadgePoolTracks): BadgePoolTracks {
@@ -97,7 +144,7 @@ export function saveBadgePoolConfig(pool: BadgePoolTracks): BadgePoolTracks {
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem(BADGE_POOL_STORAGE_KEY, JSON.stringify(normalized));
   }
-  memoPool = normalized;
+  memoByKey.set(GLOBAL_MEMO_KEY, normalized);
   badgePoolRevision.update((n) => n + 1);
   return normalized;
 }
@@ -108,7 +155,7 @@ export function resetBadgePoolConfigToDefaults(): BadgePoolTracks {
   }
   clearBadgePoolRuntimeCache();
   const d = defaultBadgePool();
-  memoPool = d;
+  memoByKey.set(GLOBAL_MEMO_KEY, d);
   badgePoolRevision.update((n) => n + 1);
   return d;
 }

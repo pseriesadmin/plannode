@@ -254,3 +254,21 @@ export function pilotFlushPersistNow() {
 export function pilotHasPendingGridPersist(): boolean {
   return pilotApi?.hasPendingGridPersist?.() ?? false;
 }
+
+/** 표준 배지 풀 저장·노드 정리 후 캔버스 칩 재반영 */
+export function pilotRehydrateCurrentProjectFromStore(): void {
+  if (!pilotApi) return;
+  const p = get(currentProject);
+  if (!p?.id) return;
+  const list = get(nodesStore);
+  if (list.length > 0) {
+    const pid = list[0]?.project_id;
+    if (pid && pid !== p.id) return;
+  }
+  syncingFromStore = true;
+  try {
+    pilotApi.hydrateFromStore(p, storeNodesToPilot(list));
+  } finally {
+    syncingFromStore = false;
+  }
+}

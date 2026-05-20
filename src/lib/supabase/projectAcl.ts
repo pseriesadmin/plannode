@@ -1,5 +1,6 @@
 import { supabase } from '$lib/supabase/client';
 import type { Project, Node } from '$lib/supabase/client';
+import { normalizeBadgePool, type BadgePoolTracks } from '$lib/ai/badgePoolConfig';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { getAuthEmail, getAuthEmailResolved, getAuthUserId } from '$lib/stores/authSession';
 import { writable } from 'svelte/store';
@@ -278,6 +279,10 @@ function parseProjectFromJson(obj: unknown): Project | null {
   const end_date = String(o.end_date ?? '');
   if (!id || !name) return null;
   const cw = o.cloud_workspace_source_user_id;
+  let badge_pool: BadgePoolTracks | undefined;
+  if (o.badge_pool != null) {
+    badge_pool = normalizeBadgePool(o.badge_pool);
+  }
   return {
     id,
     name,
@@ -288,6 +293,7 @@ function parseProjectFromJson(obj: unknown): Project | null {
     owner_user_id: o.owner_user_id != null ? String(o.owner_user_id) : undefined,
     cloud_workspace_source_user_id:
       cw != null && String(cw).trim() ? String(cw).trim() : undefined,
+    badge_pool,
     created_at: String(o.created_at ?? new Date().toISOString()),
     updated_at: String(o.updated_at ?? new Date().toISOString())
   };

@@ -1,29 +1,44 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher } from 'svelte';
   import {
     defaultBadgePool,
     loadBadgePoolConfig,
     saveBadgePoolConfig,
     resetBadgePoolConfigToDefaults,
     isValidBadgeToken,
+    badgePoolRevision,
     type BadgePoolTracks,
   } from '$lib/ai/badgePoolConfig';
+  import { getProjectBadgePool, setProjectBadgePool, projects } from '$lib/stores/projects';
 
-  const dispatch = createEventDispatcher<{ close: void; saved: void }>();
+  /** 설정 시 프로젝트 메타 `badge_pool`에 저장 — 미설정 시 기기 전역 LS */
+  export let projectId: string | null = null;
+  export let projectLabel: string | null = null;
+
+  const dispatch = createEventDispatcher<{ close: void; saved: { projectId: string | null } }>();
 
   let draft: BadgePoolTracks = defaultBadgePool();
   let addInputs: Record<'dev' | 'ux' | 'prj', string> = { dev: '', ux: '', prj: '' };
   let formError = '';
 
-  function syncFromStorage() {
-    draft = loadBadgePoolConfig();
+  function syncDraft() {
+    draft = projectId
+      ? (getProjectBadgePool(projectId) ?? loadBadgePoolConfig())
+      : loadBadgePoolConfig();
     addInputs = { dev: '', ux: '', prj: '' };
     formError = '';
   }
 
-  onMount(() => {
-    syncFromStorage();
-  });
+  /** 모달 재오픈·`setProjectBadgePool`·스토어 갱신 직후에도 저장된 프로젝트 풀을 다시 읽음 */
+  let lastSyncKey = '';
+  $: {
+    void $projects;
+    const k = `${projectId ?? ''}:${$badgePoolRevision}`;
+    if (k !== lastSyncKey) {
+      lastSyncKey = k;
+      syncDraft();
+    }
+  }
 
   function close() {
     dispatch('close');
@@ -54,15 +69,24 @@
   }
 
   function save() {
-    saveBadgePoolConfig(draft);
-    dispatch('saved');
+    if (projectId) {
+      setProjectBadgePool(projectId, draft);
+    } else {
+      saveBadgePoolConfig(draft);
+    }
+    dispatch('saved', { projectId });
     close();
   }
 
   function resetDefaults() {
     if (!confirm('표준 배지를 기본 21개로 되돌릴까?')) return;
-    draft = resetBadgePoolConfigToDefaults();
-    dispatch('saved');
+    if (projectId) {
+      draft = defaultBadgePool();
+      setProjectBadgePool(projectId, draft);
+    } else {
+      draft = resetBadgePoolConfigToDefaults();
+    }
+    dispatch('saved', { projectId });
     close();
   }
 
@@ -76,11 +100,24 @@
 <div class="bpm-bg" role="presentation" on:click|self={close}>
     <div class="bpm mo" role="dialog" aria-labelledby="bpm-title" aria-modal="true">
       <div class="bpm-head">
-        <h3 id="bpm-title">표준 배지 설정</h3>
+        <h3 id="bpm-title">
+          {#if projectId && projectLabel}
+            표준 배지 — {projectLabel}
+          {:else if projectId}
+            표준 배지 — 이 프로젝트
+          {:else}
+            표준 배지 설정
+          {/if}
+        </h3>
         <button type="button" class="bpm-x" aria-label="닫기" on:click={close}>✕</button>
       </div>
       <p class="bpm-lead">
-        노드 편집·가져오기 정리에 쓰는 <strong>허용 배지 풀</strong>이야. 이 기기 브라우저에만 저장돼.
+        {#if projectId}
+          노드 편집·가져오기에 쓰는 <strong>이 프로젝트 전용</strong> 허용 배지 풀이야. 클라우드 동기 시 프로젝트 메타에 함께
+          저장돼. 아직 저장한 적 없으면 아래는 <strong>이 기기 기본 풀</strong>을 보여줘.
+        {:else}
+          노드 편집·가져오기에 쓰는 <strong>허용 배지 풀</strong>이야. 이 기기 브라우저에만 저장돼.
+        {/if}
       </p>
       {#if formError}
         <p class="bpm-err">{formError}</p>
