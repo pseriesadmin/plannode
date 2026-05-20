@@ -17,9 +17,25 @@ import {
 } from '$lib/ai/badgePromptInjector';
 import { getEffectiveBadgePool } from '$lib/ai/badgePoolConfig';
 import { buildTreeText } from '$lib/ai/contextSerializer';
-import { buildPrompt, formatPromptForClipboard } from '$lib/ai/iaExporter';
+import {
+  buildPrompt,
+  formatPromptForClipboard,
+  isLayer1ContextSufficient,
+  resolveContextAnchorNodeId
+} from '$lib/ai/iaExporter';
+import { buildContextFromNodes } from '$lib/ai/contextSerializer';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
+import {
+  subscribeProjectTextOps,
+  unsubscribeProjectTextOps,
+  sendProjectTextOp
+} from '$lib/supabase/projectTextOps';
+import {
+  subscribeProjectStructureOps,
+  unsubscribeProjectStructureOps,
+  sendProjectStructureOp
+} from '$lib/supabase/projectStructureOps';
 import {
   PLANNODETREE_EXPORT_ROOT_VERSION,
   isPlannodeJsonGlobalMirrorNode,
@@ -267,8 +283,18 @@ let pendingSilentViewportFit = false;
 
 let syncing = false;
 let onPersist = null;
+/** @type {null | ((payload: { nodes: any[]; curP: any | null }) => void)} */
+let onRemoteStructureStoreSync = null;
 /** @type {null | (() => Promise<string | null>)} */
 let getAccessToken = null;
+/** EPIC C/D — Supabase auth uid (text·structure ops Broadcast) */
+let getCollabAuthUserId = null;
+let structureOpsApplyingRemote = false;
+let textOpsDescLastValue = '';
+let textOpsApplyingRemote = false;
+let textOpsCompositionHold = false;
+/** @type {(() => void) | null} */
+let textOpsDescInputCleanup = null;
 /** @type {null | (() => string | null | undefined)} */
 let getPlanProjectId = null;
 /** @type {null | (() => any[])} 모달 저장 시 pull로만 갱신된 스토어 노드를 파일럿에 합침 */
@@ -380,18 +406,287 @@ function applyNodeEditModalDraftToPilot(nodeId) {
   return target;
 }
 
+/**
+ * 모달 편집 중(pull·pending hydrate) — 원격 노드와 병합하되 **description은 .eid 유지**(OT EPIC C).
+ * @see MODAL_EDIT_HYDRATE_DEFER · docs/plannode_ot1_modal_poc_spike.md §4.4
+ */
 function mergeProtectedNodeIntoHydrateList(list, protectId) {
   if (!protectId) return list;
+  const remote = list.find((nn) => nn.id === protectId);
   applyNodeEditModalDraftToPilot(protectId);
   const live = find(protectId);
   if (!live) return list;
-  return mergeNodeSnapIntoHydrateList(list, live);
+  const ta = document.querySelector('.mbg .eid');
+  const keepModalDesc = isNodeEditModalDomOpen() && ta;
+  const merged = {
+    ...live,
+    ...(remote || {}),
+    description: keepModalDesc ? ta.value : (live.description ?? remote?.description ?? ''),
+    badges: live.badges?.length ? live.badges : remote?.badges || [],
+    parent_id: live.parent_id ?? remote?.parent_id ?? null,
+    mx: remote?.mx ?? live.mx ?? null,
+    my: remote?.my ?? live.my ?? null
+  };
+  return mergeNodeSnapIntoHydrateList(list, merged);
 }
 
 /**
  * 모달 저장 직전: 모달 중 pull로 스토어에만 쌓인 상대 노드를 파일럿에 합친 뒤 persist.
  * protectId(작성 중 노드)는 파일럿·모달 초안을 유지한다.
  */
+function teardownTextOpsDescEditor() {
+  if (textOpsDescInputCleanup) {
+    textOpsDescInputCleanup();
+    textOpsDescInputCleanup = null;
+  }
+  unsubscribeProjectTextOps();
+  textOpsDescLastValue = '';
+  textOpsApplyingRemote = false;
+  textOpsCompositionHold = false;
+}
+
+/** 단일 편집 구간 → insert/delete ops (OT1 POC) */
+function computeTextDiffOps(prev, next) {
+  if (prev === next) return [];
+  let start = 0;
+  const pl = prev.length;
+  const nl = next.length;
+  while (start < pl && start < nl && prev[start] === next[start]) start++;
+  let endPrev = pl;
+  let endNext = nl;
+  while (endPrev > start && endNext > start && prev[endPrev - 1] === next[endNext - 1]) {
+    endPrev--;
+    endNext--;
+  }
+  const ops = [];
+  const delLen = endPrev - start;
+  const insText = next.slice(start, endNext);
+  if (delLen > 0) ops.push({ type: 'delete', pos: start, len: delLen });
+  if (insText.length > 0) ops.push({ type: 'insert', pos: start, text: insText });
+  return ops;
+}
+
+function applyTextOpPayloadToString(value, payload) {
+  const pos = Math.max(0, Math.floor(Number(payload.pos) || 0));
+  if (payload.type === 'insert') {
+    const text = String(payload.text ?? '');
+    const p = Math.min(pos, value.length);
+    return value.slice(0, p) + text + value.slice(p);
+  }
+  const len = Math.max(1, Math.floor(Number(payload.len) || 1));
+  const p = Math.min(pos, value.length);
+  return value.slice(0, p) + value.slice(Math.min(value.length, p + len));
+}
+
+function handleRemoteTextOp(op) {
+  if (!op || op.field !== 'description') return;
+  if (!nodeEditModalNodeId || op.node_id !== nodeEditModalNodeId) return;
+  const ta = document.querySelector('.mbg .eid');
+  if (!ta) return;
+  textOpsApplyingRemote = true;
+  try {
+    const next = applyTextOpPayloadToString(ta.value, op.op);
+    ta.value = next;
+    textOpsDescLastValue = next;
+  } finally {
+    textOpsApplyingRemote = false;
+  }
+}
+
+function teardownStructureOps() {
+  unsubscribeProjectStructureOps();
+}
+
+/** cDel·원격 delete_node 공통 — 루트 포함 하위 id 목록 */
+function collectNodeSubtreeIds(rootId) {
+  const walk = (nid) => [nid, ...nodes.filter((x) => x.parent_id === nid).flatMap((c) => walk(c.id))];
+  return walk(rootId);
+}
+
+function applyRemoteAddNodeFromStructureOp(payload) {
+  if (!payload || payload.type !== 'add_node' || !payload.node?.id) return;
+  const { node } = payload;
+  if (find(node.id)) return;
+  structureOpsApplyingRemote = true;
+  try {
+    nodes = [
+      ...nodes,
+      {
+        id: node.id,
+        parent_id: node.parent_id,
+        name: node.name ?? '',
+        description: node.description ?? '',
+        node_type: node.node_type ?? 'detail',
+        num: node.num ?? '',
+        badges: [],
+        metadata: { badges: { dev: [], ux: [], prj: [] } },
+        mx: node.mx ?? null,
+        my: node.my ?? null
+      }
+    ];
+    syncNcFromNodes();
+    render();
+  } finally {
+    structureOpsApplyingRemote = false;
+  }
+}
+
+function applyRemoteMoveNodeFromStructureOp(payload) {
+  if (!payload || payload.type !== 'move_node' || !payload.node_id) return;
+  const node = find(payload.node_id);
+  if (!node) return;
+  const mx = Number(payload.mx);
+  const my = Number(payload.my);
+  if (!Number.isFinite(mx) || !Number.isFinite(my)) return;
+  structureOpsApplyingRemote = true;
+  try {
+    node.parent_id = payload.parent_id;
+    node.mx = mx;
+    node.my = my;
+    if (payload.num != null && String(payload.num).trim() !== '') node.num = String(payload.num);
+    nodes = [...nodes];
+    render();
+  } finally {
+    structureOpsApplyingRemote = false;
+  }
+}
+
+function applyRemoteDeleteNodeFromStructureOp(payload) {
+  if (!payload || payload.type !== 'delete_node' || !payload.node_id) return;
+  const rootId = payload.node_id;
+  if (!find(rootId)) return;
+  const ids = collectNodeSubtreeIds(rootId);
+  structureOpsApplyingRemote = true;
+  try {
+    if (curP?.id) registerRecentlyDeletedNodeIdsForCloudMerge(curP.id, ids);
+    if (nodeEditModalNodeId && ids.includes(nodeEditModalNodeId)) {
+      teardownTextOpsDescEditor();
+      nodeEditModalNodeId = null;
+    }
+    if (selId && ids.includes(selId)) selId = null;
+    nodes = nodes.filter((x) => !ids.includes(x.id));
+    syncNcFromNodes();
+    render();
+  } finally {
+    structureOpsApplyingRemote = false;
+  }
+}
+
+function syncStoreFromRemoteStructureOp() {
+  if (!onRemoteStructureStoreSync || !curP || syncing) return;
+  try {
+    onRemoteStructureStoreSync({
+      nodes: JSON.parse(JSON.stringify(nodes)),
+      curP
+    });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function handleRemoteStructureOp(op) {
+  if (!op || !curP || op.project_id !== curP.id) return;
+  if (structureOpsApplyingRemote) return;
+  const payload = op.op;
+  if (payload?.type === 'add_node') applyRemoteAddNodeFromStructureOp(payload);
+  else if (payload?.type === 'delete_node') applyRemoteDeleteNodeFromStructureOp(payload);
+  else if (payload?.type === 'move_node') applyRemoteMoveNodeFromStructureOp(payload);
+  else return;
+  syncStoreFromRemoteStructureOp();
+}
+
+function armStructureOpsForProject(projectId, userId) {
+  teardownStructureOps();
+  if (!projectId?.trim() || !userId?.trim()) return;
+  void subscribeProjectStructureOps(projectId.trim(), userId.trim(), handleRemoteStructureOp);
+}
+
+function sendAddNodeStructureOp(nn) {
+  if (!curP?.id || !nn?.id) return;
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (!collabUid) return;
+  const pos = gp(nn);
+  sendProjectStructureOp(curP.id, {
+    type: 'add_node',
+    node: {
+      id: nn.id,
+      parent_id: nn.parent_id,
+      name: nn.name ?? '',
+      description: nn.description ?? '',
+      node_type: nn.node_type ?? 'detail',
+      num: nn.num ?? '',
+      mx: nn.mx != null ? nn.mx : pos.x,
+      my: nn.my != null ? nn.my : pos.y
+    }
+  });
+}
+
+function sendDeleteNodeStructureOp(rootId) {
+  if (!curP?.id || !rootId) return;
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (!collabUid) return;
+  sendProjectStructureOp(curP.id, { type: 'delete_node', node_id: rootId });
+}
+
+/** sDrag pointerup — 드래그된 노드마다 move_node (형제 num·좌표 반영 후) */
+function sendMoveNodeStructureOps(draggedIds) {
+  if (!curP?.id || !draggedIds?.length) return;
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (!collabUid) return;
+  for (const id of draggedIds) {
+    const node = find(id);
+    if (!node || node.parent_id == null) continue;
+    const pos = gp(node);
+    const op = {
+      type: 'move_node',
+      node_id: id,
+      parent_id: node.parent_id,
+      mx: node.mx != null ? node.mx : pos.x,
+      my: node.my != null ? node.my : pos.y
+    };
+    if (node.num != null && String(node.num).trim() !== '') op.num = String(node.num);
+    sendProjectStructureOp(curP.id, op);
+  }
+}
+
+function armTextOpsDescEditor(projectId, nodeId, userId) {
+  teardownTextOpsDescEditor();
+  void subscribeProjectTextOps(projectId, userId, handleRemoteTextOp);
+  const ta = document.querySelector('.mbg .eid');
+  if (!ta) return;
+  textOpsDescLastValue = ta.value;
+
+  const onInput = () => {
+    if (textOpsApplyingRemote || textOpsCompositionHold) return;
+    if (!curP?.id || nodeEditModalNodeId !== nodeId) return;
+    const prev = textOpsDescLastValue;
+    const next = ta.value;
+    if (prev === next) return;
+    const diffOps = computeTextDiffOps(prev, next);
+    textOpsDescLastValue = next;
+    for (const op of diffOps) {
+      sendProjectTextOp(curP.id, nodeId, 'description', op);
+    }
+  };
+
+  const onCompStart = () => {
+    textOpsCompositionHold = true;
+  };
+  const onCompEnd = () => {
+    textOpsCompositionHold = false;
+    onInput();
+  };
+
+  ta.addEventListener('input', onInput);
+  ta.addEventListener('compositionstart', onCompStart);
+  ta.addEventListener('compositionend', onCompEnd);
+  textOpsDescInputCleanup = () => {
+    ta.removeEventListener('input', onInput);
+    ta.removeEventListener('compositionstart', onCompStart);
+    ta.removeEventListener('compositionend', onCompEnd);
+  };
+}
+
 function mergeStoreNodesIntoPilotBeforePersist(protectId) {
   if (typeof getStoreNodesForCollabMerge !== 'function') return;
   let storePilot;
@@ -479,6 +774,9 @@ function runHydrateFromStoreCore(project, pilotNodes) {
   } finally {
     syncing = false;
   }
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (collabUid && project?.id) armStructureOpsForProject(project.id, collabUid);
+  else teardownStructureOps();
   queueMicrotask(() => {
     maybeEmitNodeSelect();
   });
@@ -1766,14 +2064,39 @@ async function triggerAI(type) {
     toast('프로젝트를 먼저 열어줘');
     return;
   }
+  if (!nodes.length) {
+    toast('노드가 없어. 트리에 노드를 추가한 뒤 다시 시도해줘.');
+    return;
+  }
   const outputIntent = AI_INTENT_BY_TYPE[type] || 'PRD';
-  const prompt = buildPrompt(
-    nodes,
-    { name: curP.name, description: curP.description || '' },
-    outputIntent,
-    'root'
-  );
+  const projectMeta = { name: curP.name, description: curP.description || '' };
+  const currentNodeId = resolveContextAnchorNodeId(nodes, selId ?? `${curP.id}-r`);
+
+  let layer1Ok = false;
+  if (currentNodeId) {
+    try {
+      const ctx = buildContextFromNodes(currentNodeId, nodes, {
+        ...projectMeta,
+        domain: 'custom',
+        techStack: [],
+        outputIntents: [outputIntent]
+      });
+      layer1Ok = isLayer1ContextSufficient(ctx);
+    } catch {
+      layer1Ok = false;
+    }
+  }
+
+  const prompt = buildPrompt(nodes, projectMeta, outputIntent, 'root', currentNodeId);
   const clipText = formatPromptForClipboard(prompt);
+
+  if (!layer1Ok) {
+    placeAiResult(clipText);
+    toast(
+      '구조 맥락이 부족해 API 호출을 건너뛰었어. 캔버스에서 노드를 선택하거나 하위 노드를 추가한 뒤 다시 시도해줘.「클립보드에 복사」는 가능해.'
+    );
+    return;
+  }
 
   const token = typeof getAccessToken === 'function' ? await getAccessToken() : null;
   if (!token) {
@@ -1844,6 +2167,8 @@ async function triggerAI(type) {
           contextSnapshot: {
             source: 'ai-tab',
             trigger: type,
+            layer1: true,
+            currentNodeId,
             plannodeProjectId: curP?.id ?? null,
             nodeCount: nodes.length,
             treeText: treeText || undefined
@@ -2841,6 +3166,7 @@ function sDrag(e, n, isShiftPressed) {
     const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(ids);
     render();
     flushPersistNow();
+    sendMoveNodeStructureOps(ids);
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
   };
   document.addEventListener('pointermove', mv);
@@ -2879,7 +3205,10 @@ function addChild(pid) {
   skipFirstEditSaveUndo.add(nn.id);
   selId = nn.id;
   render();
-  queueMicrotask(() => publishNewNodeSkeletonToCloud());
+  queueMicrotask(() => {
+    publishNewNodeSkeletonToCloud();
+    sendAddNodeStructureOp(nn);
+  });
   // 모달을 즉시 표시 (RAF 이중 호출 제거)
   setTimeout(() => showEdit(nn), 50);
 }
@@ -2891,8 +3220,7 @@ function cDel(id) {
     toast('가져온 JSON 전역 노드는 삭제할 수 없어. 필요하면 JSON을 다시 가져오기로 맞춰줘.');
     return;
   }
-  const gAll = (nid) => [nid, ...nodes.filter((x) => x.parent_id === nid).flatMap((c) => gAll(c.id))];
-  const ids = gAll(id),
+  const ids = collectNodeSubtreeIds(id),
     cc = ids.length - 1;
   showIM(
     `<h3>노드 삭제 확인</h3><p style="font-size:13px;color:#444;line-height:1.7"><span style="color:#dc2626;font-weight:700">"${esc(n.name)}"</span>을 삭제할까요?</p>${cc > 0 ? `<p style="font-size:12px;color:#999;margin-top:5px">하위 <strong style="color:#dc2626">${cc}개</strong>도 함께 삭제돼.</p>` : ''}<p style="font-size:12px;color:#bbb;margin-top:4px">삭제 후 <strong>Ctrl+Z</strong>(Mac: ⌘Z)로 한 번 되돌릴 수 있어.</p>`,
@@ -2907,6 +3235,7 @@ function cDel(id) {
           nodes = nodes.filter((x) => !ids.includes(x.id));
           render();
           flushPersistNow();
+          sendDeleteNodeStructureOp(id);
           toast('삭제됨(이 기기) · 클라우드 자동 반영');
         }
       ]
@@ -2919,6 +3248,7 @@ function showEdit(n) {
     toast('가져온 JSON 전역 노드는 여기서 편집하지 말고, JSON 가져오기·보내기로 맞춰줘.');
     return;
   }
+  teardownTextOpsDescEditor();
   nodeEditModalNodeId = n.id;
   nodeEditModalCommittedSave = false;
   // 모달 편집 시 명시 저장된 배지만 로드 (추론 배지는 모달에 표시하지 않음)
@@ -3006,6 +3336,7 @@ function showEdit(n) {
       });
     },
     (how) => {
+      teardownTextOpsDescEditor();
       if (nodeEditModalNodeId === n.id) nodeEditModalNodeId = null;
       if (how !== 'ok' && abortAddChildOnEditDismiss(n.id)) {
         pendingHydrateFromStore = null;
@@ -3023,6 +3354,10 @@ function showEdit(n) {
   if (einput) {
     einput.focus();
     einput.select();
+  }
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (curP?.id && collabUid) {
+    queueMicrotask(() => armTextOpsDescEditor(curP.id, n.id, collabUid));
   }
 }
 
@@ -3480,19 +3815,25 @@ function syncNcFromNodes() {
  * @param {boolean} [opts.delegateTabs]
  * @param {boolean} [opts.delegateProjectModal]
  * @param {(payload: { nodes: any[]; curP: any | null }) => void} [opts.onPersist]
+ * @param {(payload: { nodes: any[]; curP: any | null }) => void} [opts.onRemoteStructureStoreSync] STRUCTURE_STORE_SYNC — 원격 structure op 후 스토어만(더티 없음)
  * @param {boolean} [opts.seedDemoProjects]
  * @param {() => Promise<string | null | undefined>} [opts.getAccessToken] Supabase 세션(서버 /api/ai/messages)
  * @param {() => string | null | undefined} [opts.getPlanProjectId] plan_projects.id(UUID) — 있으면 AI 성공 후 plan_nodes 메타 동기
  * @param {() => any[]} [opts.getStoreNodesForCollabMerge] 모달 저장 시 스토어 최신 노드(상대 pull 반영분) 병합용
+ * @param {() => string | null | undefined} [opts.getCollabAuthUserId] 텍스트 OT Broadcast용 auth uid
  */
 export function initPlannode(opts = {}) {
   const delegateTabs = opts.delegateTabs ?? false;
   const delegateProjectModal = opts.delegateProjectModal ?? false;
   onPersist = typeof opts.onPersist === 'function' ? opts.onPersist : null;
+  onRemoteStructureStoreSync =
+    typeof opts.onRemoteStructureStoreSync === 'function' ? opts.onRemoteStructureStoreSync : null;
   getAccessToken = typeof opts.getAccessToken === 'function' ? opts.getAccessToken : null;
   getPlanProjectId = typeof opts.getPlanProjectId === 'function' ? opts.getPlanProjectId : null;
   getStoreNodesForCollabMerge =
     typeof opts.getStoreNodesForCollabMerge === 'function' ? opts.getStoreNodesForCollabMerge : null;
+  getCollabAuthUserId =
+    typeof opts.getCollabAuthUserId === 'function' ? opts.getCollabAuthUserId : null;
 
   R_ = document.getElementById('R');
   CW = document.getElementById('CW');
@@ -3997,9 +4338,13 @@ export function initPlannode(opts = {}) {
       disposers.forEach((d) => d());
       disposers = [];
       onPersist = null;
+      onRemoteStructureStoreSync = null;
       getAccessToken = null;
       getPlanProjectId = null;
       getStoreNodesForCollabMerge = null;
+      getCollabAuthUserId = null;
+      teardownTextOpsDescEditor();
+      teardownStructureOps();
       clearUndoStack();
       nodeEditModalNodeId = null;
       nodeEditModalCommittedSave = false;
@@ -4016,6 +4361,7 @@ export function initPlannode(opts = {}) {
     },
     hydrateFromStore(project, pilotNodes) {
       if (isNodeEditModalDomOpen()) {
+        // 스토어는 Svelte에서 이미 병합됨 — 캔버스는 보류. 닫을 때 pending 1회(편집 노드 description은 mergeProtected에서 .eid 유지).
         pendingHydrateFromStore = { project, pilotNodes };
         return;
       }
@@ -4025,6 +4371,7 @@ export function initPlannode(opts = {}) {
     clearCanvas() {
       syncing = true;
       try {
+        teardownStructureOps();
         clearUndoStack();
         curP = null;
         nodes = [];

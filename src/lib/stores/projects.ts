@@ -1,6 +1,14 @@
 import { writable, get } from 'svelte/store';
 import type { Project, Node, HistoryEntry } from '$lib/supabase/client';
 import { getAuthEmail } from '$lib/stores/authSession';
+import {
+  badgePoolRevision,
+  clearBadgePoolRuntimeCache,
+  normalizeBadgePool,
+  registerCurrentProjectIdLookup,
+  registerProjectBadgePoolLookup,
+  type BadgePoolTracks,
+} from '$lib/ai/badgePoolConfig';
 import { applySanitizeImportedPlannodeNodeV1 } from '$lib/ai/badgePromptInjector';
 import { mergeLearnedBadgeRulesFromImportedNodes } from '$lib/ai/badgeMetadataInference';
 import type { PrdSectionKey } from '$lib/prdStandardV20';
@@ -31,6 +39,89 @@ export function isNodesSetFromPilotPersist(): boolean {
 // UI 상태
 export const activeView = writable<'tree' | 'prd' | 'spec' | 'ia' | 'ai'>('tree');
 export const showProjectModal = writable(false);
+
+/** 프로젝트 메타 `badge_pool` 정규화 — 워크스페이스·로컬 로드 공통 */
+export function reconcileProjectRecord(project: Project): Project {
+  if (project.badge_pool == null) return project;
+  return { ...project, badge_pool: normalizeBadgePool(project.badge_pool) };
+}
+
+/** 프로젝트에 저장된 풀 — 없으면 `null`(기기 전역 폴백) */
+export function getProjectBadgePool(projectId: string): BadgePoolTracks | null {
+  const p = get(projects).find((x) => x.id === projectId);
+  if (!p?.badge_pool) return null;
+  return normalizeBadgePool(p.badge_pool);
+}
+
+/** 배지 풀 저장 후 해당 프로젝트 노드 배지를 새 풀 기준으로 일괄 정리 */
+export function reconcileProjectNodeBadgesAfterPoolSave(projectId: string): number {
+  if (typeof window === 'undefined') return 0;
+  const cur = get(currentProject);
+  const rawList =
+    cur?.id === projectId ? get(nodes) : loadProjectNodesFromLocalStorage(projectId);
+  if (!rawList.length) return 0;
+
+  let changed = 0;
+  const next = rawList.map((node) => {
+    const san = applySanitizeImportedPlannodeNodeV1(node);
+    const before = JSON.stringify({
+      badges: node.badges ?? [],
+      mb: node.metadata?.badges ?? null
+    });
+    const after = JSON.stringify({
+      badges: san.badges ?? [],
+      mb: san.metadata?.badges ?? null
+    });
+    if (before !== after) changed++;
+    return san;
+  });
+  if (changed === 0) return 0;
+
+  try {
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(next));
+  } catch (e) {
+    console.error('Failed to persist reconciled node badges:', e);
+    return 0;
+  }
+  if (cur?.id === projectId) {
+    nodes.set(next);
+  }
+  markCloudWorkspaceDirty();
+  touchProjectUpdatedAt(projectId);
+  return changed;
+}
+
+/** 프로젝트별 표준 배지 풀 저장 — 워크스페이스 번들·LWW 동기 대상 */
+export function setProjectBadgePool(projectId: string, pool: BadgePoolTracks): BadgePoolTracks {
+  if (typeof window === 'undefined') return normalizeBadgePool(pool);
+  const normalized = normalizeBadgePool(pool);
+  const now = new Date().toISOString();
+  projects.update((plist) => {
+    const next = plist.map((p) =>
+      p.id === projectId ? { ...p, badge_pool: normalized, updated_at: now } : p
+    );
+    try {
+      localStorage.setItem(PROJECTS_KEY, JSON.stringify(next));
+    } catch (e) {
+      console.error('Failed to persist project badge pool:', e);
+    }
+    return next;
+  });
+  const cur = get(currentProject);
+  if (cur?.id === projectId) {
+    const merged = { ...cur, badge_pool: normalized, updated_at: now };
+    currentProject.set(merged);
+    try {
+      localStorage.setItem(CURRENT_PROJECT_KEY, JSON.stringify(merged));
+    } catch {
+      /* ignore */
+    }
+  }
+  clearBadgePoolRuntimeCache(projectId);
+  badgePoolRevision.update((n) => n + 1);
+  markCloudWorkspaceDirty();
+  return normalized;
+}
 
 // localStorage 키
 const PROJECTS_KEY = 'plannode_projects_v3';
@@ -472,7 +563,8 @@ export function loadProjectsFromLocalStorage() {
     const stored = localStorage.getItem(PROJECTS_KEY);
     if (stored) {
       const parsed = JSON.parse(stored);
-      projects.set(Array.isArray(parsed) ? parsed : []);
+      const list = Array.isArray(parsed) ? (parsed as Project[]) : [];
+      projects.set(list.map(reconcileProjectRecord));
     }
   } catch (e) {
     console.error('Failed to load projects:', e);
@@ -805,6 +897,40 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
   }
   touchProjectUpdatedAt(projectId);
   schedulePersistNodeSnapshotAfterPilot(projectId);
+}
+
+/**
+ * EPIC D — 원격 structure op 반영 후 스토어·localStorage만 동기 (`STRUCTURE_STORE_SYNC`).
+ * pull LWW `preserve`에 id가 있도록 하며, `touchProjectUpdatedAt`/클라우드 더티는 건드리지 않는다.
+ */
+export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[]): void {
+  if (typeof window === 'undefined') return;
+
+  const pendingDeleted = getPendingWorkspaceDeletionIds();
+  if (pendingDeleted.has(projectId)) return;
+
+  const cur = get(currentProject);
+  if (!cur || cur.id !== projectId) return;
+  const prevSnap = get(nodes);
+  const prevSameProject =
+    prevSnap.length === 0 || prevSnap.every((n) => (n.project_id ?? projectId) === projectId);
+  const prevIds = new Set(prevSnap.map((n) => n.id));
+  const nextIds = new Set(list.map((n) => n.id));
+  const removed = prevSameProject ? [...prevIds].filter((id) => !nextIds.has(id)) : [];
+  if (removed.length) {
+    registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
+  }
+  try {
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
+  } catch (e) {
+    console.error('Failed to save nodes (remote structure):', e);
+  }
+  nodesSetFromPilotPersist = true;
+  try {
+    nodes.set(list);
+  } finally {
+    nodesSetFromPilotPersist = false;
+  }
 }
 
 /**
@@ -1341,7 +1467,7 @@ export function upsertImportedPlannodeTreeV1(
   const plist = get(projects);
   const idx = plist.findIndex((p) => p.id === project.id);
   const prev = idx >= 0 ? plist[idx] : null;
-  const merged: Project = {
+  const merged: Project = reconcileProjectRecord({
     ...project,
     created_at: prev?.created_at ?? project.created_at,
     updated_at: opts?.preserveRemoteUpdatedAt
@@ -1349,7 +1475,11 @@ export function upsertImportedPlannodeTreeV1(
       : new Date().toISOString(),
     cloud_workspace_source_user_id:
       project.cloud_workspace_source_user_id ?? prev?.cloud_workspace_source_user_id
-  };
+  });
+  if (prev && projectBadgePoolSnapshot(prev) !== projectBadgePoolSnapshot(merged)) {
+    clearBadgePoolRuntimeCache(merged.id);
+    badgePoolRevision.update((n) => n + 1);
+  }
   const next = idx >= 0 ? plist.map((p, i) => (i === idx ? merged : p)) : [...plist, merged];
 
   try {
@@ -1544,6 +1674,64 @@ export function mergeNodeListsForCloudByProjectMeta(
   );
 }
 
+function projectBadgePoolSnapshot(p: Project): string {
+  return p.badge_pool != null ? JSON.stringify(normalizeBadgePool(p.badge_pool)) : '';
+}
+
+/**
+ * 클라우드 LWW 병합 시 프로젝트 설정 메타(`name`·일정·`description`·`badge_pool`)가
+ * 노드 편집으로만 앞선 원격 `updated_at`에 의해 통째로 덮이지 않도록 보수적으로 합친다.
+ */
+export function mergeProjectMetaForCloudSync(local: Project, remote: Project): Project {
+  const lTime = parseTs(local.updated_at);
+  const rTime = parseTs(remote.updated_at);
+  const remoteWins = rTime > lTime;
+  const base = remoteWins ? { ...remote } : { ...local };
+
+  const pickStr = (k: 'name' | 'author' | 'start_date' | 'end_date'): string => {
+    const lv = String(local[k] ?? '').trim();
+    const rv = String(remote[k] ?? '').trim();
+    if (remoteWins) return rv || lv;
+    return lv || rv;
+  };
+
+  const pickDesc = (): string => {
+    const lv = String(local.description ?? '');
+    const rv = String(remote.description ?? '');
+    if (remoteWins) return rv || lv;
+    return lv || rv;
+  };
+
+  const pickBadgePool = (): Project['badge_pool'] => {
+    const lHas = local.badge_pool != null;
+    const rHas = remote.badge_pool != null;
+    /** 공유 멤버 로컬: 소유자 워크스페이스 슬라이스의 풀이 정본(노드 편집으로 로컬 `updated_at`만 앞선 경우에도) */
+    if (local.cloud_workspace_source_user_id) {
+      if (rHas) return normalizeBadgePool(remote.badge_pool!);
+      return undefined;
+    }
+    if (lHas && !rHas) return normalizeBadgePool(local.badge_pool!);
+    if (rHas && !lHas) return normalizeBadgePool(remote.badge_pool!);
+    if (lHas && rHas) {
+      return normalizeBadgePool(remoteWins ? remote.badge_pool! : local.badge_pool!);
+    }
+    return undefined;
+  };
+
+  return reconcileProjectRecord({
+    ...base,
+    name: pickStr('name'),
+    author: pickStr('author'),
+    start_date: pickStr('start_date'),
+    end_date: pickStr('end_date'),
+    description: pickDesc(),
+    badge_pool: pickBadgePool(),
+    cloud_workspace_source_user_id:
+      local.cloud_workspace_source_user_id ?? remote.cloud_workspace_source_user_id,
+    updated_at: remoteWins ? remote.updated_at : local.updated_at
+  });
+}
+
 function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
   return (
     a.name !== b.name ||
@@ -1551,7 +1739,8 @@ function projectMetaFieldsDiffer(a: Project, b: Project): boolean {
     a.start_date !== b.start_date ||
     a.end_date !== b.end_date ||
     (a.description ?? '') !== (b.description ?? '') ||
-    (a.owner_user_id ?? '') !== (b.owner_user_id ?? '')
+    (a.owner_user_id ?? '') !== (b.owner_user_id ?? '') ||
+    projectBadgePoolSnapshot(a) !== projectBadgePoolSnapshot(b)
   );
 }
 
@@ -1600,11 +1789,16 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
     );
     const keepSrc = local?.cloud_workspace_source_user_id ?? project.cloud_workspace_source_user_id;
 
-    const mergedProject: Project = remoteProjectMetaNewer
-      ? { ...project, cloud_workspace_source_user_id: keepSrc }
-      : local
-        ? { ...local, cloud_workspace_source_user_id: keepSrc }
-        : { ...project, cloud_workspace_source_user_id: keepSrc };
+    const remoteProj = reconcileProjectRecord({
+      ...project,
+      cloud_workspace_source_user_id: keepSrc
+    });
+    const mergedProject: Project = local
+      ? mergeProjectMetaForCloudSync(
+          reconcileProjectRecord({ ...local, cloud_workspace_source_user_id: keepSrc }),
+          remoteProj
+        )
+      : remoteProj;
 
     if (!local) {
       upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
@@ -1650,3 +1844,9 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   }
   return n;
 }
+
+registerProjectBadgePoolLookup((projectId) => getProjectBadgePool(projectId));
+registerCurrentProjectIdLookup(() => get(currentProject)?.id ?? null);
+
+registerProjectBadgePoolLookup((projectId) => getProjectBadgePool(projectId));
+registerCurrentProjectIdLookup(() => get(currentProject)?.id ?? null);

@@ -12,13 +12,35 @@ import { isSupabaseCloudConfigured } from './env';
 /** 서버 응답에 `model` 없을 때 기록용 — `modelSelector.ANTHROPIC_MODEL_SONNET` */
 export const DEFAULT_SERVER_AI_MODEL = ANTHROPIC_MODEL_SONNET;
 
+/**
+ * `ai_generations.context_snapshot` jsonb — 스키마 마이그레이션 없음(P2-B).
+ * L1 앵커는 **로컬 파일럿 id**(`n507`, `{projectId}-r` 등) → `currentNodeId`에만 기록.
+ * DB `node_id` 컬럼은 `plan_nodes.id` **UUID** 또는 null(L5 전체 트리)만.
+ */
+export type AiGenerationContextSnapshot = {
+  /** `ai-tab` | `l5-ia-export` 등 */
+  source?: string;
+  /** AI 탭 5버튼 키 (`prd` · `wireframe` …) — `source: ai-tab`일 때 */
+  trigger?: string;
+  /** EPIC P2-B — `serializeToPrompt` 경로 사용 */
+  layer1?: boolean;
+  /** L1 앵커 — 로컬 노드 id(파일럿). UUID 아님 */
+  currentNodeId?: string | null;
+  /** 앱 `Project.id` (localStorage) */
+  plannodeProjectId?: string | null;
+  nodeCount?: number;
+  /** 보조 — `buildTreeText` 요약(길이 제한 가능) */
+  treeText?: string;
+};
+
 export type InsertAiGenerationL5Input = {
   planProjectId: string;
   outputIntent: string;
   finalOutput: string;
+  /** `plan_nodes.id` UUID 또는 null — 로컬 파일럿 id 금지 */
   nodeId?: string | null;
   modelUsed?: string;
-  contextSnapshot?: Record<string, unknown>;
+  contextSnapshot?: AiGenerationContextSnapshot;
   tokenUsage?: Record<string, unknown>;
 };
 

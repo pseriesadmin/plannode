@@ -3,9 +3,28 @@ import type { Node, Project } from '$lib/supabase/client';
 import { currentProject, nodes as nodesStore } from '$lib/stores/projects';
 import { initPlannode, dismissPilotRelinkGuide } from './plannodePilot.js';
 export { dismissPilotRelinkGuide };
-import { persistNodesFromPilot, isNodesSetFromPilotPersist } from '$lib/stores/projects';
-import { authSession } from '$lib/stores/authSession';
+import {
+  persistNodesFromPilot,
+  persistNodesFromRemoteStructureOp,
+  isNodesSetFromPilotPersist
+} from '$lib/stores/projects';
+import { authSession, getAuthUserId } from '$lib/stores/authSession';
 import { supabase } from '$lib/supabase/client';
+
+/**
+ * EPIC D — structure ops vs hydrate/persist 이중 계약 (브리지 층 요약)
+ *
+ * | 경로 | 진실·역할 |
+ * |------|-----------|
+ * | **structure Broadcast** (`:structure` / `structure-op`) | 편집 중 **파일럿 `nodes`** 갱신 · 수신 직후 `persistNodesFromRemoteStructureOp`(더티·`touchProject` 없음, pull preserve용). |
+ * | **onPersist** (아래) | 파일럿 → `persistNodesFromPilot` → revision pull(LWW). **저장본 정본**. |
+ * | **nodesStore.subscribe → hydrateFromStore** | 클라우드 pull·스토어 병합 후 캔버스 반영. |
+ * | **모달 열림** | hydrate는 파일럿 `hydrateFromStore`에서 **보류**(`MODAL_EDIT_HYDRATE_DEFER`). 브리지는 스토어 구독을 유지 — 닫을 때 pending 1회 반영. |
+ * | **text ops** (`:text`) | 모달 description만. structure 채널과 **topic 분리**. |
+ *
+ * @see docs/plannode_ot2_tree_ops_channel_spike.md · plan-output P-12.3
+ * @see docs/plannode_workspace_sync_overview.md §7 (OT2-08에서 §7.5)
+ */
 
 function pilotNodeContentChanged(prev: Node | undefined, n: PilotRuntimeNode): boolean {
   if (!prev) return true;
@@ -103,11 +122,14 @@ export function mountPilotBridge(): { destroy: () => void } {
       if (syncingFromStore || !curP) return;
       const mapped = pilotNodesToStore(curP.id, pilotNodes);
       persistNodesFromPilot(curP.id, mapped);
-      
-      // NOW-HIST-02: 10분 idle 타이머 리셋 호출
+
       if (typeof window !== 'undefined' && (window as any).__resetIdleSnapshotTimer) {
         (window as any).__resetIdleSnapshotTimer();
       }
+    },
+    onRemoteStructureStoreSync: ({ nodes: pilotNodes, curP }) => {
+      if (syncingFromStore || !curP) return;
+      persistNodesFromRemoteStructureOp(curP.id, pilotNodesToStore(curP.id, pilotNodes));
     },
     getAccessToken: async () => {
       const s = get(authSession);
@@ -116,6 +138,7 @@ export function mountPilotBridge(): { destroy: () => void } {
       return data.session?.access_token ?? null;
     },
     getPlanProjectId: () => get(currentProject)?.plan_project_id ?? null,
+    /** 모달 저장 직전 — pull로만 스토어에 쌓인 상대 노드를 파일럿에 합침(structure·text ops와 별도). */
     getStoreNodesForCollabMerge: () => {
       const p = get(currentProject);
       if (!p?.id) return [];
@@ -125,7 +148,9 @@ export function mountPilotBridge(): { destroy: () => void } {
         if (pid && pid !== p.id) return [];
       }
       return storeNodesToPilot(list);
-    }
+    },
+    /** structure·text Broadcast 구독용 — EPIC D `armStructureOpsForProject`와 쌍 */
+    getCollabAuthUserId: () => getAuthUserId()
   });
 
   if (!pilotApi) {
@@ -162,6 +187,11 @@ export function mountPilotBridge(): { destroy: () => void } {
     }
   });
 
+  /**
+   * revision pull 등으로 스토어가 갱신될 때 캔버스 hydrate.
+   * 모달 열림 시 파일럿이 hydrate 본문을 보류해도 **구독 호출은 유지**(스토어는 즉시 병합, 캔버스는 MODAL_EDIT_HYDRATE_DEFER).
+   * structure 수신은 `onRemoteStructureStoreSync`로 스토어만 맞춤(`isNodesSetFromPilotPersist`로 재hydrate 스킵). 로컬 편집·저장은 `onPersist`·pull.
+   */
   const unsubNodes = nodesStore.subscribe((list) => {
     if (!pilotApi || syncingFromStore || isNodesSetFromPilotPersist()) return;
     const p = get(currentProject);
@@ -223,4 +253,22 @@ export function pilotFlushPersistNow() {
 
 export function pilotHasPendingGridPersist(): boolean {
   return pilotApi?.hasPendingGridPersist?.() ?? false;
+}
+
+/** 표준 배지 풀 저장·노드 정리 후 캔버스 칩 재반영 */
+export function pilotRehydrateCurrentProjectFromStore(): void {
+  if (!pilotApi) return;
+  const p = get(currentProject);
+  if (!p?.id) return;
+  const list = get(nodesStore);
+  if (list.length > 0) {
+    const pid = list[0]?.project_id;
+    if (pid && pid !== p.id) return;
+  }
+  syncingFromStore = true;
+  try {
+    pilotApi.hydrateFromStore(p, storeNodesToPilot(list));
+  } finally {
+    syncingFromStore = false;
+  }
 }

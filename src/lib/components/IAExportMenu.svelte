@@ -1,19 +1,46 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { nodes, currentProject } from '$lib/stores/projects';
   import { authSession } from '$lib/stores/authSession';
-  import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
+  import { pendingIaExportIntent, pendingIaTemplateExport } from '$lib/stores/iaExportIntent';
   import { isSupabaseCloudConfigured } from '$lib/supabase/env';
   import { runPlannodeIAExport, type IAExportIntent } from '$lib/ai/iaExportRunner';
+  import {
+    buildIaStructureMarkdownFromTree,
+    buildWireframesMarkdownFromTree,
+    resolveContextAnchorNodeId
+  } from '$lib/ai/iaExporter';
   import { slugExportName } from '$lib/ai/iaGridCsvExport';
+
+  type TemplateKind = 'ia' | 'wireframes';
+  type ResultSource =
+    | { kind: 'template'; template: TemplateKind }
+    | { kind: 'ai'; intent: IAExportIntent };
 
   let loading: IAExportIntent | null = null;
   let resultText = '';
   let resultHint = '';
   let showModal = false;
   let modalEl: HTMLDivElement | undefined;
-  let lastRunIntent: IAExportIntent | null = null;
+  let lastResultSource: ResultSource | null = null;
+  /** 파일럿 `plannode-node-select` — L1 앵커(selId) */
+  let pilotSelId: string | null = null;
+
+  function onPilotNodeSelect(ev: Event) {
+    const d = (ev as CustomEvent<{ nodeId?: string | null }>).detail;
+    pilotSelId = d?.nodeId ?? null;
+  }
+
+  onMount(() => {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('plannode-node-select', onPilotNodeSelect);
+  });
+
+  onDestroy(() => {
+    if (typeof window === 'undefined') return;
+    window.removeEventListener('plannode-node-select', onPilotNodeSelect);
+  });
 
   function pilotToast(msg: string) {
     if (typeof window === 'undefined') return;
@@ -24,12 +51,34 @@
     }
   }
 
-  /** IA 탭: IA 구조·화면목록 초안만 (기능명세 정렬은 기능명세 보기에서 처리). 상단 출력 등에서 FUNCTIONAL_SPEC은 기존처럼 `run`으로 처리 가능 */
-  const IA_TRACKS: {
+  /** 트랙 A — PRD F2-4 정본: LLM 없이 동일 트리 → 동일 MD */
+  const TEMPLATE_TRACK: {
+    kind: TemplateKind;
+    t: string;
+    d: string;
+  }[] = [
+    {
+      kind: 'ia',
+      t: '정보 구조(IA) MD',
+      d: '계층·IA 표·Mermaid — {slug}-ia.md (F4-3, LLM 없음)'
+    },
+    {
+      kind: 'wireframes',
+      t: '와이어프레임 키트 MD',
+      d: '화면 목록·블록 뼈대 — {slug}-wireframes.md (F4-4, LLM 없음)'
+    }
+  ];
+
+  /** 트랙 B — L5 AI 초안 (보조). 상단 출력·FUNCTIONAL_SPEC은 기존 `run` 경로 */
+  const AI_TRACK: {
     heading: string;
     hint?: string;
     intents: IAExportIntent[];
-  }[] = [{ heading: '', intents: ['IA_STRUCTURE', 'SCREEN_LIST'] }];
+  } = {
+    heading: 'AI 초안 (보조)',
+    hint: '서버 Claude — 문장·표 보강용. 구조 정본은 위 「구조보내기」예요.',
+    intents: ['IA_STRUCTURE', 'SCREEN_LIST']
+  };
 
   const LABELS: Record<IAExportIntent, { t: string; d: string }> = {
     IA_STRUCTURE: {
@@ -46,27 +95,55 @@
     }
   };
 
+  function projectMeta() {
+    const p = get(currentProject);
+    return p ? { name: p.name, description: p.description } : null;
+  }
+
+  function runTemplate(template: TemplateKind) {
+    const n = get(nodes);
+    const p = projectMeta();
+    if (!p?.name) {
+      pilotToast('프로젝트를 먼저 선택해줘.');
+      return;
+    }
+    lastResultSource = { kind: 'template', template };
+    resultHint =
+      '로컬 템플릿 — 동일 트리면 항상 같은 내용이에요 (LLM·API 없음). 아래에서 저장·복사하면 돼요.';
+    resultText =
+      template === 'ia'
+        ? buildIaStructureMarkdownFromTree(n, p)
+        : buildWireframesMarkdownFromTree(n, p);
+    showModal = true;
+  }
+
   async function run(intent: IAExportIntent) {
     const n = get(nodes);
     const p = get(currentProject);
     const session = get(authSession);
     const token = session?.access_token ?? null;
-    lastRunIntent = intent;
+    lastResultSource = { kind: 'ai', intent };
     loading = intent;
     resultHint = '';
     resultText = '';
     try {
+      const currentNodeId = resolveContextAnchorNodeId(n, pilotSelId ?? (p?.id ? `${p.id}-r` : null));
       const res = await runPlannodeIAExport({
         nodes: n,
         activeProject: p ? { name: p.name, description: p.description } : null,
         planProjectId: p?.plan_project_id ?? null,
         plannodeProjectId: p?.id ?? null,
+        currentNodeId,
         intent,
         accessToken: token
       });
       if (res.kind === 'text') {
         resultText = res.text;
         resultHint = '서버 응답(Claude). 아래는 마크다운/표로 복사해 쓰면 돼요.';
+      } else if (res.kind === 'context_insufficient') {
+        resultText = res.fallbackClipboard;
+        resultHint = `${res.message} · 아래는 복사용 프롬프트(LAYER1 포함)예요.`;
+        pilotToast(res.message);
       } else if (res.kind === 'no_key') {
         resultText = res.fallbackClipboard;
         resultHint =
@@ -105,7 +182,21 @@
     }
   }
 
-  /** PRD M4 F4-3·F4-4 방향 — 슬러그-ia.md / 슬러그-wireframes.md 등 */
+  function resolveDownloadFilename(slug: string): string | null {
+    const src = lastResultSource;
+    if (!src) return null;
+    if (src.kind === 'template') {
+      return src.template === 'ia' ? `${slug}-ia.md` : `${slug}-wireframes.md`;
+    }
+    const nameByIntent: Record<IAExportIntent, string> = {
+      IA_STRUCTURE: `${slug}-ia.md`,
+      SCREEN_LIST: `${slug}-wireframes.md`,
+      FUNCTIONAL_SPEC: `${slug}-functional-spec.md`
+    };
+    return nameByIntent[src.intent];
+  }
+
+  /** PRD M4 F4-3·F4-4 — 슬러그-ia.md / 슬러그-wireframes.md */
   function downloadResultMd() {
     if (!resultText.trim() || typeof document === 'undefined') return;
     const p = get(currentProject);
@@ -114,13 +205,8 @@
       return;
     }
     const slug = slugExportName(p.name);
-    const intent = lastRunIntent ?? 'IA_STRUCTURE';
-    const nameByIntent: Record<IAExportIntent, string> = {
-      IA_STRUCTURE: `${slug}-ia.md`,
-      SCREEN_LIST: `${slug}-wireframes.md`,
-      FUNCTIONAL_SPEC: `${slug}-functional-spec.md`
-    };
-    const fname = nameByIntent[intent];
+    const fname = resolveDownloadFilename(slug);
+    if (!fname) return;
     const blob = new Blob([resultText], { type: 'text/markdown;charset=utf-8' });
     try {
       const u = URL.createObjectURL(blob);
@@ -145,17 +231,16 @@
   }
 
   $: downloadFileHint =
-    $currentProject && lastRunIntent
+    $currentProject && lastResultSource
       ? (() => {
           const s = slugExportName($currentProject.name);
-          const map: Record<IAExportIntent, string> = {
-            IA_STRUCTURE: `${s}-ia.md`,
-            SCREEN_LIST: `${s}-wireframes.md`,
-            FUNCTIONAL_SPEC: `${s}-functional-spec.md`
-          };
-          return `마크다운 파일로 저장 (${map[lastRunIntent]})`;
+          const f = resolveDownloadFilename(s);
+          return f ? `마크다운 파일로 저장 (${f})` : '마크다운 파일로 저장';
         })()
       : '마크다운 파일로 저장';
+
+  $: modalTitle =
+    lastResultSource?.kind === 'template' ? '구조보내기 (템플릿)' : '문서 초안 (서버 AI)';
 
   $: if (showModal) {
     void tick().then(() => {
@@ -163,7 +248,16 @@
     });
   }
 
-  /** 상단 「출력」메뉴에서 IA 인텐트만 넘긴 경우 자동 1회 실행 */
+  /** 상단 「출력」→ 구조보내기(트랙 A) 1회 실행 */
+  $: {
+    const pt = $pendingIaTemplateExport;
+    if (pt) {
+      pendingIaTemplateExport.set(null);
+      runTemplate(pt);
+    }
+  }
+
+  /** 상단 「출력」→ L5 인텐트(트랙 B) 1회 실행 */
   $: {
     const pi = $pendingIaExportIntent;
     if (pi) {
@@ -183,42 +277,59 @@
 
 <div class="iax">
   <p class="iax-lead">
-    <strong>IA·기능명세 열</strong> — 메뉴 계층·화면 목록·기능 표는 <strong>노드 트리·그리드</strong>를 기준으로 한 문서 초안이에요 (제품에서 말하는 <strong>정보 구조 IA</strong>는 LLM이 아니라 이 구조예요). 아래 버튼 중 서버에 Claude가 연결된 경우에만 자동 생성되고, 없으면 복사용 프롬프트로 대체돼요. <strong>캔버스의「AI 분석(LLM)」탭</strong>은 별도예요.
+    <strong>정보 구조(IA)</strong>는 노드 트리에서 뽑는 <strong>구조</strong>예요 (LLM이 아님).
+    <strong>구조보내기</strong>는 API 없이 항상 같은 MD를 만들고,
+    <strong>AI 초안</strong>은 서버 Claude로 문장·표를 보강하는 <strong>보조</strong>예요.
+    <strong>「AI 분석」탭</strong>은 별도(F2-5)예요.
   </p>
-  {#if !isSupabaseCloudConfigured()}
-    <p class="iax-hint">Supabase가 꺼져 있으면 «복사용 프롬프트»만 써요 (서버 AI 없음).</p>
-  {/if}
   {#if $nodes.length === 0}
     <p class="iax-empty" role="status">
       아직 트리에 노드가 없어요. 왼쪽 캔버스에서 노드를 추가한 뒤 다시 와 주세요. (초안은 현재 트리·그리드 메타를 기준으로 뽑아요.)
     </p>
   {/if}
   <div class="iax-tracks">
-    {#each IA_TRACKS as track (track.intents.join(','))}
-      <div class="iax-track">
-        {#if track.heading}
-          <h4 class="iax-track-h">{track.heading}</h4>
-        {/if}
-        {#if track.hint}
-          <p class="iax-track-hint">{track.hint}</p>
-        {/if}
-        <div class="iax-grid">
-          {#each track.intents as intent (intent)}
-            <button
-              type="button"
-              class="iax-btn"
-              disabled={!!loading || $nodes.length === 0}
-              aria-label={`${LABELS[intent].t}. ${LABELS[intent].d}`}
-              on:click={() => run(intent)}
-            >
-              <span class="iax-btn-title">{LABELS[intent].t}</span>
-              <span class="iax-btn-desc">{LABELS[intent].d}</span>
-              {#if loading === intent}<span class="iax-loading" aria-hidden="true">…</span>{/if}
-            </button>
-          {/each}
-        </div>
+    <div class="iax-track iax-track-a">
+      <h4 class="iax-track-h">구조보내기 (정본 · LLM 없음)</h4>
+      <p class="iax-track-hint">동일 트리 → 동일 MD. 네트워크 없이 바로 미리보기·저장해요.</p>
+      <div class="iax-grid">
+        {#each TEMPLATE_TRACK as row (row.kind)}
+          <button
+            type="button"
+            class="iax-btn iax-btn-template"
+            disabled={$nodes.length === 0}
+            aria-label={`${row.t}. ${row.d}`}
+            on:click={() => runTemplate(row.kind)}
+          >
+            <span class="iax-btn-title">{row.t}</span>
+            <span class="iax-btn-desc">{row.d}</span>
+          </button>
+        {/each}
       </div>
-    {/each}
+    </div>
+    <div class="iax-track iax-track-b">
+      <h4 class="iax-track-h">{AI_TRACK.heading}</h4>
+      {#if AI_TRACK.hint}
+        <p class="iax-track-hint">{AI_TRACK.hint}</p>
+      {/if}
+      {#if !isSupabaseCloudConfigured()}
+        <p class="iax-hint iax-hint-inline">Supabase 꺼짐 → 복사용 프롬프트만 (서버 AI 없음).</p>
+      {/if}
+      <div class="iax-grid">
+        {#each AI_TRACK.intents as intent (intent)}
+          <button
+            type="button"
+            class="iax-btn iax-btn-ai"
+            disabled={!!loading || $nodes.length === 0}
+            aria-label={`${LABELS[intent].t}. ${LABELS[intent].d}`}
+            on:click={() => run(intent)}
+          >
+            <span class="iax-btn-title">{LABELS[intent].t}</span>
+            <span class="iax-btn-desc">{LABELS[intent].d}</span>
+            {#if loading === intent}<span class="iax-loading" aria-hidden="true">…</span>{/if}
+          </button>
+        {/each}
+      </div>
+    </div>
   </div>
 </div>
 
@@ -236,7 +347,7 @@
       aria-modal="true"
       aria-labelledby="iax-modal-title"
     >
-      <h3 id="iax-modal-title" class="iax-modal-h">문서 초안 (서버 AI)</h3>
+      <h3 id="iax-modal-title" class="iax-modal-h">{modalTitle}</h3>
       <p class="iax-modal-sub">{resultHint}</p>
       <pre class="iax-pre" id="iax-result-text">{resultText}</pre>
       <div class="iax-modal-actions">
@@ -255,10 +366,20 @@
     border-top: 1px solid #c5ccd5;
     margin-top: 4px;
   }
+  .iax-lead {
+    font-size: 13px;
+    color: #444;
+    line-height: 1.5;
+    margin: 0 0 14px;
+    max-width: 560px;
+  }
   .iax-hint {
     font-size: 12px;
     color: #888;
     margin: 0 0 12px;
+  }
+  .iax-hint-inline {
+    margin: 0 0 10px;
   }
   .iax-empty {
     font-size: 13px;
@@ -275,6 +396,10 @@
     flex-direction: column;
     gap: 20px;
     max-width: 560px;
+  }
+  .iax-track-a {
+    padding-bottom: 4px;
+    border-bottom: 1px dashed #d8d4f0;
   }
   .iax-track-h {
     margin: 0 0 6px;
@@ -305,6 +430,14 @@
     border: 1px solid #e4e0ff;
     background: #fafaff;
     cursor: pointer;
+  }
+  .iax-btn-template {
+    border-color: #2d6a4f;
+    background: #f8fdf9;
+  }
+  .iax-btn-ai {
+    border-color: #e4e0ff;
+    background: #fafaff;
   }
   .iax-btn:disabled {
     opacity: 0.5;

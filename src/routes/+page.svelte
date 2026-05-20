@@ -34,7 +34,8 @@
     listMergedHistorySnapshotsForProject,
     clearPersistSnapshotDebounceTimers,
     buildNodeSnapshotCaptureMeta,
-    selectProject
+    selectProject,
+    reconcileProjectNodeBadgesAfterPoolSave
   } from '$lib/stores/projects';
   import type { LogoutSessionSnapshotV1 } from '$lib/stores/projects';
   import {
@@ -121,10 +122,11 @@
     pilotFlushPersistNow,
     pilotHasPendingGridPersist,
     dismissPilotRelinkGuide,
-    pilotSetNodeMapLayout
+    pilotSetNodeMapLayout,
+    pilotGetNodeMapLayoutMode,
+    pilotRehydrateCurrentProjectFromStore
   } from '$lib/pilot/pilotBridge';
-  import { pendingIaExportIntent } from '$lib/stores/iaExportIntent';
-  import type { IAExportIntent } from '$lib/ai/iaExportRunner';
+  import { pendingIaTemplateExport, type IaTemplateKind } from '$lib/stores/iaExportIntent';
   import { slugExportName } from '$lib/ai/iaGridCsvExport';
   import type { PageData } from './$types';
   import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
@@ -141,9 +143,45 @@
   let projectDesc = '';
   /** 프로젝트 생성(+선택적 AI 트리) 처리 중 — 중복 클릭 방지 */
   let projectCreateBusy = false;
+  /** 편집 모드 「변경 저장」 처리 중 */
+  let projectEditBusy = false;
+
+  /** 프로젝트 관리 모달 — 생성·목록 vs 툴바 설정(현재 프로젝트 편집) */
+  type ProjectModalMode = 'create-list' | 'edit-current';
+  let projectModalMode: ProjectModalMode = 'create-list';
+  /** 편집 모드 폼 — 현재 프로젝트 노드맵 배치(우측/하위) */
+  let projectModalLayoutMode: 'right' | 'topdown' = 'right';
 
   /** 프로젝트 관리 모달 안 — 표준 배지 풀(localStorage) */
   let showBadgePoolModal = false;
+  let badgePoolModalOpenGen = 0;
+
+  /** 편집 모드(툴바 설정) — 소유 계정만 메타·배지·가져오기 저장 */
+  let projectSettingsCanEdit = true;
+  let projectSettingsOwnerCheckGen = 0;
+
+  /** 클라우드 on: `canOpenProjectShareSettingsUi` · off: 로컬 `owner_user_id` */
+  function canEditProjectSettingsSync(project: Project | null | undefined): boolean {
+    if (!project) return false;
+    if (isAclEnforced()) return canOpenProjectShareSettingsUi(project);
+    const uid = getAuthUserId();
+    if (!uid) return false;
+    if (project.owner_user_id) return project.owner_user_id === uid;
+    return true;
+  }
+  /** 모달 재오픈 시 폼 프리필(열린 프로젝트 id 기준) */
+  let editModalHydratedFor: string | null = null;
+
+  /** 편집 모드 가져오기 — 트리 덮어쓰기 확인(빈 프로젝트 포함) */
+  let showImportOverwriteModal = false;
+  type PendingTreeImport = {
+    project: Project;
+    nodes: Node[];
+    importUsedOutlineFallback: boolean;
+    unknownRootKeys?: string[];
+    closeProjectModalAfter: boolean;
+  };
+  let pendingTreeImport: PendingTreeImport | null = null;
 
   /** 서버 `resolveAnthropicApiKey.ts`의 `PLANNODE_USER_ANTHROPIC_KEY_HEADER`와 동일해야 함 */
   const PLANNODE_USER_ANTHROPIC_KEY_HEADER = 'x-plannode-user-anthropic-key';
@@ -160,6 +198,10 @@
   }
 
   function openModelApiModal() {
+    if (projectModalMode === 'edit-current' && !projectSettingsCanEdit) {
+      showPilotToast('모델 API 등록은 소유 계정만 열 수 있어.');
+      return;
+    }
     if (typeof localStorage !== 'undefined') {
       hasStoredAnthropicKey = readStoredUserAnthropicKey().length > 0;
     } else {
@@ -1012,10 +1054,10 @@
     pickView('tree');
   }
 
-  /** 상단 출력 → 화면 목록 인텐트: IA 탭으로 전환 후 `IAExportMenu`가 1회 실행 */
-  function goIaFromOutput(intent: IAExportIntent) {
+  /** 상단 출력 → IA 탭 구조보내기(템플릿, LLM 없음) — `IAExportMenu.runTemplate` 1회 */
+  function goIaTemplateFromOutput(kind: IaTemplateKind) {
     closeOutputMenu();
-    pendingIaExportIntent.set(intent);
+    pendingIaTemplateExport.set(kind);
     pickView('ia');
   }
 
@@ -1041,8 +1083,11 @@
     toolbarTitleLpStart = null;
   }
 
+  $: toolbarTitleCanEdit =
+    !!$currentProject && canEditProjectSettingsSync($currentProject);
+
   function onToolbarTitleZonePointerDown(e: PointerEvent) {
-    if (!$currentProject || toolbarProjectTitleEditing) return;
+    if (!$currentProject || toolbarProjectTitleEditing || !toolbarTitleCanEdit) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     clearToolbarTitleLongPressUi();
     toolbarTitleLpStart = { x: e.clientX, y: e.clientY };
@@ -1085,7 +1130,7 @@
   }
 
   function commitToolbarProjectTitle() {
-    if (!toolbarProjectTitleEditing) return;
+    if (!toolbarProjectTitleEditing || !toolbarTitleCanEdit) return;
     const p = get(currentProject);
     if (!p) {
       toolbarProjectTitleEditing = false;
@@ -1229,9 +1274,121 @@
     return (
       n.endsWith('.json') ||
       n.endsWith('.md') ||
+      n.endsWith('.mdc') ||
       n.endsWith('.markdown') ||
       n.endsWith('.txt')
     );
+  }
+
+  /** 편집 모드: 파일 프로젝트 id와 무관하게 열린 프로젝트 id·루트에 노드 맞춤 */
+  function remapParsedImportToOpenProject(
+    openProject: Project,
+    parsed: { project: Project; nodes: Node[] }
+  ): Node[] {
+    const targetId = openProject.id;
+    const parsedPid = parsed.project.id;
+    const oldRoot = `${parsedPid}-r`;
+    const newRoot = `${targetId}-r`;
+    return parsed.nodes.map((n) => {
+      const id = n.id === oldRoot || n.id === parsedPid ? newRoot : n.id;
+      let parent_id = n.parent_id ?? null;
+      if (parent_id === oldRoot || parent_id === parsedPid) parent_id = newRoot;
+      return {
+        ...n,
+        id,
+        project_id: targetId,
+        parent_id: parent_id ?? undefined
+      };
+    });
+  }
+
+  function cancelImportOverwrite() {
+    showImportOverwriteModal = false;
+    pendingTreeImport = null;
+    showPilotToast('가져오기를 취소했어.');
+  }
+
+  async function finishPlannodeTreeImport(pending: PendingTreeImport): Promise<boolean> {
+    showBadgeImportMappingOverlay = true;
+    await tick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const overlayT0 = typeof performance !== 'undefined' ? performance.now() : 0;
+    let merged: Project | null = null;
+    try {
+      merged = upsertImportedPlannodeTreeV1(pending.project, pending.nodes, { openAfter: false });
+    } finally {
+      const elapsed =
+        typeof performance !== 'undefined' ? performance.now() - overlayT0 : BADGE_IMPORT_OVERLAY_MIN_MS;
+      if (elapsed < BADGE_IMPORT_OVERLAY_MIN_MS) {
+        await new Promise((r) => setTimeout(r, BADGE_IMPORT_OVERLAY_MIN_MS - elapsed));
+      }
+      showBadgeImportMappingOverlay = false;
+    }
+
+    if (!merged) {
+      const msg = '저장에 실패했어.';
+      projectImportError = msg;
+      showPilotToast(msg);
+      return false;
+    }
+
+    projectImportError = '';
+    await tick();
+    if (pending.closeProjectModalAfter) {
+      requestAnimationFrame(() => showProjectModal.set(false));
+    }
+
+    const uid = getAuthUserId();
+    if (cloudSyncAvailable && uid) {
+      if (!merged.owner_user_id) {
+        updateProjectMeta(merged.id, { owner_user_id: uid });
+      }
+      const acl = await ensureOwnerAclRowForMyProject(merged.id);
+      if (!acl.ok) showPilotToast(acl.message ?? '접근 목록(소유자) 저장 실패');
+    }
+    const latest = get(projects).find((p) => p.id === merged.id);
+    if (latest) {
+      const curId = get(currentProject)?.id;
+      const r =
+        curId === latest.id ? { ok: true as const } : await trySelectProject(latest);
+      if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
+      else {
+        if (curId === latest.id) selectProject(latest);
+        let importDoneTail = '';
+        if (pending.unknownRootKeys?.length) {
+          const u = pending.unknownRootKeys;
+          importDoneTail =
+            u.length === 1
+              ? ` · 루트 미인식 키: ${u[0]}`
+              : ` · 루트 미인식 키 ${u.length}개: ${u.slice(0, 3).join(', ')}${u.length > 3 ? '…' : ''}`;
+        }
+        showPilotToast(
+          (pending.importUsedOutlineFallback
+            ? `가져오기 완료(제목·목차 초안): ${latest.name}`
+            : `가져오기 완료: ${latest.name}`) + importDoneTail
+        );
+      }
+    }
+    return true;
+  }
+
+  async function confirmImportOverwrite() {
+    const pending = pendingTreeImport;
+    if (!pending) return;
+    showImportOverwriteModal = false;
+    pendingTreeImport = null;
+
+    const pid = pending.project.id;
+    const nodesBefore = loadProjectNodesFromLocalStorage(pid);
+    captureNodeSnapshot(
+      pid,
+      nodesBefore,
+      'import',
+      buildNodeSnapshotCaptureMeta('import', pending.project, nodesBefore)
+    );
+
+    await finishPlannodeTreeImport(pending);
   }
 
   /** IMPORT-BJI-EMPTY-OVERWRITE: 현재 프로젝트가 비었는지 판정 (파일럿 메모리 우선) */
@@ -1288,8 +1445,8 @@
       });
     } else if (isPlannodeImportAllowedByName(name)) {
       const text = await file.text();
-      if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
-        const base = name.replace(/\.(md|markdown)$/i, '').trim() || '마크다운 문서';
+      if (lower.endsWith('.md') || lower.endsWith('.mdc') || lower.endsWith('.markdown')) {
+        const base = name.replace(/\.(md|mdc|markdown)$/i, '').trim() || '마크다운 문서';
         const md = parseMarkdownFileForProjectImport(text, {
           baseName: base,
           maxNodes: PLANNODE_IMPORT_MAX_NODES
@@ -1301,7 +1458,7 @@
       }
     } else {
       const msg =
-        '가져오기는 .docx, .json, .md, .markdown(또는 JSON 본문 .txt)만 지원해. docx·md( JSON 없을 때)는 본문에서 # 제목·번호 목차를 찾아 노드 초안을 만들어.';
+        '가져오기는 .docx, .json, .md, .mdc, .markdown(또는 JSON 본문 .txt)만 지원해. docx·md·mdc(JSON 없을 때)는 본문에서 # 제목·번호 목차를 찾아 노드 초안을 만들어.';
       projectImportError = msg;
       showPilotToast(msg);
       return;
@@ -1313,12 +1470,36 @@
       showPilotToast(parsed.message);
       return;
     }
+    if (projectModalMode === 'edit-current') {
+      const cur = get(currentProject);
+      if (!cur) {
+        const msg = '열린 프로젝트가 없어. 프로젝트를 연 뒤 다시 시도해줘.';
+        projectImportError = msg;
+        showPilotToast(msg);
+        return;
+      }
+      if (!(await isCurrentUserProjectOwner(cur))) {
+        const msg = '가져오기는 프로젝트 소유 계정만 할 수 있어.';
+        projectImportError = msg;
+        showPilotToast(msg);
+        return;
+      }
+      const remappedNodes = remapParsedImportToOpenProject(cur, parsed);
+      pendingTreeImport = {
+        project: cur,
+        nodes: remappedNodes,
+        importUsedOutlineFallback,
+        unknownRootKeys: parsed.unknownRootKeys,
+        closeProjectModalAfter: false
+      };
+      showImportOverwriteModal = true;
+      return;
+    }
+
     const pid = parsed.project.id;
     const exists = get(projects).some((p) => p.id === pid);
-    
-    // **GATE B 최종:** 현재 캔버스 상태를 파일럿 메모리 기준으로 판정
-    // - 같은 ID & 루트만 → confirm 생략 (새 프로젝트처럼 가져오기)
-    // - 다른 ID 또는 노드 있음 → confirm 표시 (덮어쓰기 경고)
+
+    // 생성·목록 모드: 같은 ID & 루트만 → confirm 생략 / 그 외 → confirm
     const isEmpty = isCurrentProjectEmpty(pid);
     const mustConfirmOverwrite = exists && !isEmpty;
     if (
@@ -1341,63 +1522,13 @@
       );
     }
 
-    showBadgeImportMappingOverlay = true;
-    await tick();
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-
-    const overlayT0 = typeof performance !== 'undefined' ? performance.now() : 0;
-    let merged: Project | null = null;
-    try {
-      merged = upsertImportedPlannodeTreeV1(parsed.project, parsed.nodes, { openAfter: false });
-    } finally {
-      const elapsed =
-        typeof performance !== 'undefined' ? performance.now() - overlayT0 : BADGE_IMPORT_OVERLAY_MIN_MS;
-      if (elapsed < BADGE_IMPORT_OVERLAY_MIN_MS) {
-        await new Promise((r) => setTimeout(r, BADGE_IMPORT_OVERLAY_MIN_MS - elapsed));
-      }
-      showBadgeImportMappingOverlay = false;
-    }
-
-    if (!merged) {
-      const msg = '저장에 실패했어.';
-      projectImportError = msg;
-      showPilotToast(msg);
-      return;
-    }
-
-    // **가져오기 완료 직후 모달 즉시 닫기** (백그라운드 작업과 무관)
-    projectImportError = '';
-    await tick();
-    requestAnimationFrame(() => showProjectModal.set(false));
-
-    const uid = getAuthUserId();
-    if (cloudSyncAvailable && uid) {
-      if (!merged.owner_user_id) {
-        updateProjectMeta(merged.id, { owner_user_id: uid });
-      }
-      const acl = await ensureOwnerAclRowForMyProject(merged.id);
-      if (!acl.ok) showPilotToast(acl.message ?? '접근 목록(소유자) 저장 실패');
-    }
-    const latest = get(projects).find((p) => p.id === merged.id);
-    if (latest) {
-      const r = await trySelectProject(latest);
-      if (!r.ok) showPilotToast(r.message ?? '가져온 프로젝트에 접근할 수 없어.');
-      else {
-        let importDoneTail = '';
-        if (parsed.unknownRootKeys?.length) {
-          const u = parsed.unknownRootKeys;
-          importDoneTail =
-            u.length === 1
-              ? ` · 루트 미인식 키: ${u[0]}`
-              : ` · 루트 미인식 키 ${u.length}개: ${u.slice(0, 3).join(', ')}${u.length > 3 ? '…' : ''}`;
-        }
-        showPilotToast(
-          (importUsedOutlineFallback
-            ? `가져오기 완료(제목·목차 초안): ${latest.name}`
-            : `가져오기 완료: ${latest.name}`) + importDoneTail
-        );
-      }
-    }
+    await finishPlannodeTreeImport({
+      project: parsed.project,
+      nodes: parsed.nodes,
+      importUsedOutlineFallback,
+      unknownRootKeys: parsed.unknownRootKeys,
+      closeProjectModalAfter: true
+    });
   }
 
   /** 생성 직후: 요구사항이 있고 클라우드·세션이 있으면 `/api/ai/agenda-to-tree` → 파싱·배지 살규화·upsert (기존 단독 버튼과 동일 파이프라인) */
@@ -1577,10 +1708,146 @@
     }
   }
 
+  function hydrateProjectFormFromCurrent() {
+    const p = get(currentProject);
+    if (!p) return;
+    projectName = p.name ?? '';
+    projectAuthor = p.author ?? '';
+    projectStart = p.start_date ?? '';
+    projectEnd = p.end_date ?? '';
+    projectDesc = p.description ?? '';
+    const layout = pilotGetNodeMapLayoutMode();
+    projectModalLayoutMode =
+      layout === 'topdown' ? 'topdown' : layout === 'right' ? 'right' : readNodeMapLayoutCreateDefault();
+  }
+
+  function resetProjectModalFormFields() {
+    projectModalMode = 'create-list';
+    projectName = '';
+    projectAuthor = '';
+    projectStart = '';
+    projectEnd = '';
+    projectDesc = '';
+    projectImportError = '';
+    projectModalLayoutMode = readNodeMapLayoutCreateDefault();
+  }
+
+  function setProjectModalLayoutChoice(m: 'right' | 'topdown') {
+    if (projectModalMode === 'edit-current') {
+      if (!projectSettingsCanEdit) {
+        showPilotToast('노드맵 배치는 소유 계정만 변경할 수 있어.');
+        return;
+      }
+      projectModalLayoutMode = m;
+      pilotSetNodeMapLayout(m);
+      return;
+    }
+    nodeMapLayoutDefaultForCreate = m;
+    writeNodeMapLayoutCreateDefault(m);
+  }
+
+  function openProjectModalCreateList() {
+    resetProjectModalFormFields();
+    showProjectModal.set(true);
+  }
+
+  async function refreshProjectSettingsOwnerGate() {
+    const gen = ++projectSettingsOwnerCheckGen;
+    const p = get(currentProject);
+    if (!p) {
+      projectSettingsCanEdit = false;
+      return;
+    }
+    const ok = isAclEnforced()
+      ? canOpenProjectShareSettingsUi(p)
+      : await isCurrentUserProjectOwner(p);
+    if (gen !== projectSettingsOwnerCheckGen) return;
+    projectSettingsCanEdit = ok;
+    if (!ok && projectModalMode === 'edit-current' && get(showProjectModal)) {
+      showPilotToast('프로젝트 설정은 소유 계정만 변경할 수 있어.');
+      closeModal();
+    }
+  }
+
+  async function openProjectSettingsModal() {
+    const p = get(currentProject);
+    if (!p) return;
+    if (!canEditProjectSettingsSync(p)) {
+      showPilotToast('프로젝트 설정은 소유 계정만 변경할 수 있어.');
+      return;
+    }
+    if (isAclEnforced()) {
+      projectSettingsCanEdit = canOpenProjectShareSettingsUi(p);
+    } else if (!(await isCurrentUserProjectOwner(p))) {
+      showPilotToast('프로젝트 설정은 소유 계정만 변경할 수 있어.');
+      return;
+    } else {
+      projectSettingsCanEdit = true;
+    }
+    projectModalMode = 'edit-current';
+    projectImportError = '';
+    editModalHydratedFor = null;
+    hydrateProjectFormFromCurrent();
+    showProjectModal.set(true);
+    void refreshProjectSettingsOwnerGate();
+  }
+
+  function openBadgePoolSettingsModal() {
+    if (!projectSettingsCanEdit) {
+      showPilotToast('표준 배지 설정은 소유 계정만 변경할 수 있어.');
+      return;
+    }
+    badgePoolModalOpenGen += 1;
+    showBadgePoolModal = true;
+  }
+
+  async function handleProjectEditSave() {
+    if (projectEditBusy) return;
+    const p = get(currentProject);
+    if (!p) return;
+    if (!canEditProjectSettingsSync(p) || !(await isCurrentUserProjectOwner(p))) {
+      showPilotToast('프로젝트 설정은 소유 계정만 저장할 수 있어.');
+      return;
+    }
+    if (!projectName || !projectAuthor || !projectStart || !projectEnd) {
+      alert('필수 항목을 입력해주세요');
+      return;
+    }
+    projectEditBusy = true;
+    try {
+      pilotSetNodeMapLayout(projectModalLayoutMode);
+      updateProjectFields(p.id, {
+        name: projectName,
+        author: projectAuthor,
+        start_date: projectStart,
+        end_date: projectEnd,
+        description: projectDesc
+      });
+      if (cloudSyncAvailable) {
+        const flushed = await flushCloudWorkspaceNow('project-settings-save');
+        if (!flushed) {
+          showPilotToast('로컬에는 저장했어. 클라우드 반영은 잠시 후 다시 시도해줘.');
+        } else {
+          showPilotToast('프로젝트 설정을 저장했어.');
+        }
+      } else {
+        showPilotToast('프로젝트 설정을 저장했어.');
+      }
+      hydrateProjectFormFromCurrent();
+      await tick();
+      requestAnimationFrame(() => {
+        resetProjectModalFormFields();
+        showProjectModal.set(false);
+      });
+    } finally {
+      projectEditBusy = false;
+    }
+  }
+
   function closeModal() {
     showModelApiModal = false;
     modelApiKeyDraft = '';
-    projectImportError = '';
+    resetProjectModalFormFields();
     showProjectModal.set(false);
   }
 
@@ -1687,6 +1954,20 @@
     projectModalListSyncing = false;
     modalProjectListInitialHydrated = false;
     projectsForModal = null;
+    editModalHydratedFor = null;
+    projectSettingsCanEdit = true;
+  }
+
+  $: projectSettingsFormLocked =
+    projectModalMode === 'edit-current' && !projectSettingsCanEdit;
+
+  $: if ($showProjectModal && projectModalMode === 'edit-current' && $currentProject) {
+    const pid = $currentProject.id;
+    if (editModalHydratedFor !== pid) {
+      editModalHydratedFor = pid;
+      hydrateProjectFormFromCurrent();
+    }
+    void refreshProjectSettingsOwnerGate();
   }
 
   function canShowProjectDelete(proj: Project): boolean {
@@ -1827,7 +2108,10 @@
       return;
     }
     await tick();
-    requestAnimationFrame(() => showProjectModal.set(false));
+    requestAnimationFrame(() => {
+      resetProjectModalFormFields();
+      showProjectModal.set(false);
+    });
   }
 
   async function handleProjectSelect(proj: Project) {
@@ -1922,23 +2206,6 @@
   function openAclForCurrentProject() {
     const p = get(currentProject);
     if (p) openAclModal(p);
-  }
-
-  function onProjectNameToolbarClick() {
-    if (!cloudSyncAvailable || !toolbarCompact) return;
-    const p = get(currentProject);
-    if (!p || !canOpenProjectShareSettingsUi(p)) return;
-    openAclForCurrentProject();
-  }
-
-  function onProjectNameToolbarClickGuarded(ev: MouseEvent) {
-    if (suppressNextToolbarTitleClick) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      suppressNextToolbarTitleClick = false;
-      return;
-    }
-    onProjectNameToolbarClick();
   }
 
   function openAclForProject(proj: Project) {
@@ -2396,59 +2663,87 @@
           <div class="dv"></div>
         </div>
         <div class="tb-row-project">
-          <!-- 제목 롱프레스(1.5초)로 수정 모드 — 영역 밖 터치 시 저장 -->
           <div
             id="TB-PROJ-TITLE"
             class="tb-proj-title-zone"
             on:pointerdown={onToolbarTitleZonePointerDown}
           >
-            <span class="tb-proj-label">프로젝트:</span>
-            {#if toolbarProjectTitleEditing && $currentProject}
-              <input
-                bind:this={toolbarTitleInputEl}
-                id="PNT"
-                class="pntag pntag-input"
-                bind:value={toolbarTitleDraft}
-                aria-label="프로젝트 이름 편집"
-                maxlength={200}
-                on:blur={commitToolbarProjectTitle}
-                on:keydown={(e) => {
-                  if (e.key === 'Escape') {
-                    e.preventDefault();
-                    cancelToolbarProjectTitleEdit();
-                  } else if (e.key === 'Enter') {
-                    e.preventDefault();
-                    toolbarTitleInputEl?.blur();
-                  }
-                }}
-              />
-            {:else}
-              <button
-                type="button"
-                id="PNT"
-                class="pntag"
-                class:pntag--share-entry={cloudSyncAvailable &&
-                  !!$currentProject &&
-                  toolbarCompact &&
-                  canOpenProjectShareSettingsUi($currentProject)}
-                disabled={!$currentProject}
-                tabindex={cloudSyncAvailable && $currentProject && !toolbarCompact ? -1 : undefined}
-                title={cloudSyncAvailable &&
-                $currentProject &&
-                toolbarCompact &&
-                canOpenProjectShareSettingsUi($currentProject)
-                  ? '프로젝트 공유 · 접근 허용 이메일 관리'
-                  : '길게 누르면 이름 수정'}
-                on:click={onProjectNameToolbarClickGuarded}
-              >
-                {$currentProject?.name || '—'}
-              </button>
-            {/if}
+            <div
+              class="tb-proj-name-pill"
+              class:tb-proj-name-pill--empty={!$currentProject}
+              aria-label={$currentProject ? `현재 프로젝트: ${$currentProject.name}` : '프로젝트 미선택'}
+            >
+              {#if toolbarProjectTitleEditing && $currentProject && toolbarTitleCanEdit}
+                <input
+                  bind:this={toolbarTitleInputEl}
+                  id="PNT"
+                  class="pntag pntag-input tb-proj-name-pill-input"
+                  bind:value={toolbarTitleDraft}
+                  aria-label="프로젝트 이름 편집"
+                  maxlength={200}
+                  on:blur={commitToolbarProjectTitle}
+                  on:keydown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      cancelToolbarProjectTitleEdit();
+                    } else if (e.key === 'Enter') {
+                      e.preventDefault();
+                      toolbarTitleInputEl?.blur();
+                    }
+                  }}
+                />
+              {:else if $currentProject}
+                {#if toolbarTitleCanEdit}
+                  <button
+                    type="button"
+                    id="PNT"
+                    class="pntag tb-proj-name-pill-label"
+                    title="길게 누르면 이름 수정"
+                  >
+                    {$currentProject.name}
+                  </button>
+                {:else}
+                  <span id="PNT" class="pntag tb-proj-name-pill-label">{$currentProject.name}</span>
+                {/if}
+              {:else}
+                <span
+                  id="PNT"
+                  class="pntag tb-proj-name-pill-label tb-proj-name-pill-label--empty"
+                  aria-hidden="true"
+                ></span>
+              {/if}
+            </div>
           </div>
-          {#if $currentProject && cloudSyncAvailable && canOpenProjectShareSettingsUi($currentProject)}
-            <button type="button" id="BAC" title="프로젝트 공유 · 접근 허용 이메일 관리" on:click={openAclForCurrentProject}>
-              공유
-            </button>
+          {#if $currentProject && toolbarTitleCanEdit}
+            <button
+              type="button"
+              id="TB-PROJ-SETTINGS"
+              class="tb-proj-settings-btn"
+              title="프로젝트 설정"
+              aria-label="프로젝트 설정"
+              on:click={openProjectSettingsModal}
+            >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="35"
+              height="35"
+              viewBox="0 0 35 35"
+              fill="none"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                d="M35 17.5C35 27.165 27.165 35 17.5 35C7.83502 35 0 27.165 0 17.5C0 7.83502 7.83502 0 17.5 0C27.165 0 35 7.83502 35 17.5Z"
+                fill="#E6E4FF"
+              />
+              <path
+                fill-rule="evenodd"
+                clip-rule="evenodd"
+                d="M15.9286 6.48468C16.7976 5.61572 18.207 5.61579 19.0761 6.48468L21.1903 8.59894H24.1786C25.4074 8.59902 26.404 9.59474 26.4042 10.8235V13.8128L28.5175 15.9261C29.3865 16.7951 29.3865 18.2045 28.5175 19.0735L26.4042 21.1868V24.1761C26.4041 25.405 25.4075 26.4016 24.1786 26.4017H21.1893L19.0761 28.515C18.207 29.384 16.7976 29.384 15.9286 28.515L13.8153 26.4017H10.8261C9.59724 26.4015 8.60152 25.4049 8.60145 24.1761V21.1878L6.48719 19.0735C5.6183 18.2045 5.61823 16.7951 6.48719 15.9261L8.60145 13.8118V10.8235C8.60165 9.59481 9.59732 8.59913 10.8261 8.59894H13.8143L15.9286 6.48468ZM17.4979 14.0003C15.5649 14.0003 13.9979 15.5673 13.9979 17.5003C13.9981 19.4332 15.5651 21.0003 17.4979 21.0003C19.4308 21.0003 20.9978 19.4332 20.9979 17.5003C20.9979 15.5673 19.4309 14.0003 17.4979 14.0003Z"
+                fill="#6B61F6"
+              />
+            </svg>
+          </button>
           {/if}
           <div class="dv tb-dv-mid"></div>
         </div>
@@ -2611,17 +2906,17 @@
                 role="menuitem"
                 class="tb-output-menu-item"
                 title={outputFileSlug
-                  ? `IA 탭으로 이동 후 초안 실행 — 저장 시 권장: ${outputFileSlug}-ia.md (PRD F4-3)`
-                  : '정보 구조(IA) 탭으로 이동 후 메뉴·계층 초안 실행 (F2-4)'}
-                on:click={() => goIaFromOutput('IA_STRUCTURE')}>정보 구조(IA)</button>
+                  ? `IA 탭 → 구조보내기(템플릿, LLM 없음) — ${outputFileSlug}-ia.md (PRD F4-3)`
+                  : '정보 구조(IA) 탭 → 트리 기반 IA MD (F2-4·F4-3)'}
+                on:click={() => goIaTemplateFromOutput('ia')}>정보 구조(IA)</button>
               <button
                 type="button"
                 role="menuitem"
                 class="tb-output-menu-item"
                 title={outputFileSlug
-                  ? `IA 탭에서 화면 목록 초안 — 저장 시 권장: ${outputFileSlug}-wireframes.md (PRD F4-4)`
-                  : 'IA 탭에서 화면 목록·와이어 키트 초안 (F2-4·F4-4 방향)'}
-                on:click={() => goIaFromOutput('SCREEN_LIST')}>화면·와이어 목록</button>
+                  ? `IA 탭 → 와이어 뼈대(템플릿) — ${outputFileSlug}-wireframes.md (PRD F4-4)`
+                  : '정보 구조(IA) 탭 → 와이어프레임 키트 MD (F2-4·F4-4)'}
+                on:click={() => goIaTemplateFromOutput('wireframes')}>화면·와이어 목록</button>
             </div>
           {/if}
         </div>
@@ -2636,7 +2931,7 @@
           <button type="button" id="BJN" class="pilot-wire-sink" tabindex="-1">JSON</button>
         </div>
         <div class="dv"></div>
-        <button type="button" id="BPN" on:click={() => showProjectModal.set(true)}>+</button>
+        <button type="button" id="BPN" on:click={openProjectModalCreateList}>+</button>
         </div>
       </div>
       {#if $authUser}
@@ -2746,7 +3041,7 @@
                 id="BNE"
                 class="cw-bne-new-project"
                 aria-label="새 프로젝트"
-                on:click={() => showProjectModal.set(true)}
+                on:click={openProjectModalCreateList}
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -3037,6 +3332,9 @@
                 <strong>지금 모드</strong> · 로그인 전. 누르면 <em>복사용 글(프롬프트)</em>만 나와요. 위에서 로그인하면 서버를 거쳐 AI 답을 받을 수 있어요.
               </p>
             {/if}
+            <p class="ai-impl-hint__line">
+              트리에서 <strong>노드를 선택</strong>한 뒤 실행하면 계층 맥락(LAYER1)이 프롬프트에 들어가요. 하위가 없거나 맥락이 부족하면 API는 건너뛰고, 아래·상단 토스트 안내와 함께 <em>복사용 프롬프트</em>만 표시돼요.
+            </p>
           </div>
           <div class="ai-btn-grid">
             <button type="button" class="ai-btn" id="ai-prd">
@@ -3133,11 +3431,63 @@
       </div>
     {/if}
 
+    {#if showImportOverwriteModal && pendingTreeImport}
+      <div
+        class="mbg mbg-stack-top"
+        role="presentation"
+        on:click|self={cancelImportOverwrite}
+      >
+        <div class="mo import-overwrite-modal" role="dialog" aria-modal="true" aria-labelledby="import-overwrite-title">
+          <div class="pm-proj-head import-overwrite-head">
+            <h3 id="import-overwrite-title" class="import-overwrite-title">노드정보 덮어쓰기</h3>
+            <button type="button" class="mcl" aria-label="닫기" on:click={cancelImportOverwrite}>✕</button>
+          </div>
+          <p class="import-overwrite-body">
+            프로젝트의 모든 노드카드 정보를 불러온 정보로 덮어쓰기 가능하며 복구가 불가능합니다.
+          </p>
+          <div class="import-overwrite-actions">
+            <button type="button" class="bcr" on:click={cancelImportOverwrite}>취소</button>
+            <button type="button" class="bcr bcr-create-project" on:click={confirmImportOverwrite}>
+              덮어쓰기
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if showBadgePoolModal}
-      <StandardBadgePoolModal
-        on:close={() => (showBadgePoolModal = false)}
-        on:saved={() => showPilotToast('표준 배지 풀을 저장했어. 노드 편집·가져오기에 바로 반영돼.')}
-      />
+      {#key `${$currentProject?.id ?? 'device-badge-pool'}-${badgePoolModalOpenGen}`}
+        <StandardBadgePoolModal
+          projectId={$currentProject?.id ?? null}
+          projectLabel={$currentProject?.name ?? null}
+          on:close={() => (showBadgePoolModal = false)}
+          on:saved={async (e) => {
+            showBadgePoolModal = false;
+            const pid = e.detail.projectId ?? $currentProject?.id ?? null;
+            let reconciled = 0;
+            if (pid) {
+              reconciled = reconcileProjectNodeBadgesAfterPoolSave(pid);
+              if ($currentProject?.id === pid) {
+                pilotRehydrateCurrentProjectFromStore();
+              }
+              if (cloudSyncAvailable && canEditProjectSettingsSync(get(currentProject))) {
+                const flushed = await flushCloudWorkspaceNow('badge-pool-save');
+                if (!flushed) {
+                  showPilotToast('배지 풀은 로컬에 저장했어. 클라우드 반영은 잠시 후 다시 시도해줘.');
+                  return;
+                }
+              }
+            }
+            showPilotToast(
+              pid && reconciled > 0
+                ? `표준 배지를 저장했어. 노드 ${reconciled}개의 배지를 정리했어.`
+                : pid
+                  ? '표준 배지를 저장했어. 이 프로젝트에 반영됐어.'
+                  : '표준 배지 풀을 저장했어. 이 기기 기본 풀로 반영됐어.'
+            );
+          }}
+        />
+      {/key}
     {/if}
 
     {#if showPlannodeUpdateModal}
@@ -3257,8 +3607,7 @@
               class="bcr"
               on:click={() => {
                 showDeletedProjectWarning = false;
-                // 프로젝트 목록 모달 열기
-                showProjectModal.set(true);
+                openProjectModalCreateList();
               }}
             >
               프로젝트 목록 보기
@@ -3272,7 +3621,13 @@
       <div class="mbg" role="presentation" on:click|self={closeModal}>
         <div class="mo mo-wide pm-scroll pm-proj-shell">
           <div class="pm-proj-head">
-            <h3 style="margin:0">프로젝트 관리</h3>
+            <h3 style="margin:0">
+              {#if projectModalMode === 'edit-current' && $currentProject}
+                프로젝트 설정 — {$currentProject.name}
+              {:else}
+                프로젝트 관리
+              {/if}
+            </h3>
             <button type="button" class="mcl" on:click={closeModal}>✕</button>
           </div>
           <div
@@ -3281,17 +3636,24 @@
             on:scroll={syncProjectModalScrollHint}
           >
           <div class="proj-form-col">
+            {#if projectSettingsFormLocked}
+              <p class="proj-settings-readonly" role="status">
+                공유 받은 프로젝트는 소유 계정만 설정을 바꿀 수 있어. 내용은 읽기만 가능해.
+              </p>
+            {/if}
             <input
               class="fi"
               bind:value={projectName}
               placeholder="프로젝트 이름 *"
               aria-label="프로젝트 이름"
+              disabled={projectSettingsFormLocked}
             />
             <input
               class="fi"
               bind:value={projectAuthor}
               placeholder="작성자 *"
               aria-label="작성자"
+              disabled={projectSettingsFormLocked}
             />
             <div class="fg fg-dates">
               <input
@@ -3300,6 +3662,7 @@
                 bind:value={projectStart}
                 placeholder="시작일"
                 aria-label="시작일"
+                disabled={projectSettingsFormLocked}
               />
               <input
                 class="fi proj-date-input"
@@ -3307,6 +3670,7 @@
                 bind:value={projectEnd}
                 placeholder="종료일"
                 aria-label="종료일"
+                disabled={projectSettingsFormLocked}
               />
             </div>
             <label class="proj-req-label" for="proj-req-detail">프로젝트 요구사항 상세입력</label>
@@ -3316,32 +3680,41 @@
               bind:value={projectDesc}
               rows="5"
               style="resize:vertical;min-height:10rem"
-              placeholder="목적·기능·제약 등(선택). 클라우드에 로그인된 경우 같은 「생성」으로 AI 트리 초안을 시도해요."
+              placeholder={projectModalMode === 'edit-current'
+                ? '목적·기능·제약 등(선택). 「변경 저장」으로 프로젝트 메타에 반영돼.'
+                : '목적·기능·제약 등(선택). 클라우드에 로그인된 경우 같은 「생성」으로 AI 트리 초안을 시도해요.'}
               aria-label="프로젝트 요구사항 상세입력"
               autocomplete="off"
               autocorrect="off"
               spellcheck="true"
+              disabled={projectSettingsFormLocked}
             ></textarea>
-            <div class="proj-layout-row" role="group" aria-label="새 프로젝트 노드맵 배치">
+            <div
+              class="proj-layout-row"
+              role="group"
+              aria-label={projectModalMode === 'edit-current'
+                ? '현재 프로젝트 노드맵 배치'
+                : '새 프로젝트 노드맵 배치'}
+            >
               <button
                 type="button"
                 class="nm-create-opt"
-                class:nm-create-opt--on={nodeMapLayoutDefaultForCreate === 'right'}
-                on:click={() => {
-                  nodeMapLayoutDefaultForCreate = 'right';
-                  writeNodeMapLayoutCreateDefault('right');
-                }}
+                class:nm-create-opt--on={(projectModalMode === 'edit-current'
+                  ? projectModalLayoutMode
+                  : nodeMapLayoutDefaultForCreate) === 'right'}
+                disabled={projectSettingsFormLocked}
+                on:click={() => setProjectModalLayoutChoice('right')}
               >
                 우측분포 보기
               </button>
               <button
                 type="button"
                 class="nm-create-opt"
-                class:nm-create-opt--on={nodeMapLayoutDefaultForCreate === 'topdown'}
-                on:click={() => {
-                  nodeMapLayoutDefaultForCreate = 'topdown';
-                  writeNodeMapLayoutCreateDefault('topdown');
-                }}
+                class:nm-create-opt--on={(projectModalMode === 'edit-current'
+                  ? projectModalLayoutMode
+                  : nodeMapLayoutDefaultForCreate) === 'topdown'}
+                disabled={projectSettingsFormLocked}
+                on:click={() => setProjectModalLayoutChoice('topdown')}
               >
                 하위분포 보기
               </button>
@@ -3351,7 +3724,8 @@
                 type="button"
                 class="bcr bcr-badge-settings"
                 id="BBS"
-                on:click={() => (showBadgePoolModal = true)}
+                disabled={projectSettingsFormLocked}
+                on:click={openBadgePoolSettingsModal}
               >
                 표준 배지 설정
               </button>
@@ -3359,24 +3733,39 @@
                 type="button"
                 class="bcr bcr-model-api"
                 id="BMA"
+                disabled={projectSettingsFormLocked}
                 on:click={openModelApiModal}
               >
                 모델API 등록
               </button>
             </div>
-            <button
-              type="button"
-              class="bcr bcr-create-project"
-              disabled={projectCreateBusy}
-              on:click={handleProjectCreate}
-            >
-              {projectCreateBusy ? '처리 중…' : '+ 프로젝트 생성'}
-            </button>
+            {#if projectModalMode === 'edit-current'}
+              {#if projectSettingsCanEdit}
+                <button
+                  type="button"
+                  class="bcr bcr-create-project"
+                  disabled={projectEditBusy}
+                  on:click={handleProjectEditSave}
+                >
+                  {projectEditBusy ? '처리 중…' : '변경 저장'}
+                </button>
+              {/if}
+            {:else}
+              <button
+                type="button"
+                class="bcr bcr-create-project"
+                disabled={projectCreateBusy}
+                on:click={handleProjectCreate}
+              >
+                {projectCreateBusy ? '처리 중…' : '+ 프로젝트 생성'}
+              </button>
+            {/if}
+            {#if projectModalMode !== 'edit-current' || projectSettingsCanEdit}
             <div class="proj-json-import">
               <input
                 bind:this={jsonImportInput}
                 type="file"
-                accept="application/json,.json,text/markdown,.md,.markdown,.txt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"
+                accept="application/json,.json,text/markdown,.md,.mdc,.markdown,.txt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"
                 class="json-import-input"
                 aria-hidden="true"
                 tabindex="-1"
@@ -3396,6 +3785,7 @@
                 <p class="proj-import-err" role="alert">{projectImportError}</p>
               {/if}
             </div>
+            {/if}
           </div>
           <div class="pl pm-proj-list-col">
             {#if isAclEnforced() && projectModalListSyncing && !modalProjectListInitialHydrated}
@@ -3915,10 +4305,65 @@
     }
   }
 
-  .tb-proj-label {
-    font-size: 11px;
-    color: #aaa;
+  .tb-proj-name-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    min-width: 30ch;
+    max-width: min(30ch, 72vw);
+    min-height: 28px;
+    padding: 4px 14px;
+    border-radius: 999px;
+    background: #e6e4ff;
+    box-sizing: border-box;
+    flex: 0 1 auto;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: #1a1a1a;
+  }
+
+  .tb-proj-name-pill--empty {
+    min-height: 28px;
+  }
+
+  #PNT.pntag.tb-proj-name-pill-label,
+  button#PNT.pntag.tb-proj-name-pill-label,
+  span#PNT.pntag.tb-proj-name-pill-label {
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    color: inherit;
+    max-width: 100%;
+    min-width: 0;
+    flex: 1 1 auto;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tb-proj-name-pill-label--empty {
+    display: block;
+    min-height: 1em;
+  }
+
+  input.pntag.tb-proj-name-pill-input {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    color: inherit;
+  }
+
+  input.pntag.tb-proj-name-pill-input:focus {
+    outline: none;
+    box-shadow: none;
   }
 
   /* 좁은 화면에서 구분선 숨김(줄바꿈 시 중복 느낌 완화) */
@@ -3954,7 +4399,43 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
+    margin-right: 8px;
     touch-action: manipulation;
+  }
+
+  button#TB-PROJ-SETTINGS.tb-proj-settings-btn {
+    appearance: none;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+    cursor: pointer;
+  }
+
+  button#TB-PROJ-SETTINGS.tb-proj-settings-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  button#TB-PROJ-SETTINGS.tb-proj-settings-btn:hover:not(:disabled) {
+    filter: brightness(0.97);
+  }
+
+  button#TB-PROJ-SETTINGS.tb-proj-settings-btn:focus-visible {
+    outline: 2px solid #631eed;
+    outline-offset: 2px;
+    border-radius: 50%;
+  }
+
+  button#TB-PROJ-SETTINGS.tb-proj-settings-btn svg {
+    width: 28px;
+    height: 28px;
+    display: block;
   }
 
   .pntag {
@@ -4004,14 +4485,27 @@
     cursor: default;
   }
 
-  button#PNT.pntag.pntag--share-entry {
-    cursor: pointer;
-    color: #4a3a9e;
+  button#PNT.pntag.tb-proj-name-pill-label {
+    appearance: none;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    text-align: left;
+    color: inherit;
+    cursor: text;
+    width: 100%;
+    max-width: 100%;
   }
 
   @media (max-width: 900px) {
-    #BAC {
-      display: none !important;
+    button#TB-PROJ-SETTINGS.tb-proj-settings-btn svg {
+      width: 26px;
+      height: 26px;
     }
   }
 
@@ -4476,6 +4970,51 @@
     background: #fef2f2;
     border-radius: 8px;
     border: 1px solid #fecaca;
+  }
+
+  .proj-settings-readonly {
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #64748b;
+    background: #f8fafc;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+  }
+
+  .import-overwrite-modal {
+    width: min(440px, 100%);
+    padding: 20px 22px 22px;
+    overflow: hidden;
+    box-sizing: border-box;
+  }
+
+  .import-overwrite-modal .import-overwrite-head {
+    margin-bottom: 14px;
+  }
+
+  .import-overwrite-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: #1a1a1a;
+  }
+
+  .import-overwrite-body {
+    margin: 0 0 20px;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #333;
+  }
+
+  .import-overwrite-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 0;
+    margin: 0;
   }
 
   #BJI.proj-json-import-btn {
@@ -6345,6 +6884,11 @@
     justify-content: center;
     padding: 16px;
     box-sizing: border-box;
+  }
+
+  /* 프로젝트 관리 모달 위 — 편집 모드 가져오기 덮어쓰기 확인 */
+  :global(.mbg.mbg-stack-top) {
+    z-index: 6500;
   }
 
   :global(.mo) {

@@ -15,6 +15,8 @@ import {
   clearPendingWorkspaceDeletions,
   pruneDeletedProjectTombstonesAgainstCloudProjectIds,
   getDeletedProjectTombstoneIds,
+  mergeProjectMetaForCloudSync,
+  reconcileProjectRecord,
   type WorkspaceBundle
 } from '$lib/stores/projects';
 import {
@@ -39,8 +41,9 @@ import {
 export { isSupabaseCloudConfigured };
 
 /**
- * 동기·공유 슬라이스 간극 요약(NOW-68): 비실시간(Realtime 미구독). 공유 merge는 revision·lock RPC 경로에서
- * `revision_stale`·`merge_locked` 등으로 완화·재시도하며 OT/CRDT 수준 동시 편집은 아님. 상세는 `docs/plannode_workspace_sync_overview.md` §3.
+ * 동기·공유 슬라이스(NOW-68·EPIC A): `plannode_workspace` **번들 본문**은 Realtime 미구독(pull/RPC).
+ * `plannode_project_collab_meta.revision` 만 postgres_changes **신호** → `pullCollabSliceForProject`.
+ * OT/CRDT 없음. §3·§7 · `docs/plannode_workspace_sync_overview.md`.
  */
 
 const TABLE = 'plannode_workspace';
@@ -750,19 +753,28 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
     slice.project.updated_at,
     local.id
   );
-  const mergedProject = remoteMetaNewer
-    ? { ...slice.project, cloud_workspace_source_user_id: src }
-    : { ...local, cloud_workspace_source_user_id: src };
+  const remoteProj = reconcileProjectRecord({
+    ...slice.project,
+    cloud_workspace_source_user_id: src
+  });
+  const mergedProject = mergeProjectMetaForCloudSync(
+    reconcileProjectRecord({ ...local, cloud_workspace_source_user_id: src }),
+    remoteProj
+  );
 
   const nodesChanged =
     projectWorkspaceNodesJsonSnapshot(mergedNodes) !== projectWorkspaceNodesJsonSnapshot(localNodes);
+  const projectSettingsMetaSignature = (proj: Project): string =>
+    JSON.stringify({
+      name: proj.name,
+      author: proj.author,
+      start_date: proj.start_date,
+      end_date: proj.end_date,
+      description: proj.description ?? '',
+      badge_pool: proj.badge_pool ?? null
+    });
   const metaChanged =
-    remoteMetaNewer &&
-    (mergedProject.name !== local.name ||
-      mergedProject.author !== local.author ||
-      mergedProject.start_date !== local.start_date ||
-      mergedProject.end_date !== local.end_date ||
-      (mergedProject.description ?? '') !== (local.description ?? ''));
+    projectSettingsMetaSignature(mergedProject) !== projectSettingsMetaSignature(local);
   const projectTsChanged =
     remoteMetaNewer && String(mergedProject.updated_at || '') !== String(local.updated_at || '');
 

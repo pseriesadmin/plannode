@@ -10,7 +10,7 @@ export const PLANNODE_TREE_VERSION_INVALID_MESSAGE =
 
 /** 프로젝트 모달 `#BJI` — 툴팁·접근성 라벨(가져오기 UX 단일 소스, md·json 동일 규칙 안내) */
 export const PLANNODE_TREE_IMPORT_BJI_TITLE =
-  'plannode.tree JSON — version 1~5 (3~5는 외부 확장본, 노드 행은 2와 동일 규칙). .json·.md 펜스·.docx 규칙 동일. 파일당 최대 5MB.';
+  'plannode.tree JSON — version 1~5 (3~5는 외부 확장본, 노드 행은 2와 동일 규칙). .json·.md·.mdc 펜스·.docx 규칙 동일. 파일당 최대 5MB.';
 export const PLANNODE_TREE_IMPORT_BJI_ARIA_LABEL =
   'plannode.tree JSON 가져오기 — 파일 version 1~5, 마크다운 펜스와 동일 규칙';
 
