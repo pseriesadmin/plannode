@@ -53,3 +53,12 @@ SELECT EXISTS (
     AND p.proname = 'plannode_workspace_merge_project_slice'
     AND pg_get_functiondef(p.oid) LIKE '%p_prune_missing%'
 ) AS "merge_slice에_p_prune_missing_문자열_있음_기대_false";
+
+-- 7단계(선택, NOW-RT-COLLAB-06): collab_meta Realtime publication
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_publication_tables
+  WHERE pubname = 'supabase_realtime'
+    AND schemaname = 'public'
+    AND tablename = 'plannode_project_collab_meta'
+) AS "collab_meta_realtime_publication";

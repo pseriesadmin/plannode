@@ -808,6 +808,40 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
 }
 
 /**
+ * EPIC D — 원격 structure op 반영 후 스토어·localStorage만 동기 (`STRUCTURE_STORE_SYNC`).
+ * pull LWW `preserve`에 id가 있도록 하며, `touchProjectUpdatedAt`/클라우드 더티는 건드리지 않는다.
+ */
+export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[]): void {
+  if (typeof window === 'undefined') return;
+
+  const pendingDeleted = getPendingWorkspaceDeletionIds();
+  if (pendingDeleted.has(projectId)) return;
+
+  const cur = get(currentProject);
+  if (!cur || cur.id !== projectId) return;
+  const prevSnap = get(nodes);
+  const prevSameProject =
+    prevSnap.length === 0 || prevSnap.every((n) => (n.project_id ?? projectId) === projectId);
+  const prevIds = new Set(prevSnap.map((n) => n.id));
+  const nextIds = new Set(list.map((n) => n.id));
+  const removed = prevSameProject ? [...prevIds].filter((id) => !nextIds.has(id)) : [];
+  if (removed.length) {
+    registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
+  }
+  try {
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
+  } catch (e) {
+    console.error('Failed to save nodes (remote structure):', e);
+  }
+  nodesSetFromPilotPersist = true;
+  try {
+    nodes.set(list);
+  } finally {
+    nodesSetFromPilotPersist = false;
+  }
+}
+
+/**
  * NOW-44 워크스페이스 되돌리기: 스냅샷 노드 배열로 교체(현재 열린 프로젝트 id 일치 시만).
  * 파일럿 갱신은 `nodes` 스토어 구독이 처리한다.
  */

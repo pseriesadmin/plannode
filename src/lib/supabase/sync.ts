@@ -39,8 +39,9 @@ import {
 export { isSupabaseCloudConfigured };
 
 /**
- * 동기·공유 슬라이스 간극 요약(NOW-68): 비실시간(Realtime 미구독). 공유 merge는 revision·lock RPC 경로에서
- * `revision_stale`·`merge_locked` 등으로 완화·재시도하며 OT/CRDT 수준 동시 편집은 아님. 상세는 `docs/plannode_workspace_sync_overview.md` §3.
+ * 동기·공유 슬라이스(NOW-68·EPIC A): `plannode_workspace` **번들 본문**은 Realtime 미구독(pull/RPC).
+ * `plannode_project_collab_meta.revision` 만 postgres_changes **신호** → `pullCollabSliceForProject`.
+ * OT/CRDT 없음. §3·§7 · `docs/plannode_workspace_sync_overview.md`.
  */
 
 const TABLE = 'plannode_workspace';
