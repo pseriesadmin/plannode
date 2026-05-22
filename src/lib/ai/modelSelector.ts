@@ -80,3 +80,23 @@ export function selectModelForL1Request(input: {
 
   return { model: ANTHROPIC_MODEL_SONNET, maxTokens: 4096, outputIntent: intent };
 }
+
+/** §10.3 — validate 단계는 항상 Sonnet */
+export function requiresSonnetForValidateStage(): boolean {
+  return true;
+}
+
+/**
+ * 3-stage pipeline skeleton/deepen — 고위험·PRD-like intent는 Sonnet
+ */
+export function requiresSonnetForPipeline(
+  intent: OutputIntent,
+  descriptionOrBlob: string,
+  stage: 'skeleton' | 'deepen' | 'validate'
+): boolean {
+  if (stage === 'validate') return true;
+  const risk = detectHighRiskContext(descriptionOrBlob);
+  if (risk.hasPaymentContext || risk.hasConcurrencyContext) return true;
+  if (intent === 'PRD' || intent === 'FUNCTIONAL_SPEC') return true;
+  return impliesTddOrSensitive(descriptionOrBlob);
+}

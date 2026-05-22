@@ -20,7 +20,13 @@ export const POST: RequestHandler = async ({ request }) => {
     return error(401, { message: '로그인이 필요해' });
   }
 
-  let body: { system?: unknown; user?: unknown; outputIntent?: unknown };
+  let body: {
+    system?: unknown;
+    user?: unknown;
+    outputIntent?: unknown;
+    stage?: unknown;
+    maxTokens?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -46,6 +52,10 @@ export const POST: RequestHandler = async ({ request }) => {
   }
 
   const sel = selectModelForL1Request({ outputIntent, system, user });
+  const requestedMax =
+    typeof body.maxTokens === 'number' && body.maxTokens > 0
+      ? Math.min(Math.floor(body.maxTokens), 8192)
+      : sel.maxTokens;
 
   try {
     const { text } = await fetchAnthropicAssistantText({
@@ -53,7 +63,7 @@ export const POST: RequestHandler = async ({ request }) => {
       user,
       apiKey,
       model: sel.model,
-      maxTokens: sel.maxTokens
+      maxTokens: requestedMax
     });
     if (!text) {
       return json({ ok: true, code: 'EMPTY' as const, text: '_(빈 응답)_', model: sel.model });

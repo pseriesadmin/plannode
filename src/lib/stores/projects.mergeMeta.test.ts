@@ -45,4 +45,15 @@ describe('mergeProjectMetaForCloudSync badge_pool', () => {
     const merged = mergeProjectMetaForCloudSync(local, remote);
     expect(merged.badge_pool).toEqual(localPool);
   });
+
+  it('keeps local badge_pool on shared slice when remote has no badge_pool', () => {
+    const localPool = normalizeBadgePool({ dev: ['API'], ux: ['LIST'], prj: [] });
+    const local = baseProject({
+      cloud_workspace_source_user_id: 'owner-uid',
+      badge_pool: localPool,
+    });
+    const remote = baseProject({ badge_pool: undefined });
+    const merged = mergeProjectMetaForCloudSync(local, remote);
+    expect(merged.badge_pool).toEqual(localPool);
+  });
 });

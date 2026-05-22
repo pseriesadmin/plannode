@@ -3,6 +3,8 @@ import {
   ANTHROPIC_MODEL_HAIKU,
   ANTHROPIC_MODEL_SONNET,
   detectHighRiskContext,
+  requiresSonnetForPipeline,
+  requiresSonnetForValidateStage,
   selectModelForL1Request
 } from './modelSelector';
 
@@ -46,5 +48,21 @@ describe('selectModelForL1Request', () => {
       user: '결제 화면과 목록'
     });
     expect(s.model).toBe(ANTHROPIC_MODEL_SONNET);
+  });
+
+  it('requiresSonnetForValidateStage', () => {
+    expect(requiresSonnetForValidateStage()).toBe(true);
+  });
+
+  it('requiresSonnetForPipeline: validate always Sonnet path', () => {
+    expect(requiresSonnetForPipeline('SCREEN_LIST', '화면목록', 'validate')).toBe(true);
+  });
+
+  it('requiresSonnetForPipeline: PRD skeleton → Sonnet', () => {
+    expect(requiresSonnetForPipeline('PRD', '일반', 'skeleton')).toBe(true);
+  });
+
+  it('requiresSonnetForPipeline: 결제 키워드 → Sonnet', () => {
+    expect(requiresSonnetForPipeline('SCREEN_LIST', '환불 처리', 'deepen')).toBe(true);
   });
 });

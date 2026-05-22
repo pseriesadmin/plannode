@@ -564,7 +564,16 @@ export function loadProjectsFromLocalStorage() {
     if (stored) {
       const parsed = JSON.parse(stored);
       const list = Array.isArray(parsed) ? (parsed as Project[]) : [];
-      projects.set(list.map(reconcileProjectRecord));
+      const reconciled: Project[] = [];
+      for (const row of list) {
+        try {
+          reconciled.push(reconcileProjectRecord(row));
+        } catch (e) {
+          console.error('Failed to reconcile project row, keeping raw:', row?.id, e);
+          reconciled.push(row);
+        }
+      }
+      projects.set(reconciled);
     }
   } catch (e) {
     console.error('Failed to load projects:', e);
@@ -1220,6 +1229,20 @@ const parseTs = (iso: string | undefined): number => {
  * P3: `viewerUid` + 고스트-hide — pending 제거 뒤에도 원격 `projects_json`에 잠깐 남은 id 모달 노출 차단.
  * P4: 삭제 톰브스톤 — pending 비움·캐시 일부 삭제 후에도 원격 고스트 id 모달·병합에서 제외(NOW-DEL-WS-02).
  */
+/** 모달·ACL 검사용 — LWW로 고른 뒤에도 공유·소유 메타는 비어 있지 않은 쪽을 유지 */
+function mergeProjectRowForModalList(cloud: Project, local: Project): Project {
+  const lt = parseTs(local.updated_at);
+  const ct = parseTs(cloud.updated_at);
+  const base = lt > ct ? { ...local } : { ...cloud };
+  return reconcileProjectRecord({
+    ...base,
+    cloud_workspace_source_user_id:
+      local.cloud_workspace_source_user_id ?? cloud.cloud_workspace_source_user_id,
+    owner_user_id: local.owner_user_id ?? cloud.owner_user_id,
+    plan_project_id: local.plan_project_id ?? cloud.plan_project_id
+  });
+}
+
 export function mergeModalListCloudCanon(
   cloudRows: Project[],
   localPlist: Project[],
@@ -1238,12 +1261,10 @@ export function mergeModalListCloudCanon(
 
     const loc = localPlist.find((p) => p.id === cp.id);
     if (!loc) {
-      out.push(cp);
+      out.push(reconcileProjectRecord(cp));
       continue;
     }
-    const lt = parseTs(loc.updated_at);
-    const ct = parseTs(cp.updated_at);
-    out.push(lt > ct ? loc : cp);
+    out.push(mergeProjectRowForModalList(cp, loc));
   }
   for (const lp of localPlist) {
     // P2: pending 삭제 id는 로컬 전용 목록에서도 제외
@@ -1708,6 +1729,7 @@ export function mergeProjectMetaForCloudSync(local: Project, remote: Project): P
     /** 공유 멤버 로컬: 소유자 워크스페이스 슬라이스의 풀이 정본(노드 편집으로 로컬 `updated_at`만 앞선 경우에도) */
     if (local.cloud_workspace_source_user_id) {
       if (rHas) return normalizeBadgePool(remote.badge_pool!);
+      if (lHas) return normalizeBadgePool(local.badge_pool!);
       return undefined;
     }
     if (lHas && !rHas) return normalizeBadgePool(local.badge_pool!);
@@ -1844,9 +1866,6 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   }
   return n;
 }
-
-registerProjectBadgePoolLookup((projectId) => getProjectBadgePool(projectId));
-registerCurrentProjectIdLookup(() => get(currentProject)?.id ?? null);
 
 registerProjectBadgePoolLookup((projectId) => getProjectBadgePool(projectId));
 registerCurrentProjectIdLookup(() => get(currentProject)?.id ?? null);

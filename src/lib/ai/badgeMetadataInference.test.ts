@@ -119,19 +119,21 @@ describe('badgeMetadataInference', () => {
     expect(out.metadata?.badges).toBeUndefined();
   });
 
-  it('hint merge order: treeImportExtras before keywordHints when tokens differ', () => {
+  it('hint merge order: treeImportExtras before iaGrid before keywordHints', () => {
     const hints = inferBadgeHintStringsFromMetadata({
       name: '폼',
       description: '',
       metadata: {
         treeImportExtras: { isTDD: true },
+        iaGrid: { screenType: 'list' },
         functionalSpec: { userTypes: 'input form validation' }
       }
     });
-    // TDD는 treeImportExtras에서, FORM은 functionalSpec haystack에서 추론
     expect(hints).toContain('TDD');
+    expect(hints).toContain('LIST');
     expect(hints).toContain('FORM');
-    expect(hints.indexOf('TDD')).toBeLessThan(hints.indexOf('FORM'));
+    expect(hints.indexOf('TDD')).toBeLessThan(hints.indexOf('LIST'));
+    expect(hints.indexOf('LIST')).toBeLessThan(hints.indexOf('FORM'));
   });
 
   it('hint merge order: extras and keywords dedupe same token once', () => {
@@ -280,14 +282,61 @@ describe('badgeMetadataInference', () => {
     expect(hints).toContain('LIST');
   });
 
-  it('infers UX badge NAVI from description', () => {
+  it('infers UX badge GNB from description (legacy NAVI 키워드 경로 제거)', () => {
     const hints = inferBadgeHintStringsFromMetadata({
       name: '',
       description: '메뉴 화면',
       metadata: {}
     });
-    // '메뉴' 키워드 → NAVI 기대
-    expect(hints).toContain('NAVI');
+    expect(hints).toContain('GNB');
+    expect(hints).not.toContain('NAVI');
+  });
+
+  it('infers GNB·ZINDEX·FLEX from mixed UX/DEV description (GATE C 시나리오 1)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: 'GNB, z-index, flexbox로 정렬',
+      metadata: {}
+    });
+    expect(hints).toEqual(expect.arrayContaining(['GNB', 'ZINDEX', 'FLEX']));
+    expect(hints.length).toBeLessThanOrEqual(6);
+  });
+
+  it('infers UX GRID·GUTTER·BREAKPT from layout copy (GATE C 시나리오 2)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: '12컬럼 그리드, gutter, breakpoint',
+      metadata: {}
+    });
+    expect(hints).toEqual(expect.arrayContaining(['GRID', 'GUTTER', 'BREAKPT']));
+    expect(hints).not.toContain('CSSGRID');
+  });
+
+  it('infers DEV MQUERY from responsive implementation copy (GATE C 시나리오 3)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: 'media query로 반응형',
+      metadata: {}
+    });
+    expect(hints).toContain('MQUERY');
+  });
+
+  it('disambiguates CSSGRID vs UX GRID', () => {
+    const devHints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: 'display: grid와 flexbox 레이아웃',
+      metadata: {}
+    });
+    expect(devHints).toContain('CSSGRID');
+    expect(devHints).toContain('FLEX');
+
+    const uxHints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: '12컬럼 그리드 시스템과 거터',
+      metadata: {}
+    });
+    expect(uxHints).toContain('GRID');
+    expect(uxHints).not.toContain('CSSGRID');
   });
 
   // 긍정 케이스: 구조 메타에서 DEV 배지
@@ -303,12 +352,51 @@ describe('badgeMetadataInference', () => {
   });
 
   // 상한 케이스
+  it('iaGrid screenType list maps to LIST (structure before keywords)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '화면',
+      description: '짧은 설명',
+      metadata: { iaGrid: { screenType: 'list' } }
+    });
+    expect(hints[0]).toBe('LIST');
+    expect(hints).toContain('LIST');
+  });
+
+  it('does not infer CRUD from description mentioning CRUD API (GATE C 3)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '',
+      description: 'CRUD API 설계',
+      metadata: {}
+    });
+    expect(hints).not.toContain('CRUD');
+    expect(hints).toContain('API');
+  });
+
+  it('treeImportExtras crud flag does not emit CRUD hint', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: 'Node',
+      metadata: { treeImportExtras: { crud: true } }
+    });
+    expect(hints).not.toContain('CRUD');
+  });
+
+  it('does not infer removed DEV env/process tokens from description (BADGE-ALIGN)', () => {
+    const hints = inferBadgeHintStringsFromMetadata({
+      name: '배포',
+      description: 'json staging localhost deploy hotfix pull request PR',
+      metadata: {}
+    });
+    for (const removed of ['JSON', 'LOCAL', 'STAGING', 'PROD', 'DEPLOY', 'HOTFIX', 'PR', 'CRUD']) {
+      expect(hints).not.toContain(removed);
+    }
+  });
+
   it('caps hints at MAX_HINTS_PER_NODE = 6', () => {
     // 10개의 힌트를 유도하되, 상한이 6개로 제한되어야 함
     setUserBadgeInferenceRules([
       { field: 'name', contains: 'test1', suggestBadges: ['API'] },
       { field: 'name', contains: 'test2', suggestBadges: ['TDD'] },
-      { field: 'name', contains: 'test3', suggestBadges: ['CRUD'] },
+      { field: 'name', contains: 'test3', suggestBadges: ['AUTH'] },
       { field: 'name', contains: 'test4', suggestBadges: ['PAYMENT'] },
     ]);
     const hints = inferBadgeHintStringsFromMetadata({

@@ -128,6 +128,17 @@
   } from '$lib/pilot/pilotBridge';
   import { pendingIaTemplateExport, type IaTemplateKind } from '$lib/stores/iaExportIntent';
   import { slugExportName } from '$lib/ai/iaGridCsvExport';
+  import {
+    buildPrompt,
+    isLayer1ContextSufficient,
+    resolveContextAnchorNodeId
+  } from '$lib/ai/iaExporter';
+  import { buildContextFromNodes } from '$lib/ai/contextSerializer';
+  import { resolveProjectDomain } from '$lib/ai/domainDictionary';
+  import {
+    createAnthropicMessagesCaller,
+    runGenerationPipeline
+  } from '$lib/ai/generationPipeline';
   import type { PageData } from './$types';
   import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
   import { plannodeUpdateLogNewestFirst } from '$lib/plannodeUpdateLog';
@@ -616,6 +627,97 @@
     if (!p || !prdAuto) return;
     updateProjectPrdSectionDraft(p.id, sec, null);
     prdText = { ...prdText, [sec]: prdAuto.sections[sec] };
+  }
+
+  let prdS1AiBusy = false;
+  let showPrdS1AiModal = false;
+  let prdS1AiPreview = '';
+
+  async function runPrdS1AiEnhance() {
+    const p = get(currentProject);
+    const nodeList = get(nodes);
+    if (!p || !nodeList.length) {
+      showPilotToast('프로젝트와 노드를 먼저 준비해줘.');
+      return;
+    }
+    const anchorId = resolveContextAnchorNodeId(nodeList, `${p.id}-r`);
+    if (!anchorId) {
+      showPilotToast('L1 앵커 노드를 찾을 수 없어.');
+      return;
+    }
+    const projectMeta = { name: p.name, description: p.description };
+    const domain = resolveProjectDomain(`${p.name} ${p.description ?? ''}`);
+    let layer1Ok = false;
+    try {
+      const nodeCtx = buildContextFromNodes(anchorId, nodeList, {
+        ...projectMeta,
+        domain,
+        techStack: [],
+        outputIntents: ['PRD']
+      });
+      layer1Ok = isLayer1ContextSufficient(nodeCtx);
+    } catch {
+      layer1Ok = false;
+    }
+    if (!layer1Ok) {
+      showPilotToast('구조 맥락이 부족해. 하위 노드를 추가한 뒤 다시 시도해줘.');
+      return;
+    }
+
+    const token = get(authSession)?.access_token?.trim();
+    if (!cloudSyncAvailable || !token) {
+      showPilotToast('로그인·클라우드 설정 후 AI 보강을 사용할 수 있어.');
+      return;
+    }
+
+    prdS1AiBusy = true;
+    try {
+      const prompt = buildPrompt(nodeList, projectMeta, 'PRD', 'root', anchorId);
+      const callAI = createAnthropicMessagesCaller({
+        accessToken: token,
+        userAnthropicKey: readStoredUserAnthropicKey(),
+        userAnthropicKeyHeader: PLANNODE_USER_ANTHROPIC_KEY_HEADER
+      });
+      const targetSection = prdText.s1?.trim() || prdAuto?.sections.s1 || '';
+      const enrichedUser = `${prompt.user}\n\n---\n[TARGET_SECTION: 핵심 PRD 요약 s1 — 톤·누락 보강, 헤딩·표 구조 유지]\n\n${targetSection}`;
+      const result = await runGenerationPipeline(
+        { system: prompt.system, user: enrichedUser },
+        'PRD',
+        callAI,
+        {
+          descriptionForRisk: enrichedUser,
+          onStage: (stage) => {
+            const labels = { skeleton: 's1 골격…', deepen: 's1 상세화…', validate: 's1 검증…' };
+            showPilotToast(labels[stage] || '생성 중…');
+          }
+        }
+      );
+      prdS1AiPreview = result.pipeline.final;
+      showPrdS1AiModal = true;
+      showPilotToast(
+        result.gapFlags.length
+          ? `AI 보강 미리보기 · [GAP] ${result.gapFlags.length}건`
+          : 'AI 보강 미리보기를 확인해줘.'
+      );
+    } catch (e) {
+      showPilotToast(e instanceof Error ? e.message : 'AI 보강에 실패했어.');
+    } finally {
+      prdS1AiBusy = false;
+    }
+  }
+
+  function applyPrdS1AiPreview() {
+    const p = get(currentProject);
+    if (!p || !prdS1AiPreview.trim()) return;
+    prdText = { ...prdText, s1: prdS1AiPreview };
+    updateProjectPrdSectionDraft(p.id, 's1', prdS1AiPreview);
+    showPrdS1AiModal = false;
+    showPilotToast('s1 초안에 AI 보강을 반영했어.');
+  }
+
+  function cancelPrdS1AiPreview() {
+    showPrdS1AiModal = false;
+    prdS1AiPreview = '';
   }
 
   function disposePrdDraftTimers() {
@@ -3209,6 +3311,12 @@
               class="prd-l1-copy-btn"
               title="OutputIntent.PRD + L1 컨텍스트 + 핵심 PRD 요약 절(노드 추출) — AI 보완용 클립보드"
               on:click={() => pilotCopyPrdL1CoreSummaryPrompt()}>L1·핵심요약 복사</button>
+            <button
+              type="button"
+              class="prd-l1-copy-btn prd-s1-ai-btn"
+              title="s1 핵심 PRD 요약 — 3단계 LLM 보강(미리보기 후 수동 반영)"
+              disabled={prdS1AiBusy || !$currentProject}
+              on:click={() => void runPrdS1AiEnhance()}>{prdS1AiBusy ? 's1 AI 보강…' : 's1 AI 보강'}</button>
           </div>
           <div class="prd-meta" id="prd-meta"></div>
           <p class="prd-version-line" id="prd-version-line"></p>
@@ -3427,6 +3535,33 @@
             로그아웃
           </button>
           <button type="button" class="acct-btn acct-btn-ghost" on:click={closeAccountModal}>닫기</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if showPrdS1AiModal}
+      <div class="mbg mbg-stack-top" role="presentation" on:click|self={cancelPrdS1AiPreview}>
+        <div class="mo import-overwrite-modal" role="dialog" aria-modal="true" aria-labelledby="prd-s1-ai-title">
+          <div class="pm-proj-head import-overwrite-head">
+            <h3 id="prd-s1-ai-title" class="import-overwrite-title">s1 AI 보강 미리보기</h3>
+            <button type="button" class="mcl" aria-label="닫기" on:click={cancelPrdS1AiPreview}>✕</button>
+          </div>
+          <p class="import-overwrite-body">
+            아래 내용을 s1 초안에 반영할까요? BPR·노드 템플릿은 자동으로 바뀌지 않아요.
+          </p>
+          <textarea
+            class="prd-section-editor prd-s1-ai-preview"
+            rows="16"
+            spellcheck="false"
+            readonly
+            value={prdS1AiPreview}
+          />
+          <div class="import-overwrite-actions">
+            <button type="button" class="bcr" on:click={cancelPrdS1AiPreview}>취소</button>
+            <button type="button" class="bcr bcr-create-project" on:click={applyPrdS1AiPreview}>
+              s1에 반영
+            </button>
+          </div>
         </div>
       </div>
     {/if}

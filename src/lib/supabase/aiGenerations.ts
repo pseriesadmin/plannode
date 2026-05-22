@@ -29,8 +29,10 @@ export type AiGenerationContextSnapshot = {
   /** 앱 `Project.id` (localStorage) */
   plannodeProjectId?: string | null;
   nodeCount?: number;
-  /** 보조 — `buildTreeText` 요약(길이 제한 가능) */
-  treeText?: string;
+  /** EPIC P2-B2 — 3-stage pipeline */
+  pipeline?: '1-stage' | '2-stage' | '3-stage';
+  gapFlags?: string[];
+  modelsUsed?: { skeleton?: string; deepen?: string; validate?: string };
 };
 
 export type InsertAiGenerationL5Input = {
@@ -42,6 +44,10 @@ export type InsertAiGenerationL5Input = {
   modelUsed?: string;
   contextSnapshot?: AiGenerationContextSnapshot;
   tokenUsage?: Record<string, unknown>;
+  pipelineStage?: '1-stage' | '2-stage' | '3-stage';
+  skeletonOutput?: string | null;
+  deepenedOutput?: string | null;
+  validatedOutput?: string | null;
 };
 
 /**
@@ -91,8 +97,11 @@ export async function insertAiGenerationL5(
     project_id,
     node_id,
     output_intent: String(input.outputIntent),
-    pipeline_stage: '1-stage',
+    pipeline_stage: input.pipelineStage ?? '1-stage',
     model_used: String(input.modelUsed ?? DEFAULT_SERVER_AI_MODEL),
+    skeleton_output: input.skeletonOutput ?? null,
+    deepened_output: input.deepenedOutput ?? null,
+    validated_output: input.validatedOutput ?? null,
     final_output,
     context_snapshot: input.contextSnapshot ?? {},
     token_usage: input.tokenUsage ?? {}

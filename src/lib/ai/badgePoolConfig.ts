@@ -8,20 +8,64 @@ import { writable } from 'svelte/store';
 
 export const BADGE_POOL_STORAGE_KEY = 'plannode.standardBadgePool.v1';
 
-export const DEFAULT_DEV_KEYS = ['TDD', 'CRUD', 'API', 'AUTH', 'REALTIME', 'PAYMENT'] as const;
+/** AI 개발 추론용 DEV 16 — 범용 CRUD·배포 공정·JSON/RENDER 등 제외(BADGE-ALIGN) */
+export const DEFAULT_DEV_KEYS = [
+  'TDD',
+  'API',
+  'AUTH',
+  'REALTIME',
+  'PAYMENT',
+  'ZINDEX',
+  'FLEX',
+  'CSSGRID',
+  'MQUERY',
+  'PADDING',
+  'REM',
+  'COMP',
+  'STATE',
+  'HARDCOD',
+  'DYNIX',
+  'DUMMY',
+] as const;
 export const DEFAULT_UX_KEYS = [
-  'NAVI',
+  'GNB',
+  'LNB',
+  'SNB',
+  'FNB',
+  'HERO',
+  'BREAD',
+  'CARO',
+  'ACCORD',
+  'MODAL',
+  'POPUP',
+  'TOAST',
+  'DROP',
+  'CTA',
+  'TAB',
+  'GRID',
+  'COL',
+  'GUTTER',
+  'MARGIN',
+  'BREAKPT',
+  'WHSPACE',
   'HEAD',
   'LIST',
   'CARD',
   'FORM',
-  'BUTT',
-  'MODAL',
-  'FEED',
   'DASH',
   'MEDIA',
 ] as const;
-export const DEFAULT_PRJ_KEYS = ['USP', 'MVP', 'AI', 'I18N', 'MOBILE'] as const;
+export const DEFAULT_PRJ_KEYS = [
+  'USP',
+  'MVP',
+  'AI',
+  'I18N',
+  'MOBILE',
+  'WIREF',
+  'PROTO',
+  'VHIER',
+  'AFFORD',
+] as const;
 
 /** 트랙별 허용 배지 토큰(대문자) */
 export type BadgePoolTracks = {
@@ -120,7 +164,7 @@ function loadPoolForCacheKey(cacheKey: string, projectId: string | null | undefi
 }
 
 /**
- * 유효 배지 풀 — 프로젝트 `badge_pool` → 기기 전역 LS → 기본 21개.
+ * 유효 배지 풀 — 프로젝트 `badge_pool` → 기기 전역 LS → 기본 풀(DEV 16·UX 26·PRJ 9).
  * @param projectId 생략 시 `registerCurrentProjectIdLookup`으로 연 프로젝트 사용.
  */
 export function getEffectiveBadgePool(projectId?: string | null): BadgePoolTracks {

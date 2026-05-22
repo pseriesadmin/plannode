@@ -8,6 +8,7 @@
  */
 import type { Node, Project } from '$lib/supabase/client';
 import { buildContextFromNodes, buildTreeText, serializeToPrompt } from '$lib/ai/contextSerializer';
+import { injectDomainContext, resolveProjectDomain } from '$lib/ai/domainDictionary';
 import { buildBadgeContext, getBadgeSetFromNodeInput, formatBadgeTracksForDisplay } from '$lib/ai/badgePromptInjector';
 
 /** 파일럿 런타임 노드와 호환 (metadata.badges = 3트랙) */
@@ -662,14 +663,15 @@ export function buildPrdL1CoreSummaryPrompt(
   if (!anchorId) {
     return '_(노드 없음 — 프롬프트를 만들 수 없음)_';
   }
+  const domain = resolveProjectDomain(`${project.name} ${project.description ?? ''}`);
   const ctx = buildContextFromNodes(anchorId, asNodes, {
     name: project.name,
     description: project.description,
-    domain: 'custom',
+    domain,
     techStack: [],
     outputIntents: ['PRD']
   });
-  const layer1 = serializeToPrompt(ctx);
+  const layer1 = injectDomainContext(serializeToPrompt(ctx), domain);
   const full = buildPrdMarkdownMerged(project, nodes, drafts ?? project.prd_section_drafts);
   const slices = sliceCanonicalPrdMarkdownForView(full);
   const targetSection = slices?.s1?.trim() ?? prdCoreSummaryMarkdownV20(project, nodes);

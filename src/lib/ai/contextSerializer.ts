@@ -24,6 +24,19 @@ function toPlannodeNodeType(raw: string | undefined): PlannodeNodeType {
   return (KNOWN_TYPES as string[]).includes(t) ? (t as PlannodeNodeType) : 'feature';
 }
 
+function badgesForNode(node: Node) {
+  return getBadgeSetFromNodeInput(node);
+}
+
+function formatBadgesForPrompt(badges: ReturnType<typeof badgesForNode>): string {
+  const parts = [
+    ...badges.dev.map((b) => `DEV:${b}`),
+    ...badges.ux.map((b) => `UX:${b}`),
+    ...badges.prj.map((b) => `PRJ:${b}`)
+  ];
+  return parts.length ? parts.join(', ') : '—';
+}
+
 /**
  * v4 `treeText` SSoT — `iaExporter.buildPrompt`·export·PRD 정합
  */
@@ -103,7 +116,8 @@ export function buildContextFromNodes(
   const ancestors = chain.slice(0, -1).map((a) => ({
     content: a.name,
     type: toPlannodeNodeType(a.node_type),
-    depth: a.depth
+    depth: a.depth ?? 0,
+    num: a.num
   }));
 
   const parentId = current.parent_id;
@@ -115,30 +129,45 @@ export function buildContextFromNodes(
   for (let i = 0; i < allSame.length; i++) {
     if (i === ix) continue;
     const rel = i < ix ? 'before' : 'after';
-    siblings.push({ content: allSame[i].name, relation: rel });
+    siblings.push({
+      content: allSame[i].name,
+      relation: rel,
+      num: allSame[i].num
+    });
   }
 
   const ch = nodes
     .filter((n) => n.parent_id === current.id)
     .sort((a, b) => (a.num || '').localeCompare(b.num || '', undefined, { numeric: true }));
-  const children = ch.map((c) => ({ content: c.name, type: toPlannodeNodeType(c.node_type) }));
+  const children = ch.map((c) => ({
+    content: c.name,
+    type: toPlannodeNodeType(c.node_type),
+    num: c.num,
+    description: (c.description || '').trim() || undefined,
+    badges: badgesForNode(c)
+  }));
 
   return {
     current: {
       id: current.id,
       type: toPlannodeNodeType(current.node_type),
       content: current.name,
-      depth: current.depth,
-      metadata: (current.metadata as Record<string, unknown>) || {}
+      depth: current.depth ?? ancestors.length,
+      metadata: (current.metadata as Record<string, unknown>) || {},
+      num: current.num,
+      description: (current.description || '').trim() || undefined,
+      badges: badgesForNode(current)
     },
     ancestors,
     siblings,
     children,
     relations: [],
     projectMeta: {
-      domain: projectMeta.domain ?? 'custom',
+      name: projectMeta.name,
+      domain: projectMeta.domain ?? 'general',
       techStack: projectMeta.techStack ?? [],
-      outputIntents: projectMeta.outputIntents ?? []
+      outputIntents: projectMeta.outputIntents ?? [],
+      totalNodeCount: nodes.length
     }
   };
 }
@@ -147,39 +176,61 @@ export function buildContextFromNodes(
  * `NodeContext` → 단일 user 프롬프트용 문자열 (LLM “텍스트만” 전달 금지 — PRD §7)
  */
 export function serializeToPrompt(ctx: NodeContext): string {
+  const ancestorPath = ctx.ancestors
+    .map((a) => `[${a.num || a.content.slice(0, 12)}] ${a.content}`)
+    .join(' > ');
+  const currentLabel = `[${ctx.current.num || ctx.current.id.slice(0, 6)}] ${ctx.current.content}`;
+  const badgeStr = ctx.current.badges ? formatBadgesForPrompt(ctx.current.badges) : '—';
+
+  const siblingsBefore =
+    ctx.siblings
+      .filter((s) => s.relation === 'before')
+      .map((s) => `[${s.num || s.content.slice(0, 8)}] ${s.content}`)
+      .join(' | ') || 'none';
+  const siblingsAfter =
+    ctx.siblings
+      .filter((s) => s.relation === 'after')
+      .map((s) => `[${s.num || s.content.slice(0, 8)}] ${s.content}`)
+      .join(' | ') || 'none';
+
+  const childrenBlock =
+    ctx.children.length > 0
+      ? ctx.children
+          .map((c) => {
+            const cb = c.badges ? formatBadgesForPrompt(c.badges) : '';
+            const desc = c.description ? `: ${c.description.slice(0, 80)}` : '';
+            return `  - [${c.num || '—'}] [${c.type}] ${c.content}${cb && cb !== '—' ? ` (${cb})` : ''}${desc}`;
+          })
+          .join('\n')
+      : '  (없음)';
+
   return `
+[PROJECT]: ${ctx.projectMeta.name ?? '—'}
 [PROJECT DOMAIN]: ${ctx.projectMeta.domain}
 [TECH STACK]: ${ctx.projectMeta.techStack.join(', ') || '—'}
 [OUTPUT INTENTS]: ${ctx.projectMeta.outputIntents.length ? ctx.projectMeta.outputIntents.join(', ') : '—'}
+[TOTAL NODES]: ${ctx.projectMeta.totalNodeCount ?? '—'}
 
 [HIERARCHY CONTEXT]
 Root Goal: ${ctx.ancestors[0]?.content ?? 'N/A'}
 ${ctx.ancestors
   .slice(1)
-  .map((a, i) => `${'  '.repeat(i + 1)}└ ${a.type}: ${a.content}`)
+  .map((a, i) => `${'  '.repeat(i + 1)}└ ${a.type}: [${a.num || '—'}] ${a.content}`)
   .join('\n')}
-${'  '.repeat(ctx.ancestors.length)}└ [CURRENT] ${ctx.current.type}: ${ctx.current.content}
+${'  '.repeat(ctx.ancestors.length)}└ [CURRENT] ${ctx.current.type}: ${currentLabel}
+Location path: ${ancestorPath ? `${ancestorPath} > ${currentLabel}` : currentLabel}
+Depth: ${ctx.current.depth} (0=root)
+
+[CURRENT NODE DETAIL]
+Description: ${ctx.current.description || '(없음)'}
+Badges: ${badgeStr}
 
 [SIBLING CONTEXT]
-Before: ${
-  ctx.siblings
-    .filter((s) => s.relation === 'before')
-    .map((s) => s.content)
-    .join(' | ') || 'none'
-}
-After:  ${
-  ctx.siblings
-    .filter((s) => s.relation === 'after')
-    .map((s) => s.content)
-    .join(' | ') || 'none'
-}
+Before: ${siblingsBefore}
+After:  ${siblingsAfter}
 
-[CHILD NODES]
-${
-  ctx.children.length > 0
-    ? ctx.children.map((c) => `- [${c.type}] ${c.content}`).join('\n')
-    : 'No children — leaf node'
-}
+[CHILD NODES — direct]
+${childrenBlock}
 
 [RELATIONS]
 ${

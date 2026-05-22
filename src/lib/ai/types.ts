@@ -5,13 +5,56 @@
  * - OutputIntent: 문서 생성 목적
  */
 
-export type DevBadge = 'TDD' | 'CRUD' | 'API' | 'AUTH' | 'REALTIME' | 'PAYMENT';
-export type UxBadge = 'NAVI' | 'HEAD' | 'LIST' | 'CARD' | 'FORM' | 'BUTT' | 'MODAL' | 'FEED' | 'DASH' | 'MEDIA';
-export type PrjBadge = 'USP' | 'MVP' | 'AI' | 'I18N' | 'MOBILE';
+/** 문서·타입 정합 — 런타임 `BadgeSet`은 `string[]` + 풀 sanitize */
+export type DevBadge =
+  | 'TDD'
+  | 'API'
+  | 'AUTH'
+  | 'REALTIME'
+  | 'PAYMENT'
+  | 'ZINDEX'
+  | 'FLEX'
+  | 'CSSGRID'
+  | 'MQUERY'
+  | 'PADDING'
+  | 'REM'
+  | 'COMP'
+  | 'STATE'
+  | 'HARDCOD'
+  | 'DYNIX'
+  | 'DUMMY';
+export type UxBadge =
+  | 'GNB'
+  | 'LNB'
+  | 'SNB'
+  | 'FNB'
+  | 'HERO'
+  | 'BREAD'
+  | 'CARO'
+  | 'ACCORD'
+  | 'MODAL'
+  | 'POPUP'
+  | 'TOAST'
+  | 'DROP'
+  | 'CTA'
+  | 'TAB'
+  | 'GRID'
+  | 'COL'
+  | 'GUTTER'
+  | 'MARGIN'
+  | 'BREAKPT'
+  | 'WHSPACE'
+  | 'HEAD'
+  | 'LIST'
+  | 'CARD'
+  | 'FORM'
+  | 'DASH'
+  | 'MEDIA';
+export type PrjBadge = 'USP' | 'MVP' | 'AI' | 'I18N' | 'MOBILE' | 'WIREF' | 'PROTO' | 'VHIER' | 'AFFORD';
 
 export type Badge = DevBadge | UxBadge | PrjBadge;
 
-/** 트랙 값은 표준 21개 외 커스텀 토큰(대문자) 허용 — 풀은 `badgePoolConfig`·sanitize로 제한 */
+/** 트랙 값은 표준 풀 외 커스텀 토큰(대문자) 허용 — 풀은 `badgePoolConfig`·sanitize로 제한 */
 export interface BadgeSet {
   dev: string[];
   ux: string[];
@@ -97,28 +140,38 @@ export interface NodeContext {
     content: string;
     depth: number;
     metadata: Record<string, unknown>;
+    num?: string;
+    description?: string;
+    badges?: BadgeSet;
   };
   ancestors: Array<{
     content: string;
     type: PlannodeNodeType;
     depth: number;
+    num?: string;
   }>;
   siblings: Array<{
     content: string;
     relation: 'before' | 'after';
+    num?: string;
   }>;
   children: Array<{
     content: string;
     type: PlannodeNodeType;
+    num?: string;
+    description?: string;
+    badges?: BadgeSet;
   }>;
   relations: Array<{
     relation_type: string;
     target: { content: string; node_type: PlannodeNodeType };
   }>;
   projectMeta: {
+    name?: string;
     domain: string;
     techStack: string[];
     outputIntents: OutputIntent[];
+    totalNodeCount?: number;
   };
 }
 

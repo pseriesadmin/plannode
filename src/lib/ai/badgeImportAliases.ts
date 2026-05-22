@@ -1,6 +1,8 @@
 /**
- * 외부 AI·타 도구 JSON의 배지 문자열 → 표준 21개 풀(DEV/UX/PRJ) 토큰.
+ * 외부 AI·타 도구 JSON의 배지 문자열 → 표준 배지 풀(DEV/UX/PRJ) 토큰.
  * `resolveLegacyTokenToTrack`으로 잡히지 않는 동의어만 여기서 보강한다.
+ * 레거시 NAVI/BUTT/FEED 풀 토큰은 제거되었으며 alias로 GNB/CTA/TOAST에 매핑한다.
+ * `crud`→CRUD 등 풀 밖 canonical alias는 가져오기 해석용(deprecated) — 풀에 없으면 null.
  */
 
 import type { BadgePoolTracks } from './badgePoolConfig';
@@ -20,6 +22,7 @@ export function normalizeBadgeForAliasLookup(raw: string): string {
 
 const ALIAS_GROUPS: readonly (readonly [readonly string[], string])[] = [
   [['tdd', 'unit_test', 'unittest', 'unit_tests', 'testing', 'test_driven'], 'TDD'],
+  /** @deprecated 풀에 CRUD 없음 — resolve 후 canonical이 풀 밖이면 null */
   [['crud'], 'CRUD'],
   [
     [
@@ -34,13 +37,13 @@ const ALIAS_GROUPS: readonly (readonly [readonly string[], string])[] = [
       'swagger',
       'endpoint',
       'endpoints',
-      'http_api'
+      'http_api',
     ],
-    'API'
+    'API',
   ],
   [
     ['auth', 'authentication', 'login', 'oauth', 'oauth2', 'jwt', 'jwt_token', 'session', 'sessions'],
-    'AUTH'
+    'AUTH',
   ],
   [
     [
@@ -53,31 +56,69 @@ const ALIAS_GROUPS: readonly (readonly [readonly string[], string])[] = [
       'sse',
       'live',
       'streaming',
-      'supabase_realtime'
+      'supabase_realtime',
     ],
-    'REALTIME'
+    'REALTIME',
   ],
   [['payment', 'payments', 'billing', 'checkout', 'stripe', 'toss', 'pg'], 'PAYMENT'],
-  [['navi', 'navigation', 'nav', 'menu', 'gnb', 'lnb', 'sidebar', 'menubar'], 'NAVI'],
+  [['zindex', 'z_index', 'z-index', 'layer_order', 'stacking_context'], 'ZINDEX'],
+  [['flexbox', 'flex_layout', 'flex_box'], 'FLEX'],
+  [['css_grid', 'display_grid', 'cssgrid', 'grid_layout_impl'], 'CSSGRID'],
+  [['media_query', 'media_queries', 'mediaquery', 'at_media'], 'MQUERY'],
+  [['padding', 'inner_padding'], 'PADDING'],
+  [['rem', 'em', 'relative_unit', 'px_vs_rem'], 'REM'],
+  [['component', 'components', 'ui_component', 'reusable_block'], 'COMP'],
+  [['ui_state', 'hover_state', 'disabled_state', 'active_state'], 'STATE'],
+  [['hardcoding', 'hardcode', 'hard_coded', 'hard_coding'], 'HARDCOD'],
+  [
+    ['dynamic_interaction', 'dynamic_ui', 'scroll_animation', 'micro_interaction', 'dynix'],
+    'DYNIX',
+  ],
+  [['dummy_data', 'dummy', 'mock_data', 'sample_data', 'fixture_data'], 'DUMMY'],
+  [
+    ['navi', 'navigation', 'nav', 'menu', 'global_nav', 'top_nav', 'menubar', 'global_navigation'],
+    'GNB',
+  ],
+  [['gnb', 'global_navigation_bar'], 'GNB'],
+  [['lnb', 'left_nav', 'left_navigation', 'side_navigation', 'sidebar', 'side_nav', 'sidenav'], 'LNB'],
+  [['snb', 'sub_nav', 'subnavigation', 'sub_navigation'], 'SNB'],
+  [['fnb', 'footer_nav', 'footer_menu', 'bottom_nav', 'footer_navigation'], 'FNB'],
+  [['hero', 'hero_section', 'hero_banner'], 'HERO'],
+  [['breadcrumb', 'breadcrumbs', 'bread_crumb'], 'BREAD'],
+  [['carousel', 'caro', 'slider', 'image_slider'], 'CARO'],
+  [['accordion', 'accord', 'collapse_panel'], 'ACCORD'],
+  [['modal', 'modals', 'dialog', 'dialogs', 'sheet', 'bottom_sheet'], 'MODAL'],
+  [['popup', 'popups', 'pop_up', 'lightbox'], 'POPUP'],
+  [
+    ['toast', 'toasts', 'snackbar', 'snack_bar', 'feed', 'feedback', 'alert', 'alerts', 'notification', 'notifications'],
+    'TOAST',
+  ],
+  [['dropdown', 'drop_down', 'select_menu', 'dropmenu'], 'DROP'],
+  [['butt', 'button', 'buttons', 'cta', 'ctas', 'call_to_action'], 'CTA'],
+  [['tab', 'tabs', 'tab_bar', 'tabbar'], 'TAB'],
+  [['grid_system', 'layout_grid', 'column_grid', '12_column'], 'GRID'],
+  [['column', 'columns', 'col_span'], 'COL'],
+  [['gutter', 'gutters', 'grid_gutter'], 'GUTTER'],
+  [['margin', 'margins', 'outer_margin', 'page_margin'], 'MARGIN'],
+  [['breakpoint', 'breakpoints', 'break_point', 'responsive_breakpoint'], 'BREAKPT'],
+  [['whitespace', 'white_space', 'spacing_system'], 'WHSPACE'],
   [['head', 'header', 'topbar', 'top_bar'], 'HEAD'],
   [['list', 'listing', 'table', 'datagrid', 'data_grid', 'grid_view'], 'LIST'],
   [['card', 'cards', 'tile', 'tiles'], 'CARD'],
   [['form', 'forms', 'input', 'inputs'], 'FORM'],
-  [['butt', 'button', 'buttons', 'cta', 'ctas'], 'BUTT'],
-  [['modal', 'modals', 'dialog', 'dialogs', 'popup', 'popups', 'sheet', 'bottom_sheet'], 'MODAL'],
-  [['feed', 'feedback', 'toast', 'toasts', 'alert', 'alerts', 'notification', 'notifications'], 'FEED'],
   [['dash', 'dashboard', 'dashboards', 'charts', 'kpi', 'kpis', 'analytics'], 'DASH'],
   [['media', 'image', 'images', 'upload', 'file_upload', 'attachments'], 'MEDIA'],
   [['usp', 'unique_selling', 'differentiation'], 'USP'],
   [['mvp'], 'MVP'],
-  [
-    ['competitive', 'competition', 'competitor', 'competitors', 'benchmark'],
-    'USP'
-  ],
+  [['competitive', 'competition', 'competitor', 'competitors', 'benchmark'], 'USP'],
   [['analysis', 'analytical', 'analyze', 'analyse'], 'API'],
   [['ai', 'llm', 'gpt', 'copilot', 'genai', 'gen_ai', 'generative_ai'], 'AI'],
   [['i18n', 'l10n', 'translation', 'translations', 'multilingual', 'locale', 'locales'], 'I18N'],
-  [['mobile', 'responsive', 'ios', 'android', 'smartphone'], 'MOBILE']
+  [['mobile', 'responsive', 'ios', 'android', 'smartphone'], 'MOBILE'],
+  [['wireframe', 'wire_frame', 'wireframes'], 'WIREF'],
+  [['prototype', 'protototype', 'proto_type'], 'PROTO'],
+  [['visual_hierarchy', 'visual_hierarchy_design', 'vhierarchy'], 'VHIER'],
+  [['affordance', 'affordances'], 'AFFORD'],
 ] as const;
 
 function buildImportAliasMap(): Readonly<Record<string, string>> {
