@@ -60,6 +60,26 @@ describe('mergeModalListCloudCanon', () => {
     expect(m[0].name).toBe('CloudName');
   });
 
+  it('keeps cloud_workspace_source_user_id when cloud row is newer but lacks share meta', () => {
+    const cloud = [
+      {
+        ...P('shared', 'Cloud newer', '2026-06-10T00:00:00.000Z'),
+        owner_user_id: 'owner-uid'
+      }
+    ];
+    const local = [
+      {
+        ...P('shared', 'Local', '2026-01-01T00:00:00.000Z'),
+        cloud_workspace_source_user_id: 'owner-uid',
+        owner_user_id: 'owner-uid'
+      }
+    ];
+    const m = mergeModalListCloudCanon(cloud, local);
+    expect(m).toHaveLength(1);
+    expect(m[0].name).toBe('Cloud newer');
+    expect(m[0].cloud_workspace_source_user_id).toBe('owner-uid');
+  });
+
   it('excludes pending deletion ids from both cloud and local lists', () => {
     const cloud = [
       P('a', 'Keep', '2026-01-01T00:00:00.000Z'),

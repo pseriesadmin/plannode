@@ -138,7 +138,7 @@ describe('parseMarkdownFileForProjectImport', () => {
     if (!r.result.ok) return;
     const root = r.result.nodes.find((n) => n.parent_id == null);
     expect(root?.metadata?.badges?.dev?.sort()).toEqual(['AUTH', 'TDD']);
-    expect(root?.metadata?.badges?.ux).toContain('NAVI');
-    expect(root?.badges.sort()).toEqual(['auth', 'modal', 'navi', 'tdd']);
+    expect(root?.metadata?.badges?.ux).toContain('GNB');
+    expect(root?.badges.sort()).toEqual(['auth', 'gnb', 'modal', 'tdd']);
   });
 });

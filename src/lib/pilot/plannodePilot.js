@@ -24,6 +24,11 @@ import {
   resolveContextAnchorNodeId
 } from '$lib/ai/iaExporter';
 import { buildContextFromNodes } from '$lib/ai/contextSerializer';
+import { resolveProjectDomain } from '$lib/ai/domainDictionary';
+import {
+  createAnthropicMessagesCaller,
+  runGenerationPipeline
+} from '$lib/ai/generationPipeline';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
 import {
@@ -2075,9 +2080,10 @@ async function triggerAI(type) {
   let layer1Ok = false;
   if (currentNodeId) {
     try {
+      const domain = resolveProjectDomain(`${projectMeta.name} ${projectMeta.description || ''}`);
       const ctx = buildContextFromNodes(currentNodeId, nodes, {
         ...projectMeta,
-        domain: 'custom',
+        domain,
         techStack: [],
         outputIntents: [outputIntent]
       });
@@ -2105,8 +2111,111 @@ async function triggerAI(type) {
     return;
   }
 
+  const userAnthropicKey = readStoredUserAnthropicKey();
+
+  async function persistAiGeneration(finalText, extra = {}) {
+    const { contextSnapshot: snapExtra = {}, ...restExtra } = extra;
+    const planPid = typeof getPlanProjectId === 'function' ? getPlanProjectId() : null;
+    if (!planPid || !String(planPid).trim()) return;
+    const planProjectId = String(planPid).trim();
+    const treeText = (() => {
+      try {
+        const t = buildTreeText(nodes);
+        return t.length > 50000 ? `${t.slice(0, 50000)}…` : t;
+      } catch (e) {
+        if (import.meta.env.DEV) console.warn('[plannodePilot] buildTreeText', e);
+        return '';
+      }
+    })();
+    void insertAiGenerationL5({
+      planProjectId,
+      outputIntent,
+      finalOutput: finalText,
+      nodeId: null,
+      ...restExtra,
+      contextSnapshot: {
+        source: 'ai-tab',
+        trigger: type,
+        layer1: true,
+        currentNodeId,
+        plannodeProjectId: curP?.id ?? null,
+        nodeCount: nodes.length,
+        treeText: treeText || undefined,
+        ...snapExtra
+      }
+    }).then((r) => {
+      if (!r.ok && import.meta.env.DEV) {
+        console.warn('[plannodePilot] ai_generations', r.message);
+      }
+    });
+    try {
+      const sync = await fetch('/api/plan-nodes/sync-meta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          planProjectId,
+          nodes: nodes.map((n) => ({
+            id: n.id,
+            name: n.name,
+            num: n.num,
+            description: n.description,
+            badges: n.badges,
+            metadata: n.metadata,
+            node_type: n.node_type
+          }))
+        })
+      });
+      if (!sync.ok && import.meta.env.DEV) {
+        const sj = await sync.json().catch(() => ({}));
+        console.warn('[plannodePilot] plan_nodes sync-meta', sj?.message || sync.status);
+      }
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn('[plannodePilot] sync-meta', e);
+    }
+  }
+
   try {
-    const userAnthropicKey = readStoredUserAnthropicKey();
+    if (outputIntent === 'PRD') {
+      const callAI = createAnthropicMessagesCaller({
+        accessToken: token,
+        userAnthropicKey,
+        userAnthropicKeyHeader: HDR_USER_ANTHROPIC_KEY
+      });
+      const stageToast = {
+        skeleton: 'PRD 골격 생성 중…',
+        deepen: 'PRD 섹션 상세화 중…',
+        validate: 'PRD 검증·GAP 표시 중…'
+      };
+      const result = await runGenerationPipeline(prompt, outputIntent, callAI, {
+        descriptionForRisk: prompt.user,
+        onStage: (stage) => toast(stageToast[stage] || '생성 중…')
+      });
+      const gapNote =
+        result.gapFlags.length > 0 ? ` · [GAP] ${result.gapFlags.length}건` : '';
+      placeAiResult(result.pipeline.final);
+      toast(`AI PRD 3단계 완료${gapNote}`);
+      await persistAiGeneration(result.pipeline.final, {
+        pipelineStage: '3-stage',
+        skeletonOutput: result.pipeline.skeleton,
+        deepenedOutput: result.pipeline.deepened,
+        validatedOutput: result.pipeline.validated,
+        modelUsed: result.modelUsed.validate,
+        tokenUsage: {
+          skeleton: result.tokenUsage.skeleton,
+          deepen: result.tokenUsage.deepen,
+          validate: result.tokenUsage.validate,
+          total:
+            result.tokenUsage.skeleton + result.tokenUsage.deepen + result.tokenUsage.validate
+        },
+        contextSnapshot: {
+          pipeline: '3-stage',
+          gapFlags: result.gapFlags,
+          modelsUsed: result.modelUsed
+        }
+      });
+      return;
+    }
+
     const headers = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`
@@ -2146,70 +2255,16 @@ async function triggerAI(type) {
     if (j.text) {
       placeAiResult(j.text);
       toast('AI 응답을 AI 탭에 표시했어.');
-      const planPid = typeof getPlanProjectId === 'function' ? getPlanProjectId() : null;
-      if (planPid && String(planPid).trim()) {
-        const planProjectId = String(planPid).trim();
-        const treeText = (() => {
-          try {
-            const t = buildTreeText(nodes);
-            return t.length > 50000 ? `${t.slice(0, 50000)}…` : t;
-          } catch (e) {
-            if (import.meta.env.DEV) console.warn('[plannodePilot] buildTreeText', e);
-            return '';
-          }
-        })();
-        void insertAiGenerationL5({
-          planProjectId,
-          outputIntent,
-          finalOutput: j.text,
-          nodeId: null,
-          modelUsed: typeof j.model === 'string' && j.model ? j.model : undefined,
-          contextSnapshot: {
-            source: 'ai-tab',
-            trigger: type,
-            layer1: true,
-            currentNodeId,
-            plannodeProjectId: curP?.id ?? null,
-            nodeCount: nodes.length,
-            treeText: treeText || undefined
-          }
-        }).then((r) => {
-          if (!r.ok && import.meta.env.DEV) {
-            console.warn('[plannodePilot] ai_generations', r.message);
-          }
-        });
-        try {
-          const sync = await fetch('/api/plan-nodes/sync-meta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-              planProjectId,
-              nodes: nodes.map((n) => ({
-                id: n.id,
-                name: n.name,
-                num: n.num,
-                description: n.description,
-                badges: n.badges,
-                metadata: n.metadata,
-                node_type: n.node_type
-              }))
-            })
-          });
-          if (!sync.ok && import.meta.env.DEV) {
-            const sj = await sync.json().catch(() => ({}));
-            console.warn('[plannodePilot] plan_nodes sync-meta', sj?.message || sync.status);
-          }
-        } catch (e) {
-          if (import.meta.env.DEV) console.warn('[plannodePilot] sync-meta', e);
-        }
-      }
+      await persistAiGeneration(j.text, {
+        modelUsed: typeof j.model === 'string' && j.model ? j.model : undefined
+      });
       return;
     }
     placeAiResult(clipText);
     toast('응답 본문이 비어 있어. 프롬프트를 사용해줘.');
   } catch (e) {
     placeAiResult(clipText);
-    toast('네트워크 오류로 프롬프트만 표시했어.');
+    toast(e instanceof Error ? e.message : '네트워크 오류로 프롬프트만 표시했어.');
     if (import.meta.env.DEV) console.warn('[plannodePilot] triggerAI', e);
   }
 }

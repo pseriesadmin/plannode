@@ -5,9 +5,10 @@
  *
  * `inferBadgeHintStringsFromMetadata` 힌트 **병합 순서**(민감도·우선권):
  * 1. `treeImportExtras` — 가져온 JSON에 붙은 구조화 플래그(가장 신뢰).
- * 2. `keywordHints` — functionalSpec·iaGrid·tech 합성 문자열 + name + description 에 대한 정규식(본문 우연 일치 가능, §4 비기능).
- * 3. 사용자 규칙(`plannode.badgeInferenceUserRules.v1`) — 부분 문자열 매치, 동일 토큰은 앞선 단계가 먼저 나오면 중복 제거.
- * 4. AI·외부 트리에서 누적 학습한 규칙(`plannode.badgeInferenceAiLearnedRules.v1`) — 가져오기 시 노드 제목·(조건부) 설명 발췌·구조화 메타 haystack으로 매핑 배지 갱신·병합.
+ * 2. `iaGrid` — `screenType`·`path` 등 화면 archetype(구조 메타 우선).
+ * 3. `keywordHints` — functionalSpec·iaGrid·tech 합성 문자열 + name + description 정규식.
+ * 4. 사용자 규칙(`plannode.badgeInferenceUserRules.v1`).
+ * 5. AI 누적 학습(`plannode.badgeInferenceAiLearnedRules.v1`).
  */
 
 import type { BadgeSet, NodeMetadata } from './types';
@@ -139,7 +140,6 @@ function hintsFromTreeImportExtras(meta: NodeMetadata): string[] {
   if (truthy(o.hasAuth) || truthy(o.authRequired) || truthy(o.loginRequired)) out.push('AUTH');
   if (truthy(o.realtime) || truthy(o.websocket) || truthy(o.liveSync)) out.push('REALTIME');
   if (truthy(o.hasApi) || truthy(o.api)) out.push('API');
-  if (truthy(o.crud)) out.push('CRUD');
   if (truthy(o.ai) || truthy(o.llm) || truthy(o.genai)) out.push('AI');
   if (truthy(o.mobileFirst) || truthy(o.mobile)) out.push('MOBILE');
   if (truthy(o.i18n) || truthy(o.multilingual)) out.push('I18N');
@@ -147,46 +147,173 @@ function hintsFromTreeImportExtras(meta: NodeMetadata): string[] {
   return out;
 }
 
+/** `metadata.iaGrid` screenType·path — UX archetype (keywordHints보다 우선). */
+function hintsFromIaGrid(meta: NodeMetadata): string[] {
+  const out: string[] = [];
+  const ig = meta.iaGrid;
+  if (!ig || typeof ig !== 'object') return out;
+  const screen = String(ig.screenType ?? '').trim().toLowerCase();
+  const path = String(ig.path ?? ig.routePattern ?? '').trim().toLowerCase();
+  const blob = `${screen} ${path}`;
+  const push = (token: string) => {
+    if (!out.includes(token)) out.push(token);
+  };
+
+  if (/\b(list|listing|table|grid_view|datagrid)\b/.test(screen) || /\b(list|listing|browse)\b/.test(path)) {
+    push('LIST');
+  }
+  if (/\bform\b/.test(screen) || /\b(form|register|signup|edit)\b/.test(path)) push('FORM');
+  if (/\bdashboard\b/.test(screen) || /\bdashboard\b/.test(path)) push('DASH');
+  if (/\b(detail|card)\b/.test(screen) || /\b(detail|card)\b/.test(path)) push('CARD');
+  if (/\bmodal\b/.test(screen)) push('MODAL');
+  if (/\b(popup|dialog)\b/.test(screen)) push('POPUP');
+
+  return out;
+}
 
 /**
  * 구조화 메타(hay) + name + desc에서 배지 키워드 힌트를 추론한다.
- * 자유텍스트(name/desc) UX 트랙은 보수적으로만 허용하여 과다 매칭을 방지한다.
+ * 블록 순서(앞쪽 우선, MAX_HINTS_PER_NODE와 쌍): UX 구조 → UX 컴포넌트 → UX 그리드 → DEV CSS → DEV UI/상태 → DEV 데이터 → DEV 프로세스 → 기존 DEV/UX/PRJ.
+ * UX `GRID` vs DEV `CSSGRID`·`BREAKPT` vs `MQUERY`는 패턴을 분리한다(§B.3).
  */
 function keywordHints(hay: string, name: string, desc: string): string[] {
   const raw = `${hay}\n${name}\n${desc}`;
   const t = raw.toLowerCase();
   const out: string[] = [];
+  const seen = new Set<string>();
   const ko = (subs: string[]) => subs.some((s) => raw.includes(s));
+  const push = (token: string) => {
+    if (seen.has(token)) return;
+    seen.add(token);
+    out.push(token);
+  };
 
+  // UX — 구조·내비
+  if (/\blnb\b/i.test(t) || /\bside\s*bar\b/i.test(t) || ko(['좌측 메뉴', '사이드바', '사이드 네비'])) push('LNB');
+  if (/\bsnb\b/i.test(t) || /\bsub\s*nav/i.test(t) || ko(['서브 메뉴', '서브네비'])) push('SNB');
+  if (/\bfnb\b/i.test(t) || /\bfooter\s*nav/i.test(t) || ko(['푸터 메뉴', '하단 메뉴', '푸터 내비'])) push('FNB');
+  if (/\bhero\b/i.test(t) || ko(['히어로', '메인 배너', '히어로 섹션'])) push('HERO');
+  if (
+    /\b(gnb|global\s*nav|top\s*nav|menubar)\b/i.test(t) ||
+    ko(['글로벌 내비', '상단 메뉴', 'gnb']) ||
+    ((/\b(navigation|nav|menu)\b/i.test(t) || ko(['내비', '메뉴'])) && !seen.has('LNB'))
+  ) {
+    push('GNB');
+  }
+
+  // UX — 컴포넌트
+  if (/\b(breadcrumb|breadcrumbs)\b/i.test(t) || ko(['브레드크럼', '경로 표시'])) push('BREAD');
+  if (/\b(carousel|slider)\b/i.test(t) || ko(['캐러셀', '슬라이더'])) push('CARO');
+  if (/\baccordion\b/i.test(t) || ko(['아코디언', '접이'])) push('ACCORD');
+  if (/\b(popup|lightbox|pop-up)\b/i.test(t) && !/\bmodal\b/i.test(t)) push('POPUP');
+  if (/\b(modal|dialog|bottom\s*sheet)\b/i.test(t) || ko(['바텀시트', '드로어', '모달'])) push('MODAL');
+  if (/\b(toast|snackbar)\b/i.test(t) || ko(['토스트', '스낵바', '알림 토스트'])) push('TOAST');
+  if (/\b(dropdown|drop-down|select\s*menu)\b/i.test(t) || ko(['드롭다운', '셀렉트 메뉴'])) push('DROP');
+  if (/\b(cta|call\s*to\s*action)\b/i.test(t) || ko(['cta', '행동 유도', '주요 버튼'])) push('CTA');
+  if (/\b(tab\s*bar|tabbar|\btabs\b)\b/i.test(t) || ko(['탭', '탭바'])) push('TAB');
+
+  // UX — 그리드·반응형(디자인/IA)
+  if (
+    /\b(grid\s*system|12\s*column|layout\s*grid)\b/i.test(t) ||
+    ko(['12컬럼', '그리드 시스템', '레이아웃 그리드'])
+  ) {
+    push('GRID');
+  }
+  if (/\bgutter\b/i.test(t) || ko(['거터', '컬럼 간격'])) push('GUTTER');
+  if (/\b(columns?|col\s*span)\b/i.test(t) && (seen.has('GRID') || ko(['컬럼']))) push('COL');
+  if (/\b(breakpoint|break\s*point)\b/i.test(t) || ko(['브레이크포인트', '반응형 구간'])) push('BREAKPT');
+  if (/\b(margin|outer\s*margin)\b/i.test(t) || ko(['외부 여백', '레이아웃 마진'])) push('MARGIN');
+  if (/\b(whitespace|white\s*space)\b/i.test(t) || ko(['여백 시스템', '화이트스페이스'])) push('WHSPACE');
+
+  // DEV — 퍼블·CSS
+  if (/\b(z-index|zindex|stacking\s*context)\b/i.test(t) || ko(['z-index', 'z인덱스', '레이어 순서'])) push('ZINDEX');
+  if (/\b(flexbox|flex\s*layout|display\s*:\s*flex)\b/i.test(t) || ko(['flexbox', 'flex 레이아웃', '플렉스'])) {
+    push('FLEX');
+  }
+  if (
+    /\b(css\s*grid|display\s*:\s*grid)\b/i.test(t) ||
+    (ko(['css grid', 'display grid']) && /\b(css|display|grid)\b/i.test(t))
+  ) {
+    push('CSSGRID');
+  }
+  if (/\b(media\s*query|@media)\b/i.test(t) || ko(['미디어 쿼리', 'media query'])) push('MQUERY');
+  if (/\bpadding\b/i.test(t) || ko(['패딩', '내부 여백'])) push('PADDING');
+  if (
+    /\b\d+(\.\d+)?\s*(rem|em)\b/i.test(t) ||
+    /\b(rem|em)\s*(unit|scale|typography)\b/i.test(t) ||
+    ko(['상대 단위', 'px vs rem', 'rem 단위'])
+  ) {
+    push('REM');
+  }
+
+  // DEV — UI·상태
+  if (
+    /\b(component|ui\s*component|reusable\s*block)\b/i.test(t) ||
+    ko(['컴포넌트', '재사용 블록', 'ui 컴포넌트'])
+  ) {
+    push('COMP');
+  }
+  if (
+    /\b(ui\s*state|hover|disabled|active\s*state)\b/i.test(t) ||
+    ko(['상태 관리', 'hover', 'disabled', '활성 상태'])
+  ) {
+    push('STATE');
+  }
+  if (/\b(hardcod(e|ing)|hard\s*coded)\b/i.test(t) || ko(['하드코딩', '고정값'])) push('HARDCOD');
+  if (
+    /\b(dynamic\s*interaction|scroll\s*animation|micro\s*interaction)\b/i.test(t) ||
+    ko(['동적 인터랙션', '스크롤 애니'])
+  ) {
+    push('DYNIX');
+  }
+
+  if (/\b(dummy\s*data|mock\s*data|fixture)\b/i.test(t) || ko(['더미', '샘플 데이터', '목 데이터'])) {
+    push('DUMMY');
+  }
+
+  // 기존 DEV·UX·PRJ (품질 유지)
   if (
     /\b(stripe|toss|checkout|billing|payment)\b/i.test(t) ||
     /\bpg\b/i.test(t) ||
     ko(['결제', '청구', '유료'])
   ) {
-    out.push('PAYMENT');
+    push('PAYMENT');
   }
-  if (/\b(auth|oauth|jwt|login|session)\b/i.test(t) || ko(['인증', '로그인', '권한'])) out.push('AUTH');
+  if (/\b(auth|oauth|jwt|login|session)\b/i.test(t) || ko(['인증', '로그인', '권한'])) push('AUTH');
   if (
     /\b(realtime|websocket|\bws\b|supabase\s*realtime|live)\b/i.test(t) ||
     ko(['실시간', '구독'])
   ) {
-    out.push('REALTIME');
+    push('REALTIME');
   }
-  if (/\b(api|rest|graphql|grpc|openapi|endpoint|rpc)\b/i.test(t) || ko(['웹훅'])) out.push('API');
-  if (/\b(tdd|unit\s*test)\b/i.test(t) || ko(['테스트 주도', '단위 테스트'])) out.push('TDD');
-  if (/\bcrud\b/i.test(t)) out.push('CRUD');
-  // UX 트랙: 자유텍스트에서도 보수적으로 허용
-  if (/\b(form|validation)\b/i.test(t) || ko(['입력 폼', '유효성'])) out.push('FORM');
-  if (/\b(list|listing|pagination)\b/i.test(t) || ko(['목록', '페이지네이션'])) out.push('LIST');
-  if (/\b(modal|dialog|popup)\b/i.test(t) || ko(['바텀시트', '드로어'])) out.push('MODAL');
-  if (/\b(navigation|gnb|lnb|sidebar)\b/i.test(t) || ko(['내비', '메뉴'])) out.push('NAVI');
-  if (/\b(upload|image|video)\b/i.test(t) || ko(['미디어', '업로드'])) out.push('MEDIA');
-  if (/\b(llm|gpt|claude|genai|generative)\b/i.test(t)) out.push('AI');
-  if (ko(['ai 기능', 'AI 기능'])) out.push('AI');
-  if (/\b(mobile|ios|android|responsive)\b/i.test(t) || ko(['모바일'])) out.push('MOBILE');
-  if (/\b(i18n|l10n|locale)\b/i.test(t) || ko(['다국어', '번역'])) out.push('I18N');
-  if (/\bmvp\b/i.test(t)) out.push('MVP');
-  if (/\b(usp|differentiation)\b/i.test(t) || ko(['차별'])) out.push('USP');
+  if (/\b(api|rest|graphql|grpc|openapi|endpoint|rpc)\b/i.test(t) || ko(['웹훅'])) push('API');
+  if (/\b(tdd|unit\s*test)\b/i.test(t) || ko(['테스트 주도', '단위 테스트'])) push('TDD');
+  if (
+    (/\b(form|input\s*field|validation|submit)\b/i.test(t) &&
+      (ko(['입력', '유효성', '제출', '폼']) || /\bform\b/i.test(t))) ||
+    ko(['입력 폼', '유효성 검증', '폼 제출'])
+  ) {
+    push('FORM');
+  }
+  if (
+    /\b(listing|pagination|datagrid|data\s*grid)\b/i.test(t) ||
+    ko(['목록', '페이지네이션', '리스팅']) ||
+    (/\blist\b/i.test(t) && ko(['목록', '리스트']))
+  ) {
+    push('LIST');
+  }
+  if (/\b(upload|image|video)\b/i.test(t) || ko(['미디어', '업로드'])) push('MEDIA');
+  if (/\b(llm|gpt|claude|genai|generative)\b/i.test(t)) push('AI');
+  if (ko(['ai 기능', 'AI 기능'])) push('AI');
+  if (/\b(mobile|ios|android)\b/i.test(t) || ko(['모바일', '모바일 우선'])) push('MOBILE');
+  if (/\b(i18n|l10n|locale)\b/i.test(t) || ko(['다국어', '번역'])) push('I18N');
+  if (/\bmvp\b/i.test(t) || ko(['mvp', '최소 기능'])) push('MVP');
+  if (/\b(usp|differentiation)\b/i.test(t) || ko(['차별'])) push('USP');
+  if (/\b(wireframe|wire\s*frame)\b/i.test(t) || ko(['와이어프레임'])) push('WIREF');
+  if (/\b(prototype|proto\s*type)\b/i.test(t) || ko(['프로토타입', '프로토'])) push('PROTO');
+  if (/\bvisual\s*hierarchy\b/i.test(t) || ko(['시각 위계', 'visual hierarchy'])) push('VHIER');
+  if (/\baffordance\b/i.test(t) || ko(['어포던스'])) push('AFFORD');
+
   return out;
 }
 
@@ -457,7 +584,7 @@ export function inferBadgeHintStringsFromMetadata(n: {
   }
 
   const fromExtras = extras;
-  // keywordHints: 구조 hay + name + desc 단일 호출 (자유텍스트 UX 과다매칭 방지는 정규식 레벨에서 제어)
+  const fromIaGrid = meta ? hintsFromIaGrid(meta as NodeMetadata) : [];
   const fromKw = keywordHints(hayStructured, name, desc);
   const fromUser = applyBadgeInferenceRules(getUserBadgeInferenceRules(), hayStructured, name, desc);
   const fromAiLearned = applyBadgeInferenceRules(getAiLearnedBadgeInferenceRules(), hayStructured, name, desc);
@@ -465,8 +592,8 @@ export function inferBadgeHintStringsFromMetadata(n: {
   const seen = new Set<string>();
   const out: string[] = [];
 
-  // 우선순위: treeImportExtras → keywordHints(hay+name+desc) → 사용자규칙 → AI학습규칙
-  for (const x of [...fromExtras, ...fromKw, ...fromUser, ...fromAiLearned]) {
+  // 우선순위: treeImportExtras → iaGrid → keywordHints → 사용자규칙 → AI학습규칙
+  for (const x of [...fromExtras, ...fromIaGrid, ...fromKw, ...fromUser, ...fromAiLearned]) {
     const s = String(x).trim();
     if (!s || seen.has(s)) continue;
 

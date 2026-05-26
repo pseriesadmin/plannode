@@ -8,6 +8,7 @@
 import type { Node } from '$lib/supabase/client';
 import type { BadgeSet, IaGridRowMeta, NodeContext, OutputIntent, PlannodeNodeType } from './types';
 import { buildContextFromNodes, buildTreeText, serializeToPrompt } from './contextSerializer';
+import { injectDomainContext, resolveProjectDomain } from './domainDictionary';
 import { buildBadgeContext, getBadgeSetFromNodeInput } from './badgePromptInjector';
 import { getSystemPrompt } from './promptMatrix';
 import {
@@ -64,7 +65,7 @@ function buildIaMermaidFlowchart(sorted: Node[]): string {
 
 /**
  * EPIC P2-A · F2-4/F4-3 — 트리→IA 구조 MD (LLM 0). 동일 `nodes` → 동일 출력.
- * @see docs/plannode_ia_wire_export.md
+ * @see docs/plannode_llm_f25_context.md (Part II IA · Part III LLM)
  */
 export function buildIaStructureMarkdownFromTree(
   nodes: Node[],
@@ -169,7 +170,7 @@ function wireframeScreenSection(n: Node): string {
 
 /**
  * EPIC P2-A · F2-4/F4-4 — 트리→와이어프레임 키트 MD (LLM 0). 동일 `nodes` → 동일 출력.
- * @see docs/plannode_ia_wire_export.md
+ * @see docs/plannode_llm_f25_context.md (Part II IA · Part III LLM)
  */
 export function buildWireframesMarkdownFromTree(
   nodes: Node[],
@@ -278,14 +279,17 @@ export function buildPrompt(
     };
   }
 
+  const domainBlob = `${activeProject?.name ?? ''} ${activeProject?.description ?? ''}`.trim();
+  const resolvedDomain = resolveProjectDomain(domainBlob);
+
   const ctx = buildContextFromNodes(anchorId, nodes, {
     name: activeProject?.name ?? '—',
     description: activeProject?.description,
-    domain: 'custom',
+    domain: resolvedDomain,
     techStack: [],
     outputIntents: [outputIntent]
   });
-  const layer1Block = serializeToPrompt(ctx);
+  const layer1Block = injectDomainContext(serializeToPrompt(ctx), resolvedDomain);
   const effectiveNodeType = toPromptMatrixNodeType(ctx.current.type);
 
   const treeText = buildTreeText(nodes);

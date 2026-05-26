@@ -8,6 +8,7 @@
  */
 import type { Node, Project } from '$lib/supabase/client';
 import { buildContextFromNodes, buildTreeText, serializeToPrompt } from '$lib/ai/contextSerializer';
+import { injectDomainContext, resolveProjectDomain } from '$lib/ai/domainDictionary';
 import { buildBadgeContext, getBadgeSetFromNodeInput, formatBadgeTracksForDisplay } from '$lib/ai/badgePromptInjector';
 
 /** 파일럿 런타임 노드와 호환 (metadata.badges = 3트랙) */
@@ -648,6 +649,118 @@ export function buildPrdViewHtmlV20(project: PrdProjectInput, nodes: PrdNodeInpu
   };
 }
 
+/** PRD 탭 섹션별 LLM 보강 메타 — TARGET_SECTION 지시·토큰 힌트 (NOW-PRD-01) */
+export type PrdSectionEnhanceMeta = {
+  title: string;
+  targetLabel: string;
+  llmDirective: string;
+  /** `runGenerationPipeline` deepen/validate override 힌트 (Phase 3) */
+  maxTokensHint?: number;
+};
+
+export const PRD_SECTION_ENHANCE_META: Record<PrdSectionKey, PrdSectionEnhanceMeta> = {
+  s1: {
+    title: '핵심 PRD 요약',
+    targetLabel:
+      '핵심 PRD 요약 — 노드·프로젝트에서 추출한 결정적 초안. 톤·누락 보강 시 헤딩·표 구조 유지.',
+    llmDirective: '개요·가치·시나리오·지표·속성 절의 톤과 누락 항목을 보강한다.',
+    maxTokensHint: 4096
+  },
+  s2: {
+    title: '기능명세 (Feature Specification)',
+    targetLabel:
+      '기능명세 — 노드 블록·표 구조 유지. Plannode 메타(id/mx/my) 행은 삭제하지 말 것.',
+    llmDirective:
+      '§1.0~§1.4 기능명세 마크다운을 보강한다. 노드별 Plannode 메타 테이블·블록 구조를 유지한다.',
+    maxTokensHint: 8192
+  },
+  s3: {
+    title: '아키텍처 & 기술 정책',
+    targetLabel: '아키텍처·기술 정책 — 스택·RLS·성능 표 채움.',
+    llmDirective: '§2.1~§2.3 스택·코드/데이터 정책·성능·보안 표를 구체화한다.',
+    maxTokensHint: 4096
+  },
+  s4: {
+    title: '수용기준 & 비기능 요구사항',
+    targetLabel: '수용기준·NFR — P50/P95·WCAG·보안 구체화.',
+    llmDirective: '§3.1~§3.2 성능·확장성·접근성·보안 수치와 검증 방법을 채운다.',
+    maxTokensHint: 4096
+  },
+  s5: {
+    title: '로드맵·위험 (§4·§5)',
+    targetLabel: '로드맵 P0/P1·위험 표 — 노드 DFS 의존성 반영.',
+    llmDirective: '§4.1~§4.2 로드맵·성공 기준과 §5.1~§5.2 위험·모니터링 표를 보강한다.',
+    maxTokensHint: 4096
+  }
+};
+
+export function getPrdSectionEnhanceMeta(section: PrdSectionKey): PrdSectionEnhanceMeta {
+  return PRD_SECTION_ENHANCE_META[section];
+}
+
+/** `getPrdAutoSections` thin wrapper — 섹션 결정적 초안 한 줄 */
+export function getPrdSectionAutoBaseline(
+  section: PrdSectionKey,
+  project: PrdProjectInput,
+  nodes: PrdNodeInput[]
+): string {
+  const auto = getPrdAutoSections(project, nodes);
+  if (!auto) return '';
+  return auto.sections[section]?.trim() ?? '';
+}
+
+function resolvePrdEnhanceAnchorId(nodes: PrdNodeInput[]): string | null {
+  if (!nodes.length) return null;
+  const roots = nodes.filter((n) => n.parent_id == null || n.parent_id === '');
+  return roots[0]?.id ?? nodes[0]?.id ?? null;
+}
+
+/**
+ * PRD 탭 섹션 LLM 보강 user 블록 — L1 `serializeToPrompt` + L4 `injectDomainContext` + `[TARGET_SECTION]`.
+ * `buildPrdL1CoreSummaryPrompt`와 동일 L1 계약 (NOW-PRD-01).
+ */
+export function buildPrdSectionEnhanceUserPrompt(
+  section: PrdSectionKey,
+  project: PrdProjectInput,
+  nodes: PrdNodeInput[],
+  currentDraft?: string | null
+): string {
+  const meta = getPrdSectionEnhanceMeta(section);
+  const asNodes = nodes as Node[];
+  const anchorId = resolvePrdEnhanceAnchorId(nodes);
+  if (!anchorId) {
+    return '_(노드 없음 — 프롬프트를 만들 수 없음)_';
+  }
+
+  const domain = resolveProjectDomain(`${project.name} ${project.description ?? ''}`);
+  const ctx = buildContextFromNodes(anchorId, asNodes, {
+    name: project.name,
+    description: project.description,
+    domain,
+    techStack: [],
+    outputIntents: ['PRD']
+  });
+  const layer1 = injectDomainContext(serializeToPrompt(ctx), domain);
+
+  const draftTrim = currentDraft?.trim();
+  const targetSection =
+    draftTrim && draftTrim.length > 0
+      ? draftTrim
+      : getPrdSectionAutoBaseline(section, project, nodes);
+
+  return [
+    `<!-- Plannode — OutputIntent.PRD · L1 serializeToPrompt · ${meta.title} (v2.0) -->`,
+    '',
+    layer1,
+    '',
+    '---',
+    `[TARGET_SECTION: ${meta.targetLabel}]`,
+    meta.llmDirective,
+    '',
+    targetSection
+  ].join('\n');
+}
+
 /**
  * L1 `serializeToPrompt` + `OutputIntent.PRD` + 캐논 MD **핵심 요약 절**(s1) — AI 보완용 단일 블록.
  */
@@ -656,33 +769,9 @@ export function buildPrdL1CoreSummaryPrompt(
   nodes: PrdNodeInput[],
   drafts?: Partial<Record<PrdSectionKey, string>> | null
 ): string {
-  const asNodes = nodes as Node[];
-  const roots = asNodes.filter((n) => !n.parent_id);
-  const anchorId = roots[0]?.id ?? asNodes[0]?.id;
-  if (!anchorId) {
-    return '_(노드 없음 — 프롬프트를 만들 수 없음)_';
-  }
-  const ctx = buildContextFromNodes(anchorId, asNodes, {
-    name: project.name,
-    description: project.description,
-    domain: 'custom',
-    techStack: [],
-    outputIntents: ['PRD']
-  });
-  const layer1 = serializeToPrompt(ctx);
-  const full = buildPrdMarkdownMerged(project, nodes, drafts ?? project.prd_section_drafts);
-  const slices = sliceCanonicalPrdMarkdownForView(full);
-  const targetSection = slices?.s1?.trim() ?? prdCoreSummaryMarkdownV20(project, nodes);
-  return [
-    '<!-- Plannode — OutputIntent.PRD · L1 serializeToPrompt · 핵심 PRD 요약 절(v2.0) -->',
-    '',
-    layer1,
-    '',
-    '---',
-    '[TARGET_SECTION: 핵심 PRD 요약 — 노드·프로젝트에서 추출한 결정적 초안. 톤·누락 보완 시 헤딩·표 구조 유지.]',
-    '',
-    targetSection
-  ].join('\n');
+  const mergedDrafts = drafts ?? project.prd_section_drafts;
+  const s1Draft = mergedDrafts?.s1 ?? null;
+  return buildPrdSectionEnhanceUserPrompt('s1', project, nodes, s1Draft);
 }
 
 /** @deprecated `buildPrdL1CoreSummaryPrompt` 사용 */

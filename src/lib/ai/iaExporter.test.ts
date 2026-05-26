@@ -102,6 +102,8 @@ describe('iaExporter buildPrompt LAYER1 (P2-B)', () => {
     expect(user).toContain('[HIERARCHY CONTEXT]');
     expect(user).toContain('[CURRENT]');
     expect(user).toContain('주문 목록');
+    expect(user).toContain('목록 화면');
+    expect(user).toContain('[CURRENT NODE DETAIL]');
   });
 
   it('buildPrompt user: currentNodeId=n1(모듈)에도 L1 블록 포함', () => {

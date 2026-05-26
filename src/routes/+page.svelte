@@ -128,9 +128,22 @@
   } from '$lib/pilot/pilotBridge';
   import { pendingIaTemplateExport, type IaTemplateKind } from '$lib/stores/iaExportIntent';
   import { slugExportName } from '$lib/ai/iaGridCsvExport';
+  import {
+    buildPrompt,
+    isLayer1ContextSufficient,
+    resolveContextAnchorNodeId
+  } from '$lib/ai/iaExporter';
+  import { buildContextFromNodes } from '$lib/ai/contextSerializer';
+  import { resolveProjectDomain } from '$lib/ai/domainDictionary';
+  import {
+    createAnthropicMessagesCaller,
+    runGenerationPipeline,
+    type GenerationPipelineResult
+  } from '$lib/ai/generationPipeline';
   import type { PageData } from './$types';
-  import { PRD_SECTION_KEYS, getPrdAutoSections, type PrdSectionKey } from '$lib/prdStandardV20';
+  import { PRD_SECTION_KEYS, getPrdAutoSections, buildPrdSectionEnhanceUserPrompt, getPrdSectionEnhanceMeta, type PrdSectionKey } from '$lib/prdStandardV20';
   import { plannodeUpdateLogNewestFirst } from '$lib/plannodeUpdateLog';
+  import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 
   /** SvelteKit이 주입 — 미선언 시 콘솔 "unknown prop" 경고 */
   export let data: PageData;
@@ -539,27 +552,27 @@
     {
       key: 's1',
       title: '1. 핵심 PRD 요약 (표준 가이드 v2.0)',
-      hint: '개요·가치·시나리오·지표·속성. 마크다운을 직접 고치면 자동 저장되며, PRD 다운로드(BPR)에 반영돼요. 「노드 초안」은 해당 칸만 노드·프로젝트 메타에서 다시 뽑은 글로 되돌려요.'
+      hint: '개요·가치·시나리오·지표·속성. 「AI 보강」— 3단계 LLM 미리보기 후 수동 반영. 마크다운 직접 편집은 자동 저장·BPR 반영. 「노드 초안으로」는 노드·메타 결정적 초안 복귀.'
     },
     {
       key: 's2',
       title: '2. 기능명세 (Feature Specification)',
-      hint: '가이드 v2.0 — 트리·배지·기능 블록 마크다운. 편집·되돌림은 위와 같아요.'
+      hint: '가이드 v2.0 — 트리·배지·기능 블록. 「AI 보강」— 3단계 LLM 미리보기 후 수동 반영. 편집·되돌림은 s1과 같아요.'
     },
     {
       key: 's3',
       title: '3. 아키텍처 & 기술 정책',
-      hint: '가이드 v2.0 §2'
+      hint: '가이드 v2.0 §2. 「AI 보강」— 3단계 LLM 미리보기 후 수동 반영.'
     },
     {
       key: 's4',
       title: '4. 수용기준 & 비기능 요구사항',
-      hint: '가이드 v2.0 §3'
+      hint: '가이드 v2.0 §3. 「AI 보강」— 3단계 LLM 미리보기 후 수동 반영.'
     },
     {
       key: 's5',
       title: '5. 로드맵·위험 (v2.0 §4·§5)',
-      hint: '로드맵 & 우선순위 + 위험 요소 & 완화 전략 (한 패널)'
+      hint: '로드맵 & 우선순위 + 위험·완화 (한 패널). 「AI 보강」— 3단계 LLM 미리보기 후 수동 반영.'
     }
   ];
 
@@ -616,6 +629,155 @@
     if (!p || !prdAuto) return;
     updateProjectPrdSectionDraft(p.id, sec, null);
     prdText = { ...prdText, [sec]: prdAuto.sections[sec] };
+  }
+
+  let prdSectionAiBusy: PrdSectionKey | null = null;
+  type PrdSectionAiModalState = {
+    sec: PrdSectionKey;
+    preview: string;
+    anchorId: string;
+    pipeline: GenerationPipelineResult;
+  };
+  let prdSectionAiModal: PrdSectionAiModalState | null = null;
+
+  function prdSectionEnhanceStageLabel(sec: PrdSectionKey, stage: 'skeleton' | 'deepen' | 'validate'): string {
+    const short = getPrdSectionEnhanceMeta(sec).title;
+    const labels = {
+      skeleton: `${short} — 골격…`,
+      deepen: `${short} — 상세화…`,
+      validate: `${short} — 검증…`
+    };
+    return labels[stage];
+  }
+
+  async function runPrdSectionAiEnhance(sec: PrdSectionKey) {
+    const p = get(currentProject);
+    const nodeList = get(nodes);
+    if (!p || !nodeList.length) {
+      showPilotToast('프로젝트와 노드를 먼저 준비해줘.');
+      return;
+    }
+    const anchorId = resolveContextAnchorNodeId(nodeList, `${p.id}-r`);
+    if (!anchorId) {
+      showPilotToast('L1 앵커 노드를 찾을 수 없어.');
+      return;
+    }
+    const projectMeta = { name: p.name, description: p.description };
+    const domain = resolveProjectDomain(`${p.name} ${p.description ?? ''}`);
+    let layer1Ok = false;
+    try {
+      const nodeCtx = buildContextFromNodes(anchorId, nodeList, {
+        ...projectMeta,
+        domain,
+        techStack: [],
+        outputIntents: ['PRD']
+      });
+      layer1Ok = isLayer1ContextSufficient(nodeCtx);
+    } catch {
+      layer1Ok = false;
+    }
+    if (!layer1Ok) {
+      showPilotToast('구조 맥락이 부족해. 하위 노드를 추가한 뒤 다시 시도해줘.');
+      return;
+    }
+
+    const token = get(authSession)?.access_token?.trim();
+    if (!cloudSyncAvailable || !token) {
+      showPilotToast('로그인·클라우드 설정 후 AI 보강을 사용할 수 있어.');
+      return;
+    }
+
+    prdSectionAiBusy = sec;
+    try {
+      const { system } = buildPrompt(nodeList, projectMeta, 'PRD', 'root', anchorId);
+      const user = buildPrdSectionEnhanceUserPrompt(sec, p, nodeList, prdText[sec] ?? null);
+      const callAI = createAnthropicMessagesCaller({
+        accessToken: token,
+        userAnthropicKey: readStoredUserAnthropicKey(),
+        userAnthropicKeyHeader: PLANNODE_USER_ANTHROPIC_KEY_HEADER
+      });
+      const result = await runGenerationPipeline(
+        { system, user },
+        'PRD',
+        callAI,
+        {
+          descriptionForRisk: user,
+          onStage: (stage) => {
+            showPilotToast(prdSectionEnhanceStageLabel(sec, stage));
+          }
+        }
+      );
+      prdSectionAiModal = {
+        sec,
+        preview: result.pipeline.final,
+        anchorId,
+        pipeline: result
+      };
+      showPilotToast(
+        result.gapFlags.length
+          ? `AI 보강 미리보기 · [GAP] ${result.gapFlags.length}건`
+          : 'AI 보강 미리보기를 확인해줘.'
+      );
+    } catch (e) {
+      showPilotToast(e instanceof Error ? e.message : 'AI 보강에 실패했어.');
+    } finally {
+      prdSectionAiBusy = null;
+    }
+  }
+
+  function persistPrdSectionAiGeneration(project: Project, modal: PrdSectionAiModalState) {
+    const planPid = project.plan_project_id?.trim();
+    if (!planPid) return;
+    const { sec, preview, anchorId, pipeline } = modal;
+    void insertAiGenerationL5({
+      planProjectId: planPid,
+      outputIntent: 'PRD',
+      finalOutput: preview,
+      nodeId: null,
+      pipelineStage: '3-stage',
+      skeletonOutput: pipeline.pipeline.skeleton,
+      deepenedOutput: pipeline.pipeline.deepened,
+      validatedOutput: pipeline.pipeline.validated,
+      modelUsed: pipeline.modelUsed.validate,
+      tokenUsage: {
+        skeleton: pipeline.tokenUsage.skeleton,
+        deepen: pipeline.tokenUsage.deepen,
+        validate: pipeline.tokenUsage.validate,
+        total:
+          pipeline.tokenUsage.skeleton + pipeline.tokenUsage.deepen + pipeline.tokenUsage.validate
+      },
+      contextSnapshot: {
+        source: 'prd-tab',
+        trigger: sec,
+        layer1: true,
+        currentNodeId: anchorId,
+        plannodeProjectId: project.id,
+        nodeCount: get(nodes).length,
+        pipeline: '3-stage',
+        gapFlags: pipeline.gapFlags,
+        modelsUsed: pipeline.modelUsed
+      }
+    }).then((r) => {
+      if (!r.ok && import.meta.env.DEV) {
+        console.warn('[+page] prd-tab ai_generations', r.message);
+      }
+    });
+  }
+
+  function applyPrdSectionAiPreview() {
+    const modal = prdSectionAiModal;
+    const p = get(currentProject);
+    if (!modal || !p || !modal.preview.trim()) return;
+    const { sec, preview } = modal;
+    prdText = { ...prdText, [sec]: preview };
+    updateProjectPrdSectionDraft(p.id, sec, preview);
+    persistPrdSectionAiGeneration(p, modal);
+    prdSectionAiModal = null;
+    showPilotToast(`${getPrdSectionEnhanceMeta(sec).title} 초안에 AI 보강을 반영했어.`);
+  }
+
+  function cancelPrdSectionAiPreview() {
+    prdSectionAiModal = null;
   }
 
   function disposePrdDraftTimers() {
@@ -3215,11 +3377,20 @@
         </div>
         {#each PRD_BLOCKS as b (b.key)}
           <div class="prd-section">
-            <h2>{b.title}</h2>
+            <h2 id="prd-sec-title-{b.key}">{b.title}</h2>
             <p class="prd-section-hint">{b.hint}</p>
             {#if $currentProject}
               {#if prdAuto}
-                <div class="prd-edit-toolbar">
+                <div class="prd-edit-toolbar" role="toolbar" aria-label="{b.title} 편집">
+                  <button
+                    type="button"
+                    class="prd-l1-copy-btn prd-sec-ai-btn"
+                    title="3단계 LLM 보강(골격→상세→검증) — 미리보기 후 수동 반영 · 로그인·클라우드 필요"
+                    aria-labelledby="prd-sec-title-{b.key}"
+                    disabled={prdSectionAiBusy !== null || !$currentProject}
+                    on:click={() => void runPrdSectionAiEnhance(b.key)}>{prdSectionAiBusy === b.key
+                      ? 'AI 보강…'
+                      : 'AI 보강'}</button>
                   <button
                     type="button"
                     class="prd-sec-reset"
@@ -3230,7 +3401,7 @@
                   class="prd-section-editor"
                   rows="14"
                   spellcheck="false"
-                  aria-label={`${b.title} 마크다운 편집`}
+                  aria-labelledby="prd-sec-title-{b.key}"
                   value={prdText[b.key]}
                   on:input={(e) => {
                     prdText = { ...prdText, [b.key]: e.currentTarget.value };
@@ -3427,6 +3598,35 @@
             로그아웃
           </button>
           <button type="button" class="acct-btn acct-btn-ghost" on:click={closeAccountModal}>닫기</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if prdSectionAiModal}
+      <div class="mbg mbg-stack-top" role="presentation" on:click|self={cancelPrdSectionAiPreview}>
+        <div class="mo import-overwrite-modal" role="dialog" aria-modal="true" aria-labelledby="prd-section-ai-title">
+          <div class="pm-proj-head import-overwrite-head">
+            <h3 id="prd-section-ai-title" class="import-overwrite-title">
+              {getPrdSectionEnhanceMeta(prdSectionAiModal.sec).title} — AI 보강 미리보기
+            </h3>
+            <button type="button" class="mcl" aria-label="닫기" on:click={cancelPrdSectionAiPreview}>✕</button>
+          </div>
+          <p class="import-overwrite-body">
+            아래 내용을 해당 섹션 초안에 반영할까요? BPR·노드 템플릿은 자동으로 바뀌지 않아요.
+          </p>
+          <textarea
+            class="prd-section-editor prd-s1-ai-preview"
+            rows="16"
+            spellcheck="false"
+            readonly
+            value={prdSectionAiModal.preview}
+          />
+          <div class="import-overwrite-actions">
+            <button type="button" class="bcr" on:click={cancelPrdSectionAiPreview}>취소</button>
+            <button type="button" class="bcr bcr-create-project" on:click={applyPrdSectionAiPreview}>
+              반영
+            </button>
+          </div>
         </div>
       </div>
     {/if}
@@ -6303,6 +6503,10 @@
   .prd-sec-reset:hover {
     border-color: #bbb;
     background: #fafafa;
+  }
+  .prd-sec-ai-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
   .prd-save-hint {
     font-size: 11px;

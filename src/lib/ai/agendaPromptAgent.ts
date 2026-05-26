@@ -3,6 +3,7 @@
  * `agendaDomainDetector` + PRD §10.3 정렬 모델 힌트(`modelSelector` 상수).
  */
 import { detectDomain } from './agendaDomainDetector';
+import { DEFAULT_DEV_KEYS, DEFAULT_PRJ_KEYS, DEFAULT_UX_KEYS } from './badgePoolConfig';
 import {
   ANTHROPIC_MODEL_HAIKU,
   ANTHROPIC_MODEL_SONNET,
@@ -24,10 +25,12 @@ export interface AgendaPromptOutput {
 }
 
 const BADGE_SPEC = `
-표준 배지 풀 (21개):
-DEV: TDD, CRUD, API, AUTH, REALTIME, PAYMENT
-UX:  NAVI, HEAD, LIST, CARD, FORM, BUTT, MODAL, FEED, DASH, MEDIA
-PRJ: USP, MVP, AI, I18N, MOBILE
+배지는 노드의 **화면 형태(UX)** 또는 **도메인·구현 조건(DEV)** 만 표시한다. 범용 CRUD·배포 공정(JSON/LOCAL/STAGING/PROD/DEPLOY/HOTFIX/PR 등) 태그는 사용하지 않는다.
+
+표준 배지 풀 (DEV ${DEFAULT_DEV_KEYS.length} · UX ${DEFAULT_UX_KEYS.length} · PRJ ${DEFAULT_PRJ_KEYS.length}):
+DEV: ${DEFAULT_DEV_KEYS.join(', ')}
+UX:  ${DEFAULT_UX_KEYS.join(', ')}
+PRJ: ${DEFAULT_PRJ_KEYS.join(', ')}
 `;
 
 function buildSystemPrompt(projectId: string, domain: ReturnType<typeof detectDomain>): string {
@@ -61,7 +64,7 @@ ${domain.contextBlock}
   "project": { "id": "${projectId}", "name": "(유저 프롬프트의 프로젝트명과 동일)" },
   "nodes": [
     { "id": "${projectId}-r", "parent_id": null, "name": "루트", "num": "PRD", "node_type": "root", "badges": [], "metadata": { "badges": { "dev": [], "ux": [], "prj": [] } } },
-    { "id": "n_example_module", "parent_id": "${projectId}-r", "name": "모듈명", "num": "1", "node_type": "module", "description": "...", "badges": ["crud","list","mvp"], "metadata": { "badges": { "dev": ["CRUD"], "ux": ["LIST"], "prj": ["MVP"] } } }
+    { "id": "n_example_module", "parent_id": "${projectId}-r", "name": "모듈명", "num": "1", "node_type": "module", "description": "...", "badges": ["list","form","mvp"], "metadata": { "badges": { "dev": ["API"], "ux": ["LIST","FORM"], "prj": ["MVP"] } } }
   ]
 }
 \`\`\`

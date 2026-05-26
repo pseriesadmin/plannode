@@ -40,14 +40,6 @@ export const BADGE_PROMPT_FRAGMENTS: Record<string, string> = {
 - 경계값 테스트 케이스
 - 실패 시나리오 테스트 케이스`,
 
-  CRUD: `이 화면은 CRUD 기능을 포함합니다.
-API 명세에 반드시 포함:
-- GET (목록 조회): 페이지네이션, 필터, 정렬 파라미터
-- GET (단건 조회): 상세 응답 스키마
-- POST (생성): 요청 바디 유효성 규칙
-- PUT/PATCH (수정): 부분 수정 vs 전체 수정 구분
-- DELETE (삭제): 소프트삭제 vs 하드삭제 정책`,
-
   API: `이 기능은 외부 API 연동을 포함합니다.
 명세에 반드시 포함:
 - 연동 대상 API 엔드포인트 및 인증 방식
@@ -77,14 +69,112 @@ API 명세에 반드시 포함:
 - 결제 실패 시 재고 롤백 시나리오
 - Toss Payments v2 기준 에러코드 처리`,
 
+  ZINDEX: `레이어 순서(z-index)를 명시합니다.
+- 모달·토스트·드롭다운·고정 헤더의 스택 순서
+- 겹침 시 포커스·클릭 가능 영역`,
+
+  FLEX: `Flexbox 1차원 정렬을 사용합니다.
+- 주축·교차축 정렬·wrap 여부
+- gap vs margin 역할 분리`,
+
+  CSSGRID: `CSS Grid 2차원 레이아웃을 사용합니다.
+- grid-template·행/열 정의
+- 영역 이름(grid-area)과 컴포넌트 매핑`,
+
+  MQUERY: `미디어 쿼리(@media)로 반응형을 구현합니다.
+- 브레이크포인트 값과 적용 규칙
+- 모바일/태블릿/데스크톱별 레이아웃 차이`,
+
+  PADDING: `Padding(내부 여백) 규칙을 명시합니다.
+- 컴포넌트·섹션별 padding 토큰
+- margin(외부)과 구분`,
+
+  REM: `Rem/Em 상대 단위를 사용합니다.
+- 기준 폰트·스케일 단계
+- px 고정값과 혼용 시 예외 목록`,
+
+  COMP: `재사용 UI 컴포넌트 단위를 정의합니다.
+- 변형(variant)·슬롯·props 표
+- Figma/코드 컴포넌트 이름 매핑`,
+
+  STATE: `UI 상태(hover/disabled/active 등)를 정의합니다.
+- 상태별 스타일·인터랙션
+- 기본/호버/비활성/로딩 표`,
+
+  HARDCOD: `하드코딩·매직넘버를 지양합니다.
+- 상수·토큰·설정으로 추출할 값 목록
+- 환경별 분기 필요 여부`,
+
+  DYNIX: `동적 인터랙션·모션을 포함합니다.
+- 스크롤·제스처·애니메이션 범위
+- 접근성( prefers-reduced-motion )`,
+
+  DUMMY: `더미·목 데이터를 사용합니다.
+- API 연동 전 샘플 JSON/필드
+- empty/loading과 구분`,
+
   // ===== UX 트랙 (화면 구성 요소 태그) =====
 
-  NAVI: `이 화면은 내비게이션 요소를 포함합니다.
+  GNB: `글로벌/상단 내비게이션(GNB)을 포함합니다.
 와이어프레임 명세에 포함:
-- 내비게이션 유형: GNB / 탭바 / 사이드메뉴 / 브레드크럼 중 택일
-- 활성 탭 표시 방식
-- 뒤로가기 동작 정의
-- 딥링크 지원 여부`,
+- GNB 항목·활성 표시·딥링크
+- LNB/탭바와 역할 구분`,
+
+  LNB: `좌측/사이드 내비(LNB)를 포함합니다.
+- 메뉴 계층·접기·현재 위치 표시`,
+
+  SNB: `서브 내비게이션(SNB)을 포함합니다.
+- 상위 메뉴 대비 하위 탭·필터`,
+
+  FNB: `푸터 내비(FNB)를 포함합니다.
+- 하단 링크·법적 고지·보조 메뉴`,
+
+  HERO: `히어로·메인 배너 영역을 포함합니다.
+- 헤드라인·CTA·비주얼 비율`,
+
+  BREAD: `브레드크럼 경로를 포함합니다.
+- depth·현재 페이지·클릭 동작`,
+
+  CARO: `캐러셀·슬라이더를 포함합니다.
+- 슬라이드 수·인디케이터·자동재생`,
+
+  ACCORD: `아코디언·접이 패널을 포함합니다.
+- 기본 펼침·단일/다중 open`,
+
+  POPUP: `팝업·라이트박스(모달과 별도)를 포함합니다.
+- 트리거·닫기·포커스 트랩`,
+
+  TOAST: `토스트·스낵바 알림을 포함합니다.
+- 위치·지속 시간·스택 규칙
+- 성공/실패 메시지 패턴`,
+
+  DROP: `드롭다운·셀렉트 메뉴를 포함합니다.
+- 옵션 목록·키보드·검색`,
+
+  CTA: `주요 CTA 버튼을 포함합니다.
+- Primary/Secondary 구분·FAB 여부
+- 활성/비활성 조건`,
+
+  TAB: `탭·탭바를 포함합니다.
+- 탭 목록·스와이프·뱃지`,
+
+  GRID: `레이아웃 그리드 시스템(디자인)을 포함합니다.
+- 컬럼 수·거터·브레이크포인트(IA 관점)`,
+
+  COL: `컬럼·열 구조를 포함합니다.
+- span·정렬·반응형 열 수`,
+
+  GUTTER: `거터·컬럼 간격을 포함합니다.
+- 고정/유동 간격 토큰`,
+
+  MARGIN: `외부 여백(margin)을 포함합니다.
+- 섹션·카드 간 마진 규칙`,
+
+  BREAKPT: `브레이크포인트(디자인)를 포함합니다.
+- 구간별 레이아웃 변화 요약`,
+
+  WHSPACE: `여백·화이트스페이스 시스템을 포함합니다.
+- spacing scale·밀도`,
 
   HEAD: `이 화면은 헤더 영역을 포함합니다.
 와이어프레임 명세에 포함:
@@ -115,26 +205,11 @@ API 명세에 반드시 포함:
 - 에러 메시지 표시 위치
 - 자동완성 / 입력 어시스트 여부`,
 
-  BUTT: `이 화면은 주요 버튼/CTA를 포함합니다.
+  MODAL: `이 화면은 모달/바텀시트/드로어를 포함합니다.
 와이어프레임 명세에 포함:
-- CTA 버튼 텍스트 및 위치
-- 주요 액션 vs 보조 액션 시각적 구분
-- 플로팅 버튼(FAB) 여부
-- 버튼 활성/비활성 상태 명세`,
-
-  MODAL: `이 화면은 모달/팝업을 포함합니다.
-와이어프레임 명세에 포함:
-- 모달 유형: 팝업 / 바텀시트 / 풀스크린 / 드로어
-- 트리거 조건 (어떤 액션에서 열리는지)
-- 닫기 조건 (백드롭 클릭 / 버튼 / 스와이프)
-- 모달 내 주요 액션 버튼`,
-
-  FEED: `이 화면은 피드백 UI를 포함합니다.
-와이어프레임 명세에 포함:
-- 성공 / 실패 / 로딩 / 빈상태 4종 상태 UI 각각 명세
-- 토스트 메시지 위치 및 지속 시간
-- 에러 발생 시 재시도 UX
-- 로딩 중 사용자 인터랙션 차단 여부`,
+- 모달 유형: 바텀시트 / 풀스크린 / 드로어
+- 트리거·닫기 조건
+- 모달 내 주요 액션`,
 
   DASH: `이 화면은 대시보드/통계를 포함합니다.
 와이어프레임 명세에 포함:
@@ -180,26 +255,76 @@ PRD에 반드시 포함:
 - 터치 타겟 최소 44px
 - 하단 안전영역(safe area) 고려
 - 가상 키보드 올라올 때 레이아웃 처리`,
+
+  WIREF: `와이어프레임 산출물을 전제합니다.
+- 저충실 블록·섹션 우선순위
+- IA 트리와 화면 매핑`,
+
+  PROTO: `프로토타입·인터랙션 검증을 포함합니다.
+- 클릭 플로·전환·플레이스홀더`,
+
+  VHIER: `시각 위계(Visual hierarchy)를 명시합니다.
+- 타이포·색·대비·시선 흐름`,
+
+  AFFORD: `어포던스·인터랙션 단서를 명시합니다.
+- 클릭 가능·드래그·스크롤 힌트`,
 };
 
 /**
  * 배지별 라벨 (UI 표시용)
  */
+const DEV_CHIP = { bg: '#eff6ff', text: '#1d4ed8', border: '#93c5fd' };
+const DEV_CHIP_WARN = { bg: '#fff1f0', text: '#dc2626', border: '#fca5a5' };
+const DEV_CHIP_PAY = { bg: '#fee2e2', text: '#991b1b', border: '#fecaca' };
+const UX_NAV = { bg: '#dbeafe', text: '#0c4a6e', border: '#7dd3fc' };
+const UX_COMP = { bg: '#cffafe', text: '#0e7490', border: '#67e8f9' };
+const UX_GRID = { bg: '#e0e7ff', text: '#3730a3', border: '#a5b4fc' };
+const UX_BODY = { bg: '#e1e8f0', text: '#1e293b', border: '#cbd5e1' };
+const PRJ_CHIP = { bg: '#dcfce7', text: '#166534', border: '#86efac' };
+const PRJ_CHIP_WARM = { bg: '#fed7aa', text: '#92400e', border: '#fdba74' };
+
+/** 배지별 라벨 (UI 칩 표시) — `DEFAULT_*_KEYS`와 1:1 */
 export const BADGE_LABELS: Record<string, string> = {
   TDD: 'TDD',
-  CRUD: 'CRUD',
   API: 'API',
   AUTH: 'AUTH',
   REALTIME: 'REALTIME',
   PAYMENT: 'PAYMENT',
-  NAVI: 'NAVI',
+  ZINDEX: 'Z-Index',
+  FLEX: 'Flexbox',
+  CSSGRID: 'CSS Grid',
+  MQUERY: 'Media Query',
+  PADDING: 'Padding',
+  REM: 'Rem/Em',
+  COMP: 'Component',
+  STATE: 'State',
+  HARDCOD: 'Hardcode',
+  DYNIX: 'Dynamic',
+  DUMMY: 'Dummy',
+  GNB: 'GNB',
+  LNB: 'LNB',
+  SNB: 'SNB',
+  FNB: 'FNB',
+  HERO: 'Hero',
+  BREAD: 'Breadcrumb',
+  CARO: 'Carousel',
+  ACCORD: 'Accordion',
+  MODAL: 'Modal',
+  POPUP: 'Popup',
+  TOAST: 'Toast',
+  DROP: 'Dropdown',
+  CTA: 'CTA',
+  TAB: 'Tab',
+  GRID: 'Grid',
+  COL: 'Column',
+  GUTTER: 'Gutter',
+  MARGIN: 'Margin',
+  BREAKPT: 'Breakpoint',
+  WHSPACE: 'Whitespace',
   HEAD: 'HEAD',
   LIST: 'LIST',
   CARD: 'CARD',
   FORM: 'FORM',
-  BUTT: 'BUTT',
-  MODAL: 'MODAL',
-  FEED: 'FEED',
   DASH: 'DASH',
   MEDIA: 'MEDIA',
   USP: 'USP',
@@ -207,36 +332,65 @@ export const BADGE_LABELS: Record<string, string> = {
   AI: 'AI',
   I18N: 'I18N',
   MOBILE: 'MOBILE',
+  WIREF: 'Wireframe',
+  PROTO: 'Prototype',
+  VHIER: 'Visual Hierarchy',
+  AFFORD: 'Affordance',
 };
 
-/**
- * 배지별 색상 스타일 (UI 칩용)
- */
+/** 배지별 색상 스타일 (UI 칩용) */
 export const BADGE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  // DEV 트랙 - 빨강 계열
-  TDD: { bg: '#fff1f0', text: '#dc2626', border: '#fca5a5' },
-  CRUD: { bg: '#eff6ff', text: '#1d4ed8', border: '#93c5fd' },
+  TDD: DEV_CHIP_WARN,
   API: { bg: '#faf5ff', text: '#7c3aed', border: '#c4b5fd' },
   AUTH: { bg: '#fef3c7', text: '#92400e', border: '#fcd34d' },
-  REALTIME: { bg: '#ede9fe', text: '#2C155A', border: '#ddd6fe' },
-  PAYMENT: { bg: '#fee2e2', text: '#991b1b', border: '#fecaca' },
-  // UX 트랙 - 파랑 계열
-  NAVI: { bg: '#dbeafe', text: '#0c4a6e', border: '#7dd3fc' },
-  HEAD: { bg: '#dbeafe', text: '#0c4a6e', border: '#7dd3fc' },
-  LIST: { bg: '#e0e7ff', text: '#3730a3', border: '#a5b4fc' },
-  CARD: { bg: '#e0e7ff', text: '#3730a3', border: '#a5b4fc' },
-  FORM: { bg: '#ddd6fe', text: '#2C155A', border: '#c4b5fd' },
-  BUTT: { bg: '#cffafe', text: '#0e7490', border: '#67e8f9' },
-  MODAL: { bg: '#cffafe', text: '#0e7490', border: '#67e8f9' },
-  FEED: { bg: '#e1e8f0', text: '#1e293b', border: '#cbd5e1' },
-  DASH: { bg: '#e1e8f0', text: '#1e293b', border: '#cbd5e1' },
-  MEDIA: { bg: '#e1e8f0', text: '#1e293b', border: '#cbd5e1' },
-  // PRJ 트랙 - 초록/주황 계열
-  USP: { bg: '#dcfce7', text: '#166534', border: '#86efac' },
-  MVP: { bg: '#dcfce7', text: '#166534', border: '#86efac' },
-  AI: { bg: '#f0fdf4', text: '#16a34a', border: '#86efac' },
-  I18N: { bg: '#fed7aa', text: '#92400e', border: '#fdba74' },
-  MOBILE: { bg: '#fed7aa', text: '#92400e', border: '#fdba74' },
+  REALTIME: { bg: '#ede9fe', text: '#5b21b6', border: '#ddd6fe' },
+  PAYMENT: DEV_CHIP_PAY,
+  ZINDEX: DEV_CHIP,
+  FLEX: DEV_CHIP,
+  CSSGRID: DEV_CHIP,
+  MQUERY: DEV_CHIP,
+  PADDING: DEV_CHIP,
+  REM: DEV_CHIP,
+  COMP: DEV_CHIP,
+  STATE: DEV_CHIP,
+  HARDCOD: DEV_CHIP_WARN,
+  DYNIX: DEV_CHIP,
+  DUMMY: DEV_CHIP,
+  GNB: UX_NAV,
+  LNB: UX_NAV,
+  SNB: UX_NAV,
+  FNB: UX_NAV,
+  HERO: UX_NAV,
+  BREAD: UX_COMP,
+  CARO: UX_COMP,
+  ACCORD: UX_COMP,
+  MODAL: UX_COMP,
+  POPUP: UX_COMP,
+  TOAST: UX_COMP,
+  DROP: UX_COMP,
+  CTA: UX_COMP,
+  TAB: UX_COMP,
+  GRID: UX_GRID,
+  COL: UX_GRID,
+  GUTTER: UX_GRID,
+  MARGIN: UX_GRID,
+  BREAKPT: UX_GRID,
+  WHSPACE: UX_GRID,
+  HEAD: UX_NAV,
+  LIST: UX_GRID,
+  CARD: UX_GRID,
+  FORM: { bg: '#ddd6fe', text: '#5b21b6', border: '#c4b5fd' },
+  DASH: UX_BODY,
+  MEDIA: UX_BODY,
+  USP: PRJ_CHIP,
+  MVP: PRJ_CHIP,
+  AI: PRJ_CHIP,
+  I18N: PRJ_CHIP_WARM,
+  MOBILE: PRJ_CHIP_WARM,
+  WIREF: PRJ_CHIP_WARM,
+  PROTO: PRJ_CHIP_WARM,
+  VHIER: PRJ_CHIP_WARM,
+  AFFORD: PRJ_CHIP_WARM,
 };
 
 /**
@@ -421,7 +575,7 @@ function uniqUpperStrings(arr: readonly string[]): string[] {
 }
 
 /**
- * 3트랙 배지를 **현재 표준 풀**(기본 21개 + 사용자 설정)만 남기고 중복·대소문자 변형 제거.
+ * 3트랙 배지를 **현재 표준 풀**(기본 DEV/UX/PRJ 풀 + 사용자 설정)만 남기고 중복·대소문자 변형 제거.
  * 외부 JSON·CRAZYSHOT류 임의 토큰은 제거(다른 metadata 키는 건드리지 않음).
  */
 export function filterBadgeSetToCanonicalPool(set: BadgeSet): BadgeSet {

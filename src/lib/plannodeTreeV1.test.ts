@@ -82,8 +82,8 @@ describe('parsePlannodeTreeV1ImportText', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const root = r.nodes[0];
-    expect(root.badges.sort()).toEqual(['api', 'navi', 'payment']);
-    expect(root.metadata?.badges?.ux).toContain('NAVI');
+    expect(root.badges.sort()).toEqual(['api', 'gnb', 'payment']);
+    expect(root.metadata?.badges?.ux).toContain('GNB');
     expect(root.metadata?.badges?.dev?.sort()).toEqual(['API', 'PAYMENT']);
   });
 

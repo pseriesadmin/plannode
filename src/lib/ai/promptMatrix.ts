@@ -94,6 +94,13 @@ graph TD
   },
 };
 
+const NODE_TYPE_HINTS: Partial<Record<NodeType, string>> = {
+  root: '루트 노드: 제품 전체 요약·목표·핵심 지표 중심.',
+  module: '모듈 노드: 서비스 영역 책임 범위와 하위 기능 연결을 명시.',
+  feature: '기능 노드: 구체적 동작·입출력·수용기준(Acceptance Criteria) 체크리스트 필수.',
+  detail: '세부 노드: 구현 제약·규칙·예외 처리에 집중.'
+};
+
 /**
  * 노드 타입별 기본 시스템 프롬프트 반환
  * @param nodeType 노드 타입
@@ -106,8 +113,11 @@ export function getSystemPrompt(
 ): string {
   const prompt = PROMPT_MATRIX[nodeType]?.[outputIntent];
 
-  if (prompt) return prompt;
+  const hint = NODE_TYPE_HINTS[nodeType];
+  const base = prompt ?? PROMPT_MATRIX.root?.[outputIntent] ?? PROMPT_MATRIX.root?.PRD;
 
-  // 폴백: root + PRD
-  return PROMPT_MATRIX.root?.PRD || `당신은 제품 기획자입니다. 주어진 기능 트리를 분석해 완전한 문서를 작성하세요.`;
+  if (base && hint) return `${base}\n\n[노드 타입 힌트] ${hint}`;
+  if (base) return base;
+
+  return `당신은 제품 기획자입니다. 주어진 기능 트리를 분석해 완전한 문서를 작성하세요.`;
 }

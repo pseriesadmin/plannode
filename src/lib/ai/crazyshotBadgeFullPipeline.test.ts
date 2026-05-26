@@ -4,7 +4,7 @@
  * 파일 내 모든 원문 토큰이 표준 풀로 매핑 가능한지 고정한다.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sanitizeNodeBadgesForTreeV1 } from './badgePromptInjector';
@@ -13,6 +13,7 @@ import { clearBadgePoolRuntimeCache, getEffectiveBadgePool } from './badgePoolCo
 import type { BadgeSet, NodeMetadata } from './types';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '../../../docs/crazyshot_v5_plannode_BADGE_FULL.json');
+const sampleExists = existsSync(samplePath);
 
 type SampleExport = {
   nodes: Array<{
@@ -61,7 +62,37 @@ function badgeSetFromExplicitTracksOnly(mb: BadgeSet): BadgeSet {
   return out;
 }
 
-describe('CRAZYSHOT BADGE_FULL vs badge pipeline', () => {
+describe('badge pipeline regression (inline · 풀 확장)', () => {
+  beforeEach(() => clearBadgePoolRuntimeCache());
+  afterEach(() => clearBadgePoolRuntimeCache());
+
+  it('resolves CRAZYSHOT·레거시 원문 토큰 after pool expansion', () => {
+    const pool = getEffectiveBadgePool();
+    expect(resolveImportedBadgeToken('ANALYSIS', pool)).toEqual({ track: 'dev', upper: 'API' });
+    expect(resolveImportedBadgeToken('COMPETITIVE', pool)).toEqual({ track: 'prj', upper: 'USP' });
+    expect(resolveImportedBadgeToken('navi', pool)).toEqual({ track: 'ux', upper: 'GNB' });
+    expect(resolveImportedBadgeToken('hardcoding', pool)).toEqual({ track: 'dev', upper: 'HARDCOD' });
+  });
+
+  it('sanitize maps wrong-track tokens and drops CRUD outside default pool', () => {
+    const san = sanitizeNodeBadgesForTreeV1({
+      badges: [],
+      metadata: {
+        badges: { dev: ['NAVI', 'FORM', 'CRUD'], ux: [], prj: ['MVP'] },
+      },
+    });
+    expect(san.metadata?.badges?.dev).toEqual([]);
+    expect(san.metadata?.badges?.ux?.sort()).toEqual(['FORM', 'GNB']);
+    expect(san.metadata?.badges?.prj).toEqual(['MVP']);
+    const total =
+      (san.metadata?.badges?.dev?.length ?? 0) +
+      (san.metadata?.badges?.ux?.length ?? 0) +
+      (san.metadata?.badges?.prj?.length ?? 0);
+    expect(total).toBeGreaterThan(0);
+  });
+});
+
+describe.skipIf(!sampleExists)('CRAZYSHOT BADGE_FULL vs badge pipeline (docs sample)', () => {
   beforeEach(() => clearBadgePoolRuntimeCache());
   afterEach(() => clearBadgePoolRuntimeCache());
 
