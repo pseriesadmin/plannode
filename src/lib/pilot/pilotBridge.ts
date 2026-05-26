@@ -6,10 +6,13 @@ export { dismissPilotRelinkGuide };
 import {
   persistNodesFromPilot,
   persistNodesFromRemoteStructureOp,
-  isNodesSetFromPilotPersist
+  isNodesSetFromPilotPersist,
+  recentAddIdsForCloudMerge
 } from '$lib/stores/projects';
 import { authSession, getAuthUserId } from '$lib/stores/authSession';
 import { supabase } from '$lib/supabase/client';
+import { isSupabaseCloudConfigured } from '$lib/supabase/env';
+import { ensureCollabSliceFreshBeforePersist, registerFlushPilotNodesBeforeCollabMerge } from '$lib/supabase/sync';
 
 /**
  * EPIC D — structure ops vs hydrate/persist 이중 계약 (브리지 층 요약)
@@ -149,13 +152,42 @@ export function mountPilotBridge(): { destroy: () => void } {
       }
       return storeNodesToPilot(list);
     },
+    shouldPreserveNodeOnCollabPrune: (nodeId: string) => {
+      const p = get(currentProject);
+      if (!p?.id) return false;
+      return recentAddIdsForCloudMerge(p.id).has(nodeId);
+    },
     /** structure·text Broadcast 구독용 — EPIC D `armStructureOpsForProject`와 쌍 */
-    getCollabAuthUserId: () => getAuthUserId()
+    getCollabAuthUserId: () => getAuthUserId(),
+    getCollabWorkspaceSourceUserId: () => {
+      const p = get(currentProject);
+      const uid = getAuthUserId();
+      if (!p?.cloud_workspace_source_user_id || !uid) return null;
+      if (p.cloud_workspace_source_user_id === uid) return null;
+      return p.cloud_workspace_source_user_id;
+    },
+    /** 모달 저장 직전 — 공유 슬라이스 freshness best-effort (저장 차단 금지 · Phase D) */
+    onBeforeModalPersist: async () => {
+      const p = get(currentProject);
+      if (!p?.id || !isSupabaseCloudConfigured()) return { ok: true };
+      const uid = getAuthUserId();
+      const src = p.cloud_workspace_source_user_id;
+      if (!src || !uid || src === uid) return { ok: true };
+      const r = await ensureCollabSliceFreshBeforePersist(p, 'modal-save');
+      if (!r.ok && import.meta.env.DEV) {
+        console.warn('[onBeforeModalPersist] degraded', p.id, r.reason);
+      }
+      return { ok: true, reason: r.reason, merged: r.merged };
+    }
   });
 
   if (!pilotApi) {
     return { destroy: () => {} };
   }
+
+  registerFlushPilotNodesBeforeCollabMerge(() => {
+    pilotApi?.flushPersistNow?.({ force: true });
+  });
 
   /** 같은 프로젝트에서 `updated_at` 등 메타만 바뀔 때마다 hydrate → clearUndo 가 반복되던 문제 방지 */
   let lastCurrentProjectId: string | null = null;
@@ -202,7 +234,17 @@ export function mountPilotBridge(): { destroy: () => void } {
     }
     syncingFromStore = true;
     try {
-      pilotApi.hydrateFromStore(p, storeNodesToPilot(list));
+      let pilotNodes = storeNodesToPilot(list);
+      const snap = pilotApi.getSnapshot?.();
+      if (snap?.curP?.id === p.id && Array.isArray(snap.nodes) && snap.nodes.length) {
+        const storeIds = new Set(list.map((n) => n.id));
+        for (const pn of snap.nodes) {
+          if (pn?.id && !storeIds.has(pn.id)) {
+            pilotNodes = [...pilotNodes, pn];
+          }
+        }
+      }
+      pilotApi.hydrateFromStore(p, pilotNodes);
     } finally {
       syncingFromStore = false;
     }
@@ -210,6 +252,7 @@ export function mountPilotBridge(): { destroy: () => void } {
 
   return {
     destroy() {
+      registerFlushPilotNodesBeforeCollabMerge(() => {});
       unsub();
       unsubNodes();
       pilotApi?.destroy();

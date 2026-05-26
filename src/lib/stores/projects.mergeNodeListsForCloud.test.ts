@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   mergeNodeListsForCloud,
   mergeNodeListsForCloudByProjectMeta,
-  registerRecentlyDeletedNodeIdsForCloudMerge
+  registerRecentlyDeletedNodeIdsForCloudMerge,
+  registerRecentlyAddedNodeIdsForCloudMerge,
+  unionCollabPreserveLocalNodes,
+  mergeNodesForCollabPush
 } from './projects';
 import type { Node } from '$lib/supabase/client';
 
@@ -135,6 +138,31 @@ describe('mergeNodeListsForCloud', () => {
     expect(out.map((x) => x.id)).toEqual(['keep', 'just_added']);
   });
 
+  it('mergeNodeListsForCloudByProjectMeta: remote meta newer preserves local-only when node ts is before project meta (T1<T2 skew)', () => {
+    const nodeTs = '2026-05-19T10:00:00.000Z';
+    const lMeta = '2026-05-19T10:00:00.001Z';
+    const rMeta = '2026-05-19T10:00:01.000Z';
+    const local = [N('keep', '2026-05-18T00:00:00.000Z'), N('just_added', nodeTs)];
+    const remote = [N('keep', '2026-05-18T00:00:00.000Z')];
+    const out = mergeNodeListsForCloudByProjectMeta(local, remote, lMeta, rMeta, PID);
+    expect(out.map((x) => x.id)).toEqual(['keep', 'just_added']);
+  });
+
+  it('mergeNodeListsForCloudByProjectMeta: registerRecentlyAdded preserves id even when timestamps would drop it', () => {
+    if (typeof window === 'undefined') return;
+    registerRecentlyAddedNodeIdsForCloudMerge(PID, ['just_added']);
+    const local = [N('keep', '2026-05-18T00:00:00.000Z'), N('just_added', '2026-05-17T00:00:00.000Z')];
+    const remote = [N('keep', '2026-05-18T00:00:00.000Z')];
+    const out = mergeNodeListsForCloudByProjectMeta(
+      local,
+      remote,
+      '2026-05-19T11:00:00.000Z',
+      '2026-05-19T12:00:00.000Z',
+      PID
+    );
+    expect(out.map((x) => x.id)).toEqual(['keep', 'just_added']);
+  });
+
   it('mergeNodeListsForCloudByProjectMeta: remote meta newer preserves collab-only id newer than owner meta', () => {
     const local = [N('keep', '2026-05-18T00:00:00.000Z'), N('collab_new', '2026-05-19T13:00:00.000Z')];
     const remote = [N('keep', '2026-05-18T00:00:00.000Z')];
@@ -176,6 +204,23 @@ describe('mergeNodeListsForCloud', () => {
       PID
     );
     expect(out.map((x) => x.id)).toEqual(['keep', 'from_owner']);
+  });
+
+  it('mergeNodesForCollabPush keeps owner-only ids when local meta is newer (push path)', () => {
+    const local = [N('keep', '2026-05-19T14:00:00.000Z'), N('mine', '2026-05-19T14:00:01.000Z')];
+    const owner = [N('keep', '2026-05-19T12:00:00.000Z'), N('theirs_first', '2026-05-19T13:00:00.000Z')];
+    const out = mergeNodesForCollabPush(local, owner, PID);
+    expect(out.map((x) => x.id)).toEqual(expect.arrayContaining(['keep', 'mine', 'theirs_first']));
+    expect(out).toHaveLength(3);
+  });
+
+  it('unionCollabPreserveLocalNodes re-appends recent-add ids dropped by merge', () => {
+    if (typeof window === 'undefined') return;
+    registerRecentlyAddedNodeIdsForCloudMerge(PID, ['just_added']);
+    const pre = [N('keep', '2026-05-18T00:00:00.000Z'), N('just_added', '2026-05-19T10:00:00.000Z')];
+    const merged = [N('keep', '2026-05-18T00:00:00.000Z')];
+    const out = unionCollabPreserveLocalNodes(PID, pre, merged);
+    expect(out.map((x) => x.id)).toEqual(['keep', 'just_added']);
   });
 
   it('suppressRecentDeletesProjectId skips re-adding suppressed remote id when missing locally', () => {

@@ -20,8 +20,8 @@ const INTERVAL_MS_DEFAULT = 32000;
 const INTERVAL_MS_SHARED_WORKSPACE_DIRTY = 8000;
 /** 공유 멤버 프로젝트 열림·클린 — 양방향 틱 보조(P-8 ≤15s) */
 const INTERVAL_MS_SHARED_WORKSPACE_OPEN = 10000;
-/** collab_meta revision 폴백 poll — Realtime 누락·일시 끊김 대비 (P-8 ≤15s) */
-export const COLLAB_FALLBACK_POLL_MS = 4000;
+/** collab_meta revision 폴백 poll — Realtime 누락·일시 끊김 대비 (Tier 0 T0-4: 4s→2s) */
+export const COLLAB_FALLBACK_POLL_MS = 2000;
 /** 사용자 입력 없이 이 시간이 지난 뒤 주기 틱에서 동기 이유를 `idle-long`으로 표시(NOW-75). */
 const LONG_IDLE_MS = 5 * 60 * 1000;
 

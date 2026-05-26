@@ -1,5 +1,5 @@
 /**
- * EPIC D 2단계 — 트리 structure ops (Broadcast only, pull/LWW는 기존 sync).
+ * EPIC D 2단계 — 트리 structure ops (Broadcast + EPIC E op log persist).
  * @see docs/plannode_ot2_tree_ops_channel_spike.md
  * @see docs/plannode_ot2_tree_structure_poc_spike.md
  */
@@ -9,8 +9,11 @@ import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 
 export const STRUCTURE_OPS_BROADCAST_EVENT = 'structure-op';
 const STRUCTURE_OPS_CLIENT_ID_KEY = 'plannode.structureOps.clientId.v1';
+const STRUCTURE_OPS_ACK_SEQ_KEY = 'plannode.structureOps.ackSeq.v1';
 const MAX_PENDING_STRUCTURE_OPS = 12;
+const MAX_PENDING_PERSIST_OPS = 24;
 const PENDING_FLUSH_RETRY_MS = 200;
+const PERSIST_FLUSH_DEBOUNCE_MS = 120;
 
 export type AddNodeOp = {
   type: 'add_node';
@@ -46,7 +49,27 @@ export type ReorderSiblingsOp = {
   ordered_ids: string[];
 };
 
-export type StructureOpPayload = AddNodeOp | DeleteNodeOp | MoveNodeOp | ReorderSiblingsOp;
+export type UpdateNodeOp = {
+  type: 'update_node';
+  node: {
+    id: string;
+    parent_id?: string;
+    name?: string;
+    description?: string;
+    node_type?: string;
+    num?: string;
+    mx?: number | null;
+    my?: number | null;
+    updated_at?: string;
+  };
+};
+
+export type StructureOpPayload =
+  | AddNodeOp
+  | DeleteNodeOp
+  | MoveNodeOp
+  | ReorderSiblingsOp
+  | UpdateNodeOp;
 
 export type StructureOp = {
   v: 1;
@@ -59,6 +82,11 @@ export type StructureOp = {
 export type StructureOpHandler = (op: StructureOp) => void;
 
 type PendingStructureOp = { projectId: string; op: StructureOpPayload };
+type PendingPersistOp = {
+  projectId: string;
+  workspaceUserId: string;
+  op: StructureOpPayload;
+};
 
 let channel: RealtimeChannel | null = null;
 let subscribedProjectId: string | null = null;
@@ -67,8 +95,10 @@ let myClientId = '';
 let sendSeq = 0;
 let onStructureOp: StructureOpHandler | null = null;
 let pendingStructureOps: PendingStructureOp[] = [];
+let pendingPersistOps: PendingPersistOp[] = [];
 /** 브라우저 타이머 id (DOM lib: number) */
 let pendingFlushTimer: number | undefined;
+let persistFlushTimer: number | undefined;
 
 function topicForProject(projectId: string): string {
   return `plannode:project:${projectId}:structure`;
@@ -110,10 +140,10 @@ function parseAddNodeOp(raw: Record<string, unknown>): AddNodeOp | null {
   if (!isRecord(nodeRaw)) return null;
   const id = parseNonEmptyString(nodeRaw.id);
   const parent_id = parseNonEmptyString(nodeRaw.parent_id);
-  const name = parseNonEmptyString(nodeRaw.name);
   const mx = parseFiniteNumber(nodeRaw.mx);
   const my = parseFiniteNumber(nodeRaw.my);
-  if (!id || !parent_id || !name || mx === null || my === null) return null;
+  if (!id || !parent_id || mx === null || my === null) return null;
+  const name = nodeRaw.name != null ? String(nodeRaw.name) : '';
   const node: AddNodeOp['node'] = { id, parent_id, name, mx, my };
   const description = parseNonEmptyString(nodeRaw.description);
   if (description) node.description = description;
@@ -156,6 +186,34 @@ function parseReorderSiblingsOp(raw: Record<string, unknown>): ReorderSiblingsOp
   return { type: 'reorder_siblings', parent_id, ordered_ids };
 }
 
+function parseUpdateNodeOp(raw: Record<string, unknown>): UpdateNodeOp | null {
+  const nodeRaw = raw.node;
+  if (!isRecord(nodeRaw)) return null;
+  const id = parseNonEmptyString(nodeRaw.id);
+  if (!id) return null;
+  const node: UpdateNodeOp['node'] = { id };
+  if (nodeRaw.name != null) node.name = String(nodeRaw.name);
+  const description = parseNonEmptyString(nodeRaw.description);
+  if (description !== null) node.description = description;
+  const parent_id = parseNonEmptyString(nodeRaw.parent_id);
+  if (parent_id) node.parent_id = parent_id;
+  const node_type = parseNonEmptyString(nodeRaw.node_type);
+  if (node_type) node.node_type = node_type;
+  const num = parseNonEmptyString(nodeRaw.num);
+  if (num) node.num = num;
+  if (nodeRaw.mx != null) {
+    const mx = parseFiniteNumber(nodeRaw.mx);
+    node.mx = mx;
+  }
+  if (nodeRaw.my != null) {
+    const my = parseFiniteNumber(nodeRaw.my);
+    node.my = my;
+  }
+  const updated_at = parseNonEmptyString(nodeRaw.updated_at);
+  if (updated_at) node.updated_at = updated_at;
+  return { type: 'update_node', node };
+}
+
 function parseStructureOpPayload(raw: unknown): StructureOpPayload | null {
   if (!isRecord(raw)) return null;
   const type = raw.type;
@@ -168,6 +226,8 @@ function parseStructureOpPayload(raw: unknown): StructureOpPayload | null {
       return parseMoveNodeOp(raw);
     case 'reorder_siblings':
       return parseReorderSiblingsOp(raw);
+    case 'update_node':
+      return parseUpdateNodeOp(raw);
     default:
       return null;
   }
@@ -208,6 +268,7 @@ export function isProjectStructureOpsSubscribed(projectId?: string): boolean {
 /** Vitest — 모듈 상태 초기화 */
 export function resetStructureOpsStateForTest(): void {
   clearPendingStructureOps();
+  clearPendingPersistOps();
   broadcastSubscribed = false;
   subscribedProjectId = null;
   sendSeq = 0;
@@ -219,9 +280,189 @@ export function resetStructureOpsStateForTest(): void {
   }
 }
 
-/** Vitest — pending 큐 길이 */
+/** Vitest — broadcast pending 큐 길이 */
 export function getStructureOpsPendingCount(): number {
   return pendingStructureOps.length;
+}
+
+/** Vitest — persist pending 큐 길이 */
+export function getStructureOpsPersistPendingCount(): number {
+  return pendingPersistOps.length;
+}
+
+function ackSeqStorageKey(projectId: string): string {
+  return `${STRUCTURE_OPS_ACK_SEQ_KEY}.${projectId}`;
+}
+
+export function getStructureOpsPersistAckSeq(projectId: string): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = localStorage.getItem(ackSeqStorageKey(projectId));
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function setStructureOpsPersistAckSeq(projectId: string, seq: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(ackSeqStorageKey(projectId), String(Math.max(0, Math.floor(seq))));
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearPendingPersistOps(): void {
+  pendingPersistOps = [];
+  if (persistFlushTimer !== undefined && typeof window !== 'undefined') {
+    window.clearTimeout(persistFlushTimer);
+    persistFlushTimer = undefined;
+  }
+}
+
+function schedulePersistFlush(): void {
+  if (persistFlushTimer !== undefined || typeof window === 'undefined') return;
+  persistFlushTimer = window.setTimeout(() => {
+    persistFlushTimer = undefined;
+    void flushAllPendingStructureOpsPersist();
+  }, PERSIST_FLUSH_DEBOUNCE_MS);
+}
+
+/** EPIC E — cloud persist 큐에 op 추가 (Broadcast와 병행) */
+export function enqueueStructureOpForCloudPersist(
+  projectId: string,
+  workspaceUserId: string,
+  op: StructureOpPayload
+): void {
+  const pid = projectId.trim();
+  const wid = workspaceUserId.trim();
+  if (!pid || !wid) return;
+  pendingPersistOps.push({ projectId: pid, workspaceUserId: wid, op });
+  if (pendingPersistOps.length > MAX_PENDING_PERSIST_OPS) {
+    pendingPersistOps = pendingPersistOps.slice(-MAX_PENDING_PERSIST_OPS);
+  }
+  schedulePersistFlush();
+}
+
+function isStructureOpsRpcMissing(err: { message?: string; code?: string } | null): boolean {
+  if (!err) return false;
+  const msg = String(err.message ?? '').toLowerCase();
+  return msg.includes('plannode_append_structure_ops') || msg.includes('could not find');
+}
+
+export async function flushStructureOpsPersistForProject(
+  projectId: string,
+  workspaceUserId: string,
+  baseRevision: number | null = null
+): Promise<{ ok: boolean; flushed: number; lastSeq?: number; revision?: number }> {
+  if (!isSupabaseCloudConfigured() || typeof window === 'undefined') {
+    return { ok: true, flushed: 0 };
+  }
+  const pid = projectId.trim();
+  const wid = workspaceUserId.trim();
+  if (!pid || !wid) return { ok: true, flushed: 0 };
+
+  const batch = pendingPersistOps.filter(
+    (p) => p.projectId === pid && p.workspaceUserId === wid
+  );
+  if (!batch.length) return { ok: true, flushed: 0 };
+
+  const opsPayload = batch.map((b) => b.op);
+  const { data, error } = await supabase.rpc('plannode_append_structure_ops', {
+    p_workspace_user_id: wid,
+    p_project_id: pid,
+    p_ops: opsPayload,
+    p_client_id: getProjectStructureOpsClientId(),
+    p_base_revision: baseRevision
+  });
+
+  if (error) {
+    if (isStructureOpsRpcMissing(error)) {
+      return { ok: false, flushed: 0 };
+    }
+    if (import.meta.env.DEV) {
+      console.warn('[flushStructureOpsPersistForProject]', pid, error.message);
+    }
+    return { ok: false, flushed: 0 };
+  }
+
+  pendingPersistOps = pendingPersistOps.filter(
+    (p) => !(p.projectId === pid && p.workspaceUserId === wid)
+  );
+
+  const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+  const lastSeq = Number(result.last_applied_seq);
+  const revision = Number(result.revision);
+  if (Number.isFinite(lastSeq)) {
+    setStructureOpsPersistAckSeq(pid, lastSeq);
+  }
+
+  return {
+    ok: true,
+    flushed: opsPayload.length,
+    lastSeq: Number.isFinite(lastSeq) ? lastSeq : undefined,
+    revision: Number.isFinite(revision) ? revision : undefined
+  };
+}
+
+export async function flushAllPendingStructureOpsPersist(): Promise<void> {
+  const seen = new Set<string>();
+  for (const item of [...pendingPersistOps]) {
+    const key = `${item.workspaceUserId}:${item.projectId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await flushStructureOpsPersistForProject(item.projectId, item.workspaceUserId);
+  }
+}
+
+export type FetchedStructureOpsBundle = {
+  ops: Array<{ seq: number; op: StructureOpPayload; client_id?: string }>;
+  revision: number;
+  last_applied_seq: number;
+  nodes: unknown[];
+};
+
+export async function fetchStructureOpsSince(
+  workspaceUserId: string,
+  projectId: string,
+  sinceSeq: number
+): Promise<FetchedStructureOpsBundle | null> {
+  if (!isSupabaseCloudConfigured()) return null;
+  const { data, error } = await supabase.rpc('plannode_fetch_structure_ops_since', {
+    p_workspace_user_id: workspaceUserId,
+    p_project_id: projectId,
+    p_since_seq: sinceSeq
+  });
+  if (error) {
+    if (import.meta.env.DEV && !isStructureOpsRpcMissing(error)) {
+      console.warn('[fetchStructureOpsSince]', projectId, error.message);
+    }
+    return null;
+  }
+  if (!data || typeof data !== 'object') return null;
+  const root = data as Record<string, unknown>;
+  const opsRaw = Array.isArray(root.ops) ? root.ops : [];
+  const ops: FetchedStructureOpsBundle['ops'] = [];
+  for (const row of opsRaw) {
+    if (!isRecord(row)) continue;
+    const seq = Number(row.seq);
+    if (!Number.isFinite(seq)) continue;
+    const op = parseStructureOpPayload(row.op);
+    if (!op) continue;
+    ops.push({
+      seq: Math.floor(seq),
+      op,
+      client_id: parseNonEmptyString(row.client_id) ?? undefined
+    });
+  }
+  return {
+    ops,
+    revision: Number(root.revision) || 0,
+    last_applied_seq: Number(root.last_applied_seq) || 0,
+    nodes: Array.isArray(root.nodes) ? root.nodes : []
+  };
 }
 
 function clearPendingStructureOps(): void {
@@ -356,10 +597,18 @@ export async function subscribeProjectStructureOps(
  * 원격에 structure op 1건 전송.
  * SUBSCRIBED 전·일시 실패 시 pending 큐에 넣고 연결 후 flush.
  */
-export function sendProjectStructureOp(projectId: string, op: StructureOpPayload): boolean {
+export function sendProjectStructureOp(
+  projectId: string,
+  op: StructureOpPayload,
+  persistOpts?: { workspaceUserId: string }
+): boolean {
   if (!isSupabaseCloudConfigured() || typeof window === 'undefined') return false;
   const pid = projectId.trim();
   if (!pid) return false;
+
+  if (persistOpts?.workspaceUserId?.trim()) {
+    enqueueStructureOpForCloudPersist(pid, persistOpts.workspaceUserId.trim(), op);
+  }
 
   if (trySendStructureOpNow(pid, op)) return true;
 

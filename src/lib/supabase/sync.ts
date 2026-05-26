@@ -6,10 +6,16 @@ import {
   mergeNodeListsForCloud,
   mergeNodeListsForCloudByProjectMeta,
   loadProjectNodesFromLocalStorage,
+  loadLocalNodesForCollabMerge,
+  unionCollabPreserveLocalNodes,
+  mergeNodesForCollabPush,
+  collabPushProjectMetaAvoidingServerPrune,
+  reinjectCollabPreservedNodesAfterPullMerge,
   replaceWorkspaceFromBundle,
   upsertImportedPlannodeTreeV1,
   projects,
   currentProject,
+  nodes,
   selectProject,
   projectWorkspaceNodesJsonSnapshot,
   clearPendingWorkspaceDeletions,
@@ -17,8 +23,16 @@ import {
   getDeletedProjectTombstoneIds,
   mergeProjectMetaForCloudSync,
   reconcileProjectRecord,
+  replayStructureOpsOnNodes,
   type WorkspaceBundle
 } from '$lib/stores/projects';
+import {
+  flushStructureOpsPersistForProject,
+  flushAllPendingStructureOpsPersist,
+  fetchStructureOpsSince,
+  getStructureOpsPersistAckSeq,
+  setStructureOpsPersistAckSeq
+} from '$lib/supabase/projectStructureOps';
 import {
   ensureOwnerAclRowForMyProject,
   fetchProjectSliceFromCloud,
@@ -39,6 +53,102 @@ import {
 } from '$lib/plannodeCollabLimits';
 
 export { isSupabaseCloudConfigured };
+
+/** pull 병합 직전 파일럿→스토어 flush (pilotBridge 등록 · 순환 import 방지) */
+let flushPilotNodesBeforeCollabMerge: (() => void) | undefined;
+
+export function registerFlushPilotNodesBeforeCollabMerge(fn: () => void): void {
+  flushPilotNodesBeforeCollabMerge = fn;
+}
+
+function maybeFlushPilotBeforeCollabMerge(projectId: string): void {
+  const cur = get(currentProject);
+  if (cur?.id !== projectId) return;
+  try {
+    flushPilotNodesBeforeCollabMerge?.();
+  } catch {
+    /* ignore */
+  }
+}
+
+/** T0-1 — push/pull 직전 파일럿 flush 후 스토어+LS 병합 노드 목록 */
+function collabNodesForPush(projectId: string): Node[] {
+  maybeFlushPilotBeforeCollabMerge(projectId);
+  return loadLocalNodesForCollabMerge(projectId);
+}
+
+/** EPIC E — since ack seq 이후 structure ops pull + replay */
+export async function pullStructureOpsForProject(project: Project): Promise<boolean> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
+  const uid = getAuthUserId();
+  if (!uid || !project?.id) return false;
+  const src = project.cloud_workspace_source_user_id;
+  if (!src || src === uid) return false;
+
+  const since = getStructureOpsPersistAckSeq(project.id);
+  const bundle = await fetchStructureOpsSince(src, project.id, since);
+  if (!bundle) return false;
+
+  if (bundle.last_applied_seq > since) {
+    setStructureOpsPersistAckSeq(project.id, bundle.last_applied_seq);
+  }
+
+  if (!bundle.ops.length) return false;
+
+  maybeFlushPilotBeforeCollabMerge(project.id);
+  const local = loadLocalNodesForCollabMerge(project.id);
+  const replayed = replayStructureOpsOnNodes(
+    local,
+    bundle.ops.map((row) => row.op),
+    project.id
+  );
+  const ref = get(projects).find((p) => p.id === project.id) ?? project;
+  upsertImportedPlannodeTreeV1({
+    project: ref,
+    nodes: replayed,
+    openAfter: false
+  });
+  if (get(currentProject)?.id === project.id) {
+    const latest = get(projects).find((p) => p.id === project.id);
+    if (latest) selectProject(latest);
+  }
+  return true;
+}
+
+/** EPIC E — 공유 멤버 pending structure ops → 소유자 op log */
+export async function appendStructureOpsToOwner(
+  projectId: string,
+  workspaceUserId: string,
+  baseRevision: number | null = null
+): Promise<{ ok: boolean; flushed: number }> {
+  const r = await flushStructureOpsPersistForProject(projectId, workspaceUserId, baseRevision);
+  return { ok: r.ok, flushed: r.flushed };
+}
+
+/** pull·poll — revision 같아도 슬라이스 hash 가 로컬과 다르면 반영 필요 */
+async function collabRemoteSliceHashDiffers(
+  workspaceUserId: string,
+  projectId: string
+): Promise<boolean> {
+  const slice = await fetchProjectSliceFromCloud(workspaceUserId, projectId);
+  if (!slice) return false;
+  const local = loadLocalNodesForCollabMerge(projectId);
+  return (
+    projectWorkspaceNodesJsonSnapshot(slice.nodes) !== projectWorkspaceNodesJsonSnapshot(local)
+  );
+}
+
+function markCollabRevisionCachedIfSynced(
+  workspaceUserId: string,
+  projectId: string,
+  remoteRev: number,
+  changed: boolean,
+  hashDiffers: boolean
+): void {
+  if (changed || !hashDiffers) {
+    setCachedCollabRevision(workspaceUserId, projectId, remoteRev);
+  }
+}
 
 /**
  * 동기·공유 슬라이스(NOW-68·EPIC A): `plannode_workspace` **번들 본문**은 Realtime 미구독(pull/RPC).
@@ -328,8 +438,19 @@ function warnMergeSliceThrottled(projectId: string, message: string): void {
 }
 
 async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string): Promise<void> {
-  /** 플랜(공유 동시편집 보완): push 루프 전에 공유 슬라이스를 한 번 당겨 로컬·gather 번들이 소유자 쪽 최신과 어긋나지 않게 한다. */
+  /** push 전 pull이 unpushed recent-add를 지우지 않도록 pre-merge 스냅 + flush */
+  const prePullByProject = new Map<string, Node[]>();
+  for (const p of get(projects)) {
+    const src = p.cloud_workspace_source_user_id;
+    if (!src || src === userId) continue;
+    maybeFlushPilotBeforeCollabMerge(p.id);
+    prePullByProject.set(p.id, loadLocalNodesForCollabMerge(p.id));
+  }
   await pullSharedProjectSlicesIfNewer();
+  for (const [pid, pre] of prePullByProject) {
+    reinjectCollabPreservedNodesAfterPullMerge(pid, pre);
+  }
+  await flushAllPendingStructureOpsPersist();
   for (const p of bundle.projects) {
     const src = p.cloud_workspace_source_user_id;
     if (!src || src === userId) continue;
@@ -350,19 +471,40 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       const fresh = gatherWorkspaceBundle();
       const proj = fresh.projects.find((x) => x.id === p.id);
       if (!proj) break;
-      let nodes = fresh.nodesByProject[p.id] ?? [];
-      /** push 전 소유자 슬라이스 병합: 공유자 메타가 더 새로우면 삭제·이동을 `p_nodes`에 반영, 아니면 LWW 흡수만. */
-      const ownerSlice = await fetchProjectSliceFromCloud(src, p.id);
-      if (ownerSlice) {
-        nodes = mergeNodeListsForCloudByProjectMeta(
-          nodes,
-          ownerSlice.nodes,
-          proj.updated_at,
-          ownerSlice.project.updated_at,
-          p.id
+      maybeFlushPilotBeforeCollabMerge(p.id);
+      const prePushLocal = loadLocalNodesForCollabMerge(p.id);
+      let pushNodes = collabNodesForPush(p.id);
+      if (!pushNodes.length) {
+        pushNodes = prePushLocal.length ? prePushLocal : (fresh.nodesByProject[p.id] ?? []);
+      }
+      /** push: 소유자 슬라이스와 합성. fetch 실패 시 로컬만 LWW add(서버 prune off 마이그레이션 전제). */
+      let ownerSlice = await fetchProjectSliceFromCloud(src, p.id);
+      if (!ownerSlice) {
+        await new Promise((r) => setTimeout(r, 280));
+        ownerSlice = await fetchProjectSliceFromCloud(src, p.id);
+      }
+      let pushProj: Project;
+      let useDeltaOnly = false;
+      if (!ownerSlice) {
+        if (import.meta.env.DEV) {
+          console.warn(
+            '[pushProjectSlicesToOwners] owner slice fetch failed — delta-only LWW push',
+            p.id
+          );
+        }
+        pushNodes = mergeNodesForCollabPush(pushNodes, [], p.id);
+        pushProj = proj;
+        useDeltaOnly = true;
+      } else {
+        pushNodes = mergeNodesForCollabPush(pushNodes, ownerSlice.nodes, p.id);
+        pushProj = collabPushProjectMetaAvoidingServerPrune(
+          proj,
+          ownerSlice.project,
+          pushNodes,
+          ownerSlice.nodes
         );
       }
-      const { cloud_workspace_source_user_id: _cw, ...meta } = proj;
+      const { cloud_workspace_source_user_id: _cw, ...meta } = pushProj;
 
       let baseRevision: number | null = revisionHintFromStale;
       if (baseRevision === null && !revisionStaleNotifiedThisPush) {
@@ -376,6 +518,13 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
         } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
           console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
         }
+      }
+
+      const opsFlush = await flushStructureOpsPersistForProject(p.id, src, baseRevision);
+      if (opsFlush.ok && opsFlush.flushed > 0) {
+        lastErr = null;
+        revisionHintFromStale = null;
+        break;
       }
 
       let lockHeld = false;
@@ -399,13 +548,25 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       }
 
       try {
-        const { error: mErr } = await supabase.rpc('plannode_workspace_merge_project_slice', {
-          p_workspace_user_id: src,
-          p_project_id: p.id,
-          p_project: meta,
-          p_nodes: nodes,
-          p_base_revision: baseRevision
-        });
+        const rpcName = useDeltaOnly
+          ? 'plannode_workspace_merge_project_slice_deltas'
+          : 'plannode_workspace_merge_project_slice';
+        const rpcArgs = useDeltaOnly
+          ? {
+              p_workspace_user_id: src,
+              p_project_id: p.id,
+              p_project: meta,
+              p_node_deltas: pushNodes,
+              p_base_revision: baseRevision
+            }
+          : {
+              p_workspace_user_id: src,
+              p_project_id: p.id,
+              p_project: meta,
+              p_nodes: pushNodes,
+              p_base_revision: baseRevision
+            };
+        const { error: mErr } = await supabase.rpc(rpcName, rpcArgs);
         if (!mErr) {
           lastErr = null;
           revisionHintFromStale = null;
@@ -418,7 +579,9 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
           const hinted = parseStaleRevisionFromCollabError(mErr);
           if (hinted !== null) revisionHintFromStale = hinted;
           await pullSharedProjectSlicesIfNewer();
-          if (!revisionStaleNotifiedThisPush) {
+          const dedupUntil = modalSavePushStaleToastDedupUntil.get(p.id) ?? 0;
+          const skipStaleToast = Date.now() < dedupUntil;
+          if (!revisionStaleNotifiedThisPush && !skipStaleToast) {
             revisionStaleNotifiedThisPush = true;
             notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
           }
@@ -729,12 +892,15 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
   const uid = getAuthUserId();
   if (!uid) return false;
-  const src = local.cloud_workspace_source_user_id;
+  const localRef = get(projects).find((p) => p.id === local.id) ?? local;
+  const src = localRef.cloud_workspace_source_user_id;
   if (!src || src === uid) return false;
 
-  if (getDeletedProjectTombstoneIds().has(local.id)) return false;
+  if (getDeletedProjectTombstoneIds().has(localRef.id)) return false;
 
-  const slice = await fetchProjectSliceFromCloud(src, local.id);
+  maybeFlushPilotBeforeCollabMerge(localRef.id);
+
+  const slice = await fetchProjectSliceFromCloud(src, localRef.id);
   if (!slice) return false;
 
   const parseTs = (iso: string | undefined): number => {
@@ -743,27 +909,30 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   };
 
   const rTime = parseTs(slice.project.updated_at);
-  const lTime = parseTs(local.updated_at);
+  const lTime = parseTs(localRef.updated_at);
   const remoteMetaNewer = rTime > lTime;
-  const localNodes = loadProjectNodesFromLocalStorage(local.id);
-  const mergedNodes = mergeNodeListsForCloudByProjectMeta(
-    localNodes,
+  const preMergeLocal = loadLocalNodesForCollabMerge(localRef.id);
+  const remoteHash = projectWorkspaceNodesJsonSnapshot(slice.nodes);
+  const localHash = projectWorkspaceNodesJsonSnapshot(preMergeLocal);
+  const mergedNodesRaw = mergeNodeListsForCloudByProjectMeta(
+    preMergeLocal,
     slice.nodes,
-    local.updated_at,
+    localRef.updated_at,
     slice.project.updated_at,
-    local.id
+    localRef.id
   );
+  const mergedNodes = unionCollabPreserveLocalNodes(localRef.id, preMergeLocal, mergedNodesRaw);
+  const localNodes = preMergeLocal;
   const remoteProj = reconcileProjectRecord({
     ...slice.project,
     cloud_workspace_source_user_id: src
   });
   const mergedProject = mergeProjectMetaForCloudSync(
-    reconcileProjectRecord({ ...local, cloud_workspace_source_user_id: src }),
+    reconcileProjectRecord({ ...localRef, cloud_workspace_source_user_id: src }),
     remoteProj
   );
 
-  const nodesChanged =
-    projectWorkspaceNodesJsonSnapshot(mergedNodes) !== projectWorkspaceNodesJsonSnapshot(localNodes);
+  const nodesChanged = remoteHash !== localHash;
   const projectSettingsMetaSignature = (proj: Project): string =>
     JSON.stringify({
       name: proj.name,
@@ -774,25 +943,186 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
       badge_pool: proj.badge_pool ?? null
     });
   const metaChanged =
-    projectSettingsMetaSignature(mergedProject) !== projectSettingsMetaSignature(local);
+    projectSettingsMetaSignature(mergedProject) !== projectSettingsMetaSignature(localRef);
   const projectTsChanged =
-    remoteMetaNewer && String(mergedProject.updated_at || '') !== String(local.updated_at || '');
+    remoteMetaNewer && String(mergedProject.updated_at || '') !== String(localRef.updated_at || '');
 
   if (!nodesChanged && !metaChanged && !projectTsChanged) return false;
 
-  captureNodeSnapshot(local.id, localNodes, 'pre_pull');
+  captureNodeSnapshot(localRef.id, localNodes, 'pre_pull');
   upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
     openAfter: false,
     markDirty: false,
     preserveRemoteUpdatedAt: remoteMetaNewer
   });
 
-  const cur = get(currentProject);
-  if (cur?.id === local.id) {
-    const ref = get(projects).find((p) => p.id === local.id);
-    if (ref) selectProject(ref);
+  /** F-01: upsert가 nodes·localStorage 반영 — selectProject 중복 hydrate 제거, 메타만 patch */
+  const curOpen = get(currentProject);
+  if (curOpen?.id === localRef.id) {
+    const ref = get(projects).find((p) => p.id === localRef.id);
+    if (ref) currentProject.set(ref);
   }
   return true;
+}
+
+const ENSURE_SLICE_BUSY_POLL_MS = 500;
+const ENSURE_SLICE_BUSY_POLL_MAX = 4;
+/** modal-save barrier 직후 push `revision_stale` 토스트 중복 억제 (Phase D6) */
+const MODAL_SAVE_PUSH_STALE_TOAST_DEDUP_MS = 12_000;
+const modalSavePushStaleToastDedupUntil = new Map<string, number>();
+
+type CollabSliceFreshness = {
+  remoteRev: number | null;
+  cachedRev: number | null;
+  localHash: string;
+  remoteHash: string;
+  revDiff: boolean;
+  hashDiff: boolean;
+  needsMerge: boolean;
+};
+
+async function assessCollabSliceFreshness(
+  project: Project,
+  workspaceUserId: string
+): Promise<CollabSliceFreshness | null> {
+  const slice = await fetchProjectSliceFromCloud(workspaceUserId, project.id);
+  if (!slice) return null;
+
+  const remoteRev = await fetchCollabRevision(workspaceUserId, project.id);
+  const cachedRev = getCachedCollabRevision(workspaceUserId, project.id);
+  const localNodes = loadLocalNodesForCollabMerge(project.id);
+  const localHash = projectWorkspaceNodesJsonSnapshot(localNodes);
+  const remoteHash = projectWorkspaceNodesJsonSnapshot(slice.nodes ?? []);
+  const revDiff = remoteRev !== null && cachedRev !== remoteRev;
+  const hashDiff = localHash !== remoteHash;
+  return {
+    remoteRev,
+    cachedRev,
+    localHash,
+    remoteHash,
+    revDiff,
+    hashDiff,
+    needsMerge: revDiff || hashDiff
+  };
+}
+
+async function mergeCollabSliceFromFreshness(
+  project: Project,
+  reason: string,
+  fresh: CollabSliceFreshness
+): Promise<boolean> {
+  const ref = get(projects).find((p) => p.id === project.id) ?? project;
+  return pullCollabSliceForProject(ref, reason, {
+    knownRemoteRevision: fresh.remoteRev,
+    forceMerge: fresh.hashDiff && !fresh.revDiff
+  });
+}
+
+async function waitForCloudBidirectionalSyncIdle(maxMs = ENSURE_SLICE_BUSY_POLL_MS * ENSURE_SLICE_BUSY_POLL_MAX): Promise<boolean> {
+  const { isCloudBidirectionalSyncBusy } = await import('$lib/supabase/workspacePush');
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (!isCloudBidirectionalSyncBusy()) return true;
+    await new Promise((r) => setTimeout(r, ENSURE_SLICE_BUSY_POLL_MS));
+  }
+  return !isCloudBidirectionalSyncBusy();
+}
+
+/**
+ * 모달 저장 직전: 공유 슬라이스 revision + hash freshness 확보 후 merge (Phase D · D5).
+ * revision 같아도 slice hash 불일치면 merge.
+ */
+export async function ensureCollabSliceFreshBeforePersist(
+  project: Project,
+  reason = 'modal-save'
+): Promise<{ ok: boolean; merged: boolean; reason?: string }> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) {
+    return { ok: true, merged: false };
+  }
+  const uid = getAuthUserId();
+  if (!uid || !project?.id) return { ok: true, merged: false };
+
+  const src = project.cloud_workspace_source_user_id;
+  if (!src || src === uid) return { ok: true, merged: false };
+
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    return { ok: false, merged: false, reason: 'hidden' };
+  }
+
+  const modalSaveBarrier = reason.startsWith('modal-save');
+
+  if (!(await waitForCloudBidirectionalSyncIdle())) {
+    /** modal-save: 저장 자체를 막지 않음 — push 직전 re-pull(D6)·revision retry가 보완 */
+    if (modalSaveBarrier) {
+      if (import.meta.env.DEV) {
+        console.info('[ensureCollabSliceFresh] skip busy — modal-save non-blocking', project.id);
+      }
+      return { ok: true, merged: false, reason: 'busy-skipped' };
+    }
+    return { ok: false, merged: false, reason: 'busy' };
+  }
+
+  maybeFlushPilotBeforeCollabMerge(project.id);
+
+  const workspaceUserId = src;
+  let fresh = await assessCollabSliceFreshness(project, workspaceUserId);
+  if (!fresh) {
+    if (modalSaveBarrier) {
+      if (import.meta.env.DEV) {
+        console.info('[ensureCollabSliceFresh] skip slice-fetch — modal-save non-blocking', project.id);
+      }
+      return { ok: true, merged: false, reason: 'slice-fetch-skipped' };
+    }
+    return { ok: false, merged: false, reason: 'slice-fetch' };
+  }
+
+  if (import.meta.env.DEV) {
+    console.info('[ensureCollabSliceFresh]', {
+      projectId: project.id,
+      reason,
+      cachedRev: fresh.cachedRev,
+      remoteRev: fresh.remoteRev,
+      localHash: fresh.localHash,
+      remoteHash: fresh.remoteHash,
+      needsMerge: fresh.needsMerge
+    });
+  }
+
+  if (!fresh.needsMerge) {
+    if (import.meta.env.DEV) {
+      console.info('[ensureCollabSliceFresh] skip rev+hash ok');
+    }
+    return { ok: true, merged: false };
+  }
+
+  let merged = await mergeCollabSliceFromFreshness(project, reason, fresh);
+
+  /** D6: 1차 merge 직후 재평가 — 동시 저장으로 revision/hash가 다시 어긋나면 pull 1회만 */
+  fresh = await assessCollabSliceFreshness(project, workspaceUserId);
+  if (fresh?.needsMerge) {
+    if (import.meta.env.DEV) {
+      console.info('[ensureCollabSliceFresh] rePull', {
+        projectId: project.id,
+        reason,
+        trigger: 'revision_stale-path',
+        cachedRev: fresh.cachedRev,
+        remoteRev: fresh.remoteRev,
+        hashDiff: fresh.hashDiff,
+        revDiff: fresh.revDiff
+      });
+    }
+    const reMerged = await mergeCollabSliceFromFreshness(project, `${reason}-rePull`, fresh);
+    merged = merged || reMerged;
+  }
+
+  if (reason.startsWith('modal-save')) {
+    modalSavePushStaleToastDedupUntil.set(
+      project.id,
+      Date.now() + MODAL_SAVE_PUSH_STALE_TOAST_DEDUP_MS
+    );
+  }
+
+  return { ok: true, merged };
 }
 
 /**
@@ -803,7 +1133,7 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
 export async function pullCollabSliceForProject(
   project: Project,
   reason: string,
-  opts?: { knownRemoteRevision?: number | null }
+  opts?: { knownRemoteRevision?: number | null; forceMerge?: boolean }
 ): Promise<boolean> {
   if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
   const uid = getAuthUserId();
@@ -814,10 +1144,39 @@ export async function pullCollabSliceForProject(
     opts?.knownRemoteRevision != null
       ? opts.knownRemoteRevision
       : await fetchCollabRevision(workspaceUserId, project.id);
+  const cachedRev = getCachedCollabRevision(workspaceUserId, project.id);
+  const willSkipRev =
+    !opts?.forceMerge && remoteRev !== null && cachedRev !== null && cachedRev === remoteRev;
+
+  if (import.meta.env.DEV) {
+    const cur = get(currentProject);
+    const localNodes =
+      cur?.id === project.id ? get(nodes) : loadProjectNodesFromLocalStorage(project.id);
+    const localSnapHash = projectWorkspaceNodesJsonSnapshot(localNodes);
+    let remoteSnapHash: string | null = null;
+    try {
+      const slice = await fetchProjectSliceFromCloud(workspaceUserId, project.id);
+      remoteSnapHash = projectWorkspaceNodesJsonSnapshot(slice?.nodes ?? []);
+    } catch {
+      remoteSnapHash = null;
+    }
+    console.info('[collab-diag] pullCollabSliceForProject', {
+      projectId: project.id,
+      reason,
+      cachedRev,
+      remoteRev,
+      willSkipRev,
+      localSnapHash,
+      remoteSnapHash,
+      hashEqual: remoteSnapHash !== null && localSnapHash === remoteSnapHash
+    });
+  }
+
   if (remoteRev !== null) {
-    const cached = getCachedCollabRevision(workspaceUserId, project.id);
-    if (cached !== null && cached === remoteRev) {
-      return false;
+    const cached = cachedRev;
+    if (!opts?.forceMerge && cached !== null && cached === remoteRev) {
+      const hashDiffers = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+      if (!hashDiffers) return false;
     }
   }
 
@@ -825,7 +1184,8 @@ export async function pullCollabSliceForProject(
   let changed = false;
   if (src && src !== uid) {
     const ref = get(projects).find((p) => p.id === project.id) ?? project;
-    changed = await mergeSharedProjectSliceFromCloudIfApplicable(ref);
+    changed = (await pullStructureOpsForProject(ref)) || changed;
+    changed = (await mergeSharedProjectSliceFromCloudIfApplicable(ref)) || changed;
   } else {
     const n = await pullOwnWorkspaceIfChanged();
     changed = n > 0;
@@ -839,7 +1199,14 @@ export async function pullCollabSliceForProject(
   }
 
   if (remoteRev !== null) {
-    setCachedCollabRevision(workspaceUserId, project.id, remoteRev);
+    const hashDiffersAfter = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+    markCollabRevisionCachedIfSynced(
+      workspaceUserId,
+      project.id,
+      remoteRev,
+      changed,
+      hashDiffersAfter
+    );
   } else if (changed) {
     const revAfter = await fetchCollabRevision(workspaceUserId, project.id);
     if (revAfter !== null) setCachedCollabRevision(workspaceUserId, project.id, revAfter);
@@ -862,10 +1229,13 @@ export async function pollCollabRevisionFallback(project: Project): Promise<bool
   if (remoteRev === null) return false;
 
   const cached = getCachedCollabRevision(workspaceUserId, project.id);
-  if (cached !== null && cached === remoteRev) return false;
+  if (cached !== null && cached === remoteRev) {
+    const hashDiffers = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+    if (!hashDiffers) return false;
+  }
 
   const ref = get(projects).find((p) => p.id === project.id) ?? project;
-  return pullCollabSliceForProject(ref, 'collab-rev-poll');
+  return pullCollabSliceForProject(ref, 'collab-rev-poll', { forceMerge: true });
 }
 
 const COLLAB_REV_PULL_DEBOUNCE_MS = 200;
@@ -904,11 +1274,6 @@ function scheduleCollabRevisionPull(projectId: string, reason: string, revisionH
   const uid = getAuthUserId();
   if (!uid) return;
   const workspaceUserId = ref.cloud_workspace_source_user_id ?? uid;
-  if (revisionHint !== null) {
-    const cached = getCachedCollabRevision(workspaceUserId, projectId);
-    if (cached !== null && cached === revisionHint) return;
-  }
-
   if (collabRevisionDebounceTimer != null) clearTimeout(collabRevisionDebounceTimer);
   collabRevisionDebounceTimer = setTimeout(() => {
     collabRevisionDebounceTimer = null;
@@ -1009,9 +1374,8 @@ export async function pullSharedProjectSlicesIfNewer(): Promise<number> {
   if (!uid) return 0;
 
   let n = 0;
-  const plist = get(projects);
-  for (const local of plist) {
-    const changed = await mergeSharedProjectSliceFromCloudIfApplicable(local);
+  for (const p of get(projects)) {
+    const changed = await mergeSharedProjectSliceFromCloudIfApplicable(p);
     if (changed) n++;
   }
   return n;

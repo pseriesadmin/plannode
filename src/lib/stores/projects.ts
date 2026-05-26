@@ -22,6 +22,7 @@ import {
   type NodeSnapshotCaptureMeta,
   type NodeSnapshotReason
 } from '$lib/stores/nodeSnapshotHistory';
+import type { StructureOpPayload } from '$lib/supabase/projectStructureOps';
 
 // 프로젝트 상태
 export const projects = writable<Project[]>([]);
@@ -142,6 +143,10 @@ const WORKSPACE_PENDING_DELETE_IDS_KEY = 'plannode_workspace_pending_delete_ids_
 
 /** 삭제 직후 옛 원격 스냅샷이 같은 노드 id를 다시 넣는 것만 잠시 막음(프로젝트 시각 비교로 신규 노드를 막지 않음) */
 const CLOUD_MERGE_RECENT_DELETE_TTL_MS = 240_000;
+/** 동시 추가 직후 pull preserve — `touchProjectUpdatedAt`·노드 `updated_at` 시차·push 지연 완충 */
+const CLOUD_MERGE_RECENT_ADD_TTL_MS = 90_000;
+/** persist 배치에서 node.updated_at ≤ project.updated_at(ms) 허용 — 동일 persist 내 T1/T2 시차 */
+const COLLAB_PRESERVE_META_SLACK_MS = 5_000;
 /** 새로고침·재접속 후에도 잠시 유지 — 만료 후 자동 정리 */
 const CLOUD_MERGE_SUPPRESSED_DELETES_KEY = 'plannode_cloud_merge_suppressed_deletes_v1';
 const CLOUD_MERGE_DISK_TTL_MS = 48 * 60 * 60 * 1000;
@@ -149,6 +154,7 @@ const CLOUD_MERGE_DISK_MAX_IDS_PER_PROJECT = 120;
 
 type RecentDelMergeBucket = { ids: Set<string>; until: number };
 const recentlyDeletedNodeIdsForCloudMerge = new Map<string, RecentDelMergeBucket>();
+const recentlyAddedNodeIdsForCloudMerge = new Map<string, RecentDelMergeBucket>();
 
 type DiskSuppressedDeletes = Record<string, Record<string, number>>;
 
@@ -306,6 +312,146 @@ export function registerRecentlyDeletedNodeIdsForCloudMerge(projectId: string, n
   const ids = new Set<string>([...(prev?.ids ?? []), ...nodeIds]);
   recentlyDeletedNodeIdsForCloudMerge.set(projectId, { ids, until });
   appendDiskSuppressedDeletes(projectId, nodeIds);
+}
+
+function pruneExpiredRecentAddsForMerge(now: number): void {
+  for (const [pid, b] of recentlyAddedNodeIdsForCloudMerge) {
+    if (now > b.until) recentlyAddedNodeIdsForCloudMerge.delete(pid);
+  }
+}
+
+/** 파일럿 addChild·persist 직후 id — pull 병합 preserve 보강(동시 추가) */
+export function registerRecentlyAddedNodeIdsForCloudMerge(projectId: string, nodeIds: string[]): void {
+  if (typeof window === 'undefined' || !projectId || !nodeIds.length) return;
+  const now = Date.now();
+  pruneExpiredRecentAddsForMerge(now);
+  const until = now + CLOUD_MERGE_RECENT_ADD_TTL_MS;
+  const prev = recentlyAddedNodeIdsForCloudMerge.get(projectId);
+  const ids = new Set<string>([...(prev?.ids ?? []), ...nodeIds]);
+  recentlyAddedNodeIdsForCloudMerge.set(projectId, { ids, until });
+}
+
+export function recentAddIdsForCloudMerge(projectId: string | null | undefined): Set<string> {
+  if (!projectId) return new Set();
+  const now = Date.now();
+  pruneExpiredRecentAddsForMerge(now);
+  const b = recentlyAddedNodeIdsForCloudMerge.get(projectId);
+  if (!b || now > b.until) return new Set();
+  return new Set(b.ids);
+}
+
+/** pull·push 병합 직후 recent-add id가 빠졌으면 pre-merge 스냅에서 복원 */
+export function unionCollabPreserveLocalNodes(
+  projectId: string,
+  preMergeLocal: Node[],
+  merged: Node[]
+): Node[] {
+  const preserveIds = recentAddIdsForCloudMerge(projectId);
+  if (!preserveIds.size) return merged;
+  const mergedIds = new Set(merged.map((n) => n.id));
+  const preById = new Map(preMergeLocal.map((n) => [n.id, n]));
+  const extra: Node[] = [];
+  for (const id of preserveIds) {
+    if (!mergedIds.has(id) && preById.has(id)) {
+      extra.push(preById.get(id)!);
+      mergedIds.add(id);
+    }
+  }
+  return extra.length ? [...merged, ...extra] : merged;
+}
+
+/**
+ * 공유 슬라이스 **push** 전용 병합 — pull과 달리 `remoteProjectMetaNewer` prune 분기를 쓰지 않는다.
+ * 서버 `p_prune_missing`(incoming 메타가 더 새로울 때 payload에 없는 id 삭제)과 맞물릴 때
+ * 상대가 먼저 올린 노드 id가 payload에서 빠지면 **DB에서 지워지는** 회귀를 막는다.
+ */
+export function mergeNodesForCollabPush(
+  localNodes: Node[],
+  ownerNodes: Node[],
+  projectId: string
+): Node[] {
+  const merged = mergeNodeListsForCloud(localNodes, ownerNodes, false, projectId);
+  return unionCollabPreserveLocalNodes(projectId, localNodes, merged);
+}
+
+/** push payload가 소유자 id 전체를 포함할 때만 프로젝트 `updated_at`을 로컬 쪽으로 올림(prune 방지) */
+export function collabPushProjectMetaAvoidingServerPrune(
+  localProj: Project,
+  ownerProj: Project | undefined,
+  pushNodes: Node[],
+  ownerNodes: Node[]
+): Project {
+  if (!ownerProj) return localProj;
+  const ownerIds = new Set(ownerNodes.map((n) => n.id));
+  const pushIds = new Set(pushNodes.map((n) => n.id));
+  for (const id of ownerIds) {
+    if (!pushIds.has(id)) {
+      return { ...localProj, updated_at: String(ownerProj.updated_at || localProj.updated_at || '') };
+    }
+  }
+  return localProj;
+}
+
+/** pull이 recent-add를 store·LS에서 지운 뒤 push gather 전 복원 */
+export function reinjectCollabPreservedNodesAfterPullMerge(
+  projectId: string,
+  preMergeLocal: Node[]
+): boolean {
+  if (typeof window === 'undefined') return false;
+  const preserveIds = recentAddIdsForCloudMerge(projectId);
+  if (!preserveIds.size) return false;
+  const cur = loadLocalNodesForCollabMerge(projectId);
+  const curIds = new Set(cur.map((n) => n.id));
+  const preById = new Map(preMergeLocal.map((n) => [n.id, n]));
+  const missing: Node[] = [];
+  for (const id of preserveIds) {
+    if (!curIds.has(id) && preById.has(id)) missing.push(preById.get(id)!);
+  }
+  if (!missing.length) return false;
+  const next = [...cur, ...missing];
+  try {
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(next));
+  } catch {
+    return false;
+  }
+  const open = get(currentProject);
+  if (open?.id === projectId) {
+    nodes.set(next);
+  }
+  return true;
+}
+
+/** 공유 슬라이스 pull·push 입력 — 열린 프로젝트는 스토어+localStorage id 단위 LWW */
+export function loadLocalNodesForCollabMerge(projectId: string): Node[] {
+  const fromLs = loadProjectNodesFromLocalStorage(projectId);
+  const curOpen = get(currentProject);
+  if (curOpen?.id !== projectId) return fromLs;
+  const fromStore = get(nodes);
+  if (!fromStore.length) return fromLs;
+  const byId = new Map<string, Node>();
+  for (const n of fromLs) byId.set(n.id, n);
+  for (const n of fromStore) {
+    const prev = byId.get(n.id);
+    if (!prev || parseTs(n.updated_at) >= parseTs(prev.updated_at)) {
+      byId.set(n.id, n);
+    }
+  }
+  const ordered: Node[] = [];
+  const seen = new Set<string>();
+  for (const n of fromStore) {
+    const v = byId.get(n.id);
+    if (v && !seen.has(v.id)) {
+      ordered.push(v);
+      seen.add(v.id);
+    }
+  }
+  for (const n of fromLs) {
+    if (!seen.has(n.id)) {
+      ordered.push(byId.get(n.id) ?? n);
+      seen.add(n.id);
+    }
+  }
+  return ordered;
 }
 
 function recentDeleteIdsForCloudMerge(projectId: string | null | undefined): Set<string> {
@@ -680,9 +826,9 @@ export function createProject(projectData: Omit<Project, 'id' | 'created_at' | '
 }
 
 /** 노드·캔버스 변경 시 프로젝트 `updated_at`만 갱신 — 클라우드 LWW 동기화용 */
-export function touchProjectUpdatedAt(projectId: string): void {
+export function touchProjectUpdatedAt(projectId: string, iso?: string): void {
   if (typeof window === 'undefined') return;
-  const now = new Date().toISOString();
+  const now = iso ?? new Date().toISOString();
   projects.update((plist) => {
     const next = plist.map((p) => (p.id === projectId ? { ...p, updated_at: now } : p));
     try {
@@ -890,8 +1036,15 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
   const prevIds = new Set(prevSnap.map((n) => n.id));
   const nextIds = new Set(list.map((n) => n.id));
   const removed = prevSameProject ? [...prevIds].filter((id) => !nextIds.has(id)) : [];
+  const added = prevSameProject ? [...nextIds].filter((id) => !prevIds.has(id)) : [];
   if (removed.length) {
     registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
+  }
+  if (added.length) {
+    registerRecentlyAddedNodeIdsForCloudMerge(projectId, added);
+  } else {
+    const keep = recentAddIdsForCloudMerge(projectId);
+    if (keep.size) registerRecentlyAddedNodeIdsForCloudMerge(projectId, [...keep]);
   }
   try {
     localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
@@ -904,8 +1057,109 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
   } finally {
     nodesSetFromPilotPersist = false;
   }
-  touchProjectUpdatedAt(projectId);
+  let touchIso = new Date().toISOString();
+  if (list.length) {
+    let maxTs = 0;
+    for (const n of list) {
+      const t = Date.parse(String(n.updated_at ?? ''));
+      if (Number.isFinite(t) && t > maxTs) maxTs = t;
+    }
+    if (maxTs > 0) touchIso = new Date(maxTs).toISOString();
+  }
+  touchProjectUpdatedAt(projectId, touchIso);
   schedulePersistNodeSnapshotAfterPilot(projectId);
+}
+
+function collectSubtreeNodeIds(nodes: Node[], rootId: string): string[] {
+  const ids: string[] = [];
+  const queue = [rootId];
+  const seen = new Set<string>();
+  while (queue.length) {
+    const cur = queue.shift()!;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    ids.push(cur);
+    for (const n of nodes) {
+      if (n.parent_id === cur && n.id && !seen.has(n.id)) {
+        queue.push(n.id);
+      }
+    }
+  }
+  return ids;
+}
+
+/** EPIC E — 서버·pull ops를 로컬 Node[]에 순차 replay */
+export function replayStructureOpsOnNodes(
+  base: Node[],
+  ops: StructureOpPayload[],
+  projectId: string
+): Node[] {
+  let list = base.map((n) => ({ ...n, project_id: n.project_id ?? projectId }));
+  const now = new Date().toISOString();
+
+  for (const op of ops) {
+    if (op.type === 'add_node') {
+      const { node } = op;
+      const existing = list.find((n) => n.id === node.id);
+      const row: Node = {
+        id: node.id,
+        project_id: projectId,
+        parent_id: node.parent_id,
+        name: node.name ?? '',
+        description: node.description ?? '',
+        node_type: node.node_type ?? 'detail',
+        num: node.num ?? '',
+        mx: node.mx,
+        my: node.my,
+        created_at: existing?.created_at ?? now,
+        updated_at: now
+      };
+      if (existing) {
+        list = list.map((n) => (n.id === node.id ? { ...n, ...row } : n));
+      } else {
+        list = [...list, row];
+      }
+      continue;
+    }
+    if (op.type === 'update_node') {
+      const { node } = op;
+      const existing = list.find((n) => n.id === node.id);
+      if (!existing) continue;
+      const patch: Partial<Node> = { updated_at: node.updated_at ?? now };
+      if (node.name != null) patch.name = node.name;
+      if (node.description != null) patch.description = node.description;
+      if (node.parent_id != null) patch.parent_id = node.parent_id;
+      if (node.node_type != null) patch.node_type = node.node_type;
+      if (node.num != null) patch.num = node.num;
+      if (node.mx !== undefined) patch.mx = node.mx;
+      if (node.my !== undefined) patch.my = node.my;
+      list = list.map((n) => (n.id === node.id ? { ...n, ...patch } : n));
+      continue;
+    }
+    if (op.type === 'move_node') {
+      const existing = list.find((n) => n.id === op.node_id);
+      if (!existing) continue;
+      list = list.map((n) =>
+        n.id === op.node_id
+          ? {
+              ...n,
+              parent_id: op.parent_id,
+              mx: op.mx,
+              my: op.my,
+              ...(op.num != null ? { num: op.num } : {}),
+              updated_at: now
+            }
+          : n
+      );
+      continue;
+    }
+    if (op.type === 'delete_node') {
+      const removeIds = new Set(collectSubtreeNodeIds(list, op.node_id));
+      list = list.filter((n) => !removeIds.has(n.id));
+      continue;
+    }
+  }
+  return list;
 }
 
 /**
@@ -929,14 +1183,31 @@ export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[
   if (removed.length) {
     registerRecentlyDeletedNodeIdsForCloudMerge(projectId, removed);
   }
+  const now = new Date().toISOString();
+  const parseNodeTs = (iso: string | undefined): number => {
+    const t = Date.parse(String(iso ?? ''));
+    return Number.isFinite(t) ? t : 0;
+  };
+  const projMetaTs = parseNodeTs(get(projects).find((p) => p.id === projectId)?.updated_at);
+  /** structure 수신 id — 이후 pull preserve(nt >= lMeta) 정합 · touchProject/dirty 없음 */
+  const normalized = list.map((n) => {
+    if (!prevIds.has(n.id)) {
+      return { ...n, updated_at: now };
+    }
+    const nt = parseNodeTs(n.updated_at);
+    if (projMetaTs > 0 && nt < projMetaTs) {
+      return { ...n, updated_at: now };
+    }
+    return n;
+  });
   try {
-    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(list));
+    localStorage.setItem(NODES_KEY_PREFIX + projectId, JSON.stringify(normalized));
   } catch (e) {
     console.error('Failed to save nodes (remote structure):', e);
   }
   nodesSetFromPilotPersist = true;
   try {
-    nodes.set(list);
+    nodes.set(normalized);
   } finally {
     nodesSetFromPilotPersist = false;
   }
@@ -1314,17 +1585,7 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
   const plist = get(projects);
   const nodesByProject: Record<string, Node[]> = {};
   for (const p of plist) {
-    const raw = localStorage.getItem(NODES_KEY_PREFIX + p.id);
-    if (raw) {
-      try {
-        const arr = JSON.parse(raw) as unknown;
-        nodesByProject[p.id] = Array.isArray(arr) ? (arr as Node[]) : [];
-      } catch {
-        nodesByProject[p.id] = [];
-      }
-    } else {
-      nodesByProject[p.id] = [];
-    }
+    nodesByProject[p.id] = loadLocalNodesForCollabMerge(p.id);
   }
 
   /** 최근 N개(50개) 스냅샷 수집 — 최신순 정렬 */
@@ -1679,12 +1940,15 @@ export function mergeNodeListsForCloudByProjectMeta(
     list.filter((n) => remoteIds.has(n.id) || parseTs(n.updated_at) > rTime);
 
   if (rTime > lTime) {
+    const recentAdds = recentAddIdsForCloudMerge(projectId);
+    const metaSlackFloor = lTime - COLLAB_PRESERVE_META_SLACK_MS;
     const preserve = new Set(
       localNodes
         .filter((n) => {
           if (remoteIds.has(n.id)) return false;
+          if (recentAdds.has(n.id)) return true;
           const nt = parseTs(n.updated_at);
-          return nt > rTime || nt >= lTime;
+          return nt > rTime || nt >= lTime || nt >= metaSlackFloor;
         })
         .map((n) => n.id)
     );
