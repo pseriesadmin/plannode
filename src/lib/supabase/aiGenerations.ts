@@ -18,9 +18,9 @@ export const DEFAULT_SERVER_AI_MODEL = ANTHROPIC_MODEL_SONNET;
  * DB `node_id` 컬럼은 `plan_nodes.id` **UUID** 또는 null(L5 전체 트리)만.
  */
 export type AiGenerationContextSnapshot = {
-  /** `ai-tab` | `l5-ia-export` 등 */
+  /** `ai-tab` | `l5-ia-export` | `prd-tab` 등 */
   source?: string;
-  /** AI 탭 5버튼 키 (`prd` · `wireframe` …) — `source: ai-tab`일 때 */
+  /** AI 탭 5버튼 키 (`prd` · `wireframe` …) 또는 PRD 탭 섹션 (`s1`~`s5`) */
   trigger?: string;
   /** EPIC P2-B — `serializeToPrompt` 경로 사용 */
   layer1?: boolean;
