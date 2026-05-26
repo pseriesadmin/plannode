@@ -30,7 +30,10 @@ import {
   runGenerationPipeline
 } from '$lib/ai/generationPipeline';
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
-import { registerRecentlyDeletedNodeIdsForCloudMerge } from '$lib/stores/projects';
+import {
+  registerRecentlyAddedNodeIdsForCloudMerge,
+  registerRecentlyDeletedNodeIdsForCloudMerge
+} from '$lib/stores/projects';
 import {
   subscribeProjectTextOps,
   unsubscribeProjectTextOps,
@@ -1181,6 +1184,7 @@ function canDropOnParent(newParentId) {
       if (!nid) return false;
       if (subtreeIdSet(nid).has(newParentId)) return false;
     }
+    if (relinkArm.copy) return true;
     return ids.some((nid) => {
       const m = find(nid);
       return !!(m && m.parent_id !== newParentId);
@@ -1354,9 +1358,11 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
   /** @type {string[]} */
   const idsToDim = [];
 
+  const isCopyRelink = !!relinkArm.copy;
+
   if (relinkArm.mode === 'single') {
     const relinkIds = relinkArm.nodeIds;
-    idsToDim.push(...relinkIds);
+    if (!isCopyRelink) idsToDim.push(...relinkIds);
     if (relinkIds.length > 1) {
       const sorted = relinkIds
         .map((id) => find(id))
@@ -1434,7 +1440,7 @@ function beginRelinkDragSession(pointerId, clientX, clientY) {
       minT = Math.min(minT, rect.top);
       anyRect = true;
     }
-    for (const k of kids) idsToDim.push(k.id);
+    if (!isCopyRelink) for (const k of kids) idsToDim.push(k.id);
     if (anyRect && minL !== Infinity) {
       grabDx = clientX - minL;
       grabDy = clientY - minT;
@@ -1559,6 +1565,28 @@ function armRelinkCards(nodeIds) {
   return true;
 }
 
+/** @param {string[]} nodeIds @returns {boolean} */
+function armRelinkCardsCopy(nodeIds) {
+  const ids = normalizeRelinkNodeIds(nodeIds);
+  if (!ids.length) {
+    toast('복사할 수 있는 노드가 없어 — 루트·JSON 전역 노드는 제외돼.');
+    return false;
+  }
+  clearRelinkArm();
+  clearRelinkHold();
+  relinkArm = { mode: 'single', nodeIds: ids, copy: true };
+  selId = ids[ids.length - 1];
+  maybeEmitNodeSelect();
+  relinkSuppressClick = true;
+  setTimeout(() => {
+    relinkSuppressClick = false;
+  }, 400);
+  toast('복사 붙이기 — 카드를 끌어 붙일 부모 노드 또는 + 근처에 맞춘 뒤 손을 떼 줘 · Esc 취소', {
+    persistRelink: true
+  });
+  return true;
+}
+
 function armRelinkCard(n) {
   if (isPlannodeJsonGlobalMirrorNode(n)) {
     toast('가져온 JSON 전역 노드는 여기서 부모를 바꿀 수 없어.');
@@ -1586,6 +1614,29 @@ function startMultiSelRelinkDragFromCard(e, n) {
   return true;
 }
 
+/** Alt/Option+드래그 — 선택 노드·하위 트리를 새 부모 아래에 복제(원본 유지) */
+function startCopyRelinkDragFromCard(e, n) {
+  if (!e.altKey || e.shiftKey) return false;
+  if (isPlannodeJsonGlobalMirrorNode(n)) {
+    toast('가져온 JSON 전역 노드는 여기서 복사할 수 없어.');
+    return true;
+  }
+  if (!n.parent_id) {
+    toast('루트 노드는 이 방식으로 복사할 수 없어.');
+    return true;
+  }
+  multiSel.clear();
+  selId = n.id;
+  updateSelHighlightOnly();
+  try {
+    e.preventDefault();
+  } catch (_) {}
+  clearRelinkHold();
+  if (!armRelinkCardsCopy([n.id])) return true;
+  queueMicrotask(() => beginRelinkDragSession(e.pointerId, e.clientX, e.clientY));
+  return true;
+}
+
 /** `+` 1.5초: 앵커 노드는 그대로 두고 직속 하위만 새 부모로 */
 function armRelinkChildrenGroup(anchorId) {
   const root = find(anchorId);
@@ -1609,8 +1660,104 @@ function armRelinkChildrenGroup(anchorId) {
   });
 }
 
+function cloneNodeFieldsForCopy(source) {
+  let metadata = { badges: { dev: [], ux: [], prj: [] } };
+  try {
+    metadata = source.metadata
+      ? JSON.parse(JSON.stringify(source.metadata))
+      : { badges: { dev: [], ux: [], prj: [] } };
+  } catch (_) {}
+  const badges = Array.isArray(source.badges) ? [...source.badges] : [];
+  return {
+    name: source.name ?? '',
+    description: source.description ?? '',
+    node_type: source.node_type ?? 'detail',
+    num: '',
+    badges,
+    metadata,
+    mx: null,
+    my: null
+  };
+}
+
+/** @param {string[]} sourceRootIds @param {string} newParentId */
+function cloneSubtreesForCopy(sourceRootIds, newParentId) {
+  const idMap = new Map();
+  /** @type {object[]} */
+  const newNodes = [];
+  /** @type {string[]} */
+  const allNewIds = [];
+
+  for (const rootId of sourceRootIds) {
+    const subtreeIds = collectNodeSubtreeIds(rootId);
+    for (const oldId of subtreeIds) {
+      const source = find(oldId);
+      if (!source) continue;
+      const newId = 'n' + ++nc;
+      idMap.set(oldId, newId);
+      allNewIds.push(newId);
+      const parentId = oldId === rootId ? newParentId : idMap.get(source.parent_id);
+      newNodes.push({
+        id: newId,
+        parent_id: parentId,
+        ...cloneNodeFieldsForCopy(source)
+      });
+    }
+  }
+
+  return { newNodes, allNewIds };
+}
+
+function applyRelinkCopyDrop(newParentId) {
+  if (!relinkArm?.copy || relinkArm.mode !== 'single') return;
+  for (const nid of relinkArm.nodeIds) {
+    const src = find(nid);
+    if (isPlannodeJsonGlobalMirrorNode(src)) {
+      toast('가져온 JSON 전역 노드는 복사할 수 없어.');
+      clearRelinkArm();
+      render();
+      return;
+    }
+  }
+  if (!canDropOnParent(newParentId)) {
+    toast('여기엔 붙일 수 없어');
+    clearRelinkArm();
+    render();
+    return;
+  }
+  pushUndoSnapshot();
+  const { newNodes, allNewIds } = cloneSubtreesForCopy(relinkArm.nodeIds, newParentId);
+  if (!newNodes.length) {
+    clearRelinkArm();
+    render();
+    return;
+  }
+  nodes = [...nodes, ...newNodes];
+  syncNcFromNodes();
+  reorderFlatSiblingsByVisualY(newParentId);
+  clearSiblingManualLayout(newParentId);
+  applyHierarchyNumsFromTreeOrder();
+  nodes = [...nodes];
+  if (curP?.id) registerRecentlyAddedNodeIdsForCloudMerge(curP.id, allNewIds);
+  const copyRootCount = relinkArm.nodeIds.length;
+  clearRelinkArm();
+  render();
+  flushPersistNow();
+  emitAutoCloudSync('node-copy-relink');
+  for (const nn of newNodes) sendAddNodeStructureOp(nn);
+  toast(
+    copyRootCount > 1
+      ? `노드 ${copyRootCount}개 가지를 복사해 붙였어 · 순서·분류번호 자동 반영됨`
+      : '노드 가지를 복사해 붙였어 · 순서·분류번호 자동 반영됨'
+  );
+}
+
 function applyRelinkDrop(newParentId) {
   if (!relinkArm) return;
+  if (relinkArm.copy) {
+    applyRelinkCopyDrop(newParentId);
+    return;
+  }
   if (relinkArm.mode === 'single') {
     for (const nid of relinkArm.nodeIds) {
       const moving0 = find(nid);
@@ -3029,6 +3176,7 @@ function render() {
         sDrag(e, n, true, { x: e.clientX, y: e.clientY });
         return;
       }
+      if (startCopyRelinkDragFromCard(e, n)) return;
       if (startMultiSelRelinkDragFromCard(e, n)) return;
       if (e.target.closest('.nn-line')) {
         selId = n.id;
