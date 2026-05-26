@@ -212,15 +212,17 @@ const COL_W = 244,
   TOPDOWN_DEPTH_STRIP_W = 44,
   /** 하위분포: 뎁스 스트립 오른쪽 ~ 트리 열 사이 간격 */
   TOPDOWN_STRIP_NODE_GAP = 48,
+  /** 하위분포: 형제 노드 좌우 여백(px) — 기존 18px의 2배 */
+  TOPDOWN_SIBLING_COL_GAP = 36,
   /** 우측분포: 열(가로) 간격 배수 — 카드 폭·컬럼 라벨과 정합(하위분포 대비 체감 +30%) */
   RIGHT_LAYOUT_GAP_MULT = 1.95,
-  /** 우측분포: 행 간격만 확대 — ROW_H×1.5만으로는 카드 실높이(설명·배지) 대비 수직 겹침 발생(NOW-79~80) · 열과 동일 +30% */
-  RIGHT_ROW_GAP_MULT = 2.925;
+  /** 우측분포: 형제 행 피치 — NOW-79~80(2.925) 대비 절반 · bld row×피치 단일 Y(실서버 UX) */
+  RIGHT_ROW_GAP_MULT = 2.925 / 2;
 
 function layoutColW() {
   if (nodeMapLayoutMode === 'right') return COL_W * RIGHT_LAYOUT_GAP_MULT;
-  /* 하위분포: 열 간격이 카드 폭보다 작으면 형제 열이 수평으로 겹침 */
-  return Math.max(COL_W, NODE_CARD_W_CHILD + 18);
+  /* 하위분포: 형제 열 간격 — 카드 폭 + TOPDOWN_SIBLING_COL_GAP */
+  return Math.max(COL_W, NODE_CARD_W_CHILD + TOPDOWN_SIBLING_COL_GAP);
 }
 function layoutRowH() {
   if (nodeMapLayoutMode === 'topdown') return ROW_H * TOPDOWN_ROW_GAP_MULT;
@@ -507,6 +509,22 @@ function teardownStructureOps() {
 function collectNodeSubtreeIds(rootId) {
   const walk = (nid) => [nid, ...nodes.filter((x) => x.parent_id === nid).flatMap((c) => walk(c.id))];
   return walk(rootId);
+}
+
+/** 드래그 시각용 — 펼쳐 보이는 하위만(접힌 분기·숨김 노드 제외) */
+function collectShownSubtreeIds(rootId) {
+  const out = [];
+  const visit = (nid) => {
+    const node = find(nid);
+    if (!node || !isTreeNodeShown(node)) return;
+    out.push(nid);
+    if (collapsedNodeIds.has(nid)) return;
+    for (const c of nodes) {
+      if (c.parent_id === nid) visit(c.id);
+    }
+  };
+  visit(rootId);
+  return out;
 }
 
 function applyRemoteAddNodeFromStructureOp(payload) {
@@ -1663,7 +1681,7 @@ function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
         relinkHoldCleanup = null;
       }
       if (!fromTitle) {
-        sDrag(ev, n, false);
+        sDrag(ev, n, false, { x: cx, y: cy });
       }
     }
   };
@@ -2514,12 +2532,44 @@ function downloadPlannodeJson() {
   emitAutoCloudSync('json-export');
 }
 
+/** bld/ap 전 — 배지·설명 기반 카드 높이 추정(하위분포 layoutColW=카드+gap과 대칭) */
+function estimateNodeCardHeightPx(n) {
+  if (!n) return NODE_H;
+  const cardW = getDepth(n.id) === 0 ? NODE_CARD_W_ROOT : NODE_CARD_W_CHILD;
+  let h = 32 + 34 + 28;
+  const desc = String(n.description ?? '').trim();
+  if (desc) {
+    const lines = Math.min(2, Math.max(1, Math.ceil(desc.length / 42)));
+    h += 8 + lines * 14;
+  }
+  const _descEmpty = !desc;
+  const badges = flattenBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: !_descEmpty }));
+  if (badges.length) {
+    h += 20;
+    const innerW = cardW - 26;
+    const chipW = 46;
+    const perRow = Math.max(1, Math.floor((innerW + 4) / (chipW + 4)));
+    const rows = Math.min(2, Math.ceil(badges.length / perRow));
+    h += rows * 18 + Math.max(0, rows - 1) * 3;
+  }
+  return Math.max(NODE_H, h);
+}
+
+/** 우측분포 bld — (추정 높이 + TOPDOWN_SIBLING_COL_GAP) / 행 피치, 최소 1행 */
+function rightLayoutRowSpanForNode(n) {
+  const pitch = ROW_H * RIGHT_ROW_GAP_MULT;
+  return Math.max(1, (estimateNodeCardHeightPx(n) + TOPDOWN_SIBLING_COL_GAP) / pitch);
+}
+
 function bld(nid, col, r) {
   const kids = collapsedNodeIds.has(nid) ? [] : nodes.filter((n) => n.parent_id === nid);
   if (!kids.length) {
     // 리프 노드: col, row 바로 저장
     lm[nid] = { col, row: r };
-    return r + 1;
+    const node = find(nid);
+    const rowSpan =
+      nodeMapLayoutMode === 'right' && node ? rightLayoutRowSpanForNode(node) : 1;
+    return r + rowSpan;
   }
   // 부모 노드: 자식들을 col+1에 배치 (더 오른쪽)
   let row = r;
@@ -2681,7 +2731,7 @@ function nodeCardHeightPx(n) {
   if (!n) return NODE_H;
   const el = document.getElementById('nd-' + n.id);
   const h = el ? el.offsetHeight : 0;
-  return h > 28 ? h : NODE_H;
+  return h > 28 ? h : estimateNodeCardHeightPx(n);
 }
 function nodeTopY(n) {
   return gp(n).y;
@@ -2740,6 +2790,25 @@ function maybeEmitNodeSelect() {
       window.dispatchEvent(new CustomEvent('plannode-node-select', { detail: { nodeId: selId } }));
     }
   } catch (_) {}
+}
+
+/** 드래그 직전 선택 갱신 — 전체 render() 없이 .sel/.msel만 토글(대량 트리 멈칫 방지) */
+function updateSelHighlightOnly() {
+  try {
+    CV?.querySelectorAll('.nd.sel').forEach((el) => el.classList.remove('sel'));
+    CV?.querySelectorAll('.nd.msel').forEach((el) => el.classList.remove('msel'));
+  } catch (_) {}
+  if (selId) {
+    const el = document.getElementById('nd-' + selId);
+    if (el) el.classList.add('sel');
+  }
+  if (multiSel && multiSel.size) {
+    for (const id of multiSel) {
+      const el = document.getElementById('nd-' + id);
+      if (el) el.classList.add('msel');
+    }
+  }
+  maybeEmitNodeSelect();
 }
 
 function render() {
@@ -2903,11 +2972,11 @@ function render() {
       if (e.shiftKey) {
         multiSel.add(n.id);
         selId = n.id;
-        render();
+        updateSelHighlightOnly();
         try {
           e.preventDefault();
         } catch (_) {}
-        sDrag(e, n, true);
+        sDrag(e, n, true, { x: e.clientX, y: e.clientY });
         return;
       }
       if (startMultiSelRelinkDragFromCard(e, n)) return;
@@ -2919,7 +2988,7 @@ function render() {
       }
       multiSel.clear();
       selId = n.id;
-      render();
+      updateSelHighlightOnly();
       try {
         e.preventDefault();
       } catch (_) {}
@@ -3178,36 +3247,78 @@ function drawEdges() {
   });
 }
 
-function sDrag(e, n, isShiftPressed) {
-  // Shift 누르고 있을 때만 multiSel 사용 (그룹 드래그)
-  // 아니면 현재 노드만 (단일 드래그)
-  const ids = isShiftPressed && multiSel && multiSel.size ? Array.from(multiSel) : [n.id];
-  if (ids.some((id) => isPlannodeJsonGlobalMirrorNode(find(id)))) {
+function sDrag(e, n, isShiftPressed, anchorClient) {
+  // Shift: multiSel 루트만 persist · 각 루트의 펼쳐진 하위는 같이 이동(시각)
+  const persistIds =
+    isShiftPressed && multiSel && multiSel.size ? Array.from(multiSel) : [n.id];
+  if (persistIds.some((id) => isPlannodeJsonGlobalMirrorNode(find(id)))) {
     toast('가져온 JSON 전역 노드는 드래그로 옮길 수 없어.');
     return;
   }
+  const visualIds = [];
+  const visualSeen = new Set();
+  for (const rid of persistIds) {
+    for (const sid of collectShownSubtreeIds(rid)) {
+      if (!visualSeen.has(sid)) {
+        visualSeen.add(sid);
+        visualIds.push(sid);
+      }
+    }
+  }
   pushUndoSnapshot();
   const start = new Map();
-  for (const id of ids) {
+  const hadManual = new Map();
+  for (const id of visualIds) {
     const node = find(id);
-    if (node) start.set(id, gp(node));
+    if (!node) continue;
+    start.set(id, gp(node));
+    hadManual.set(id, node.mx != null && node.my != null);
   }
   if (!start.has(n.id)) return;
   const p0 = start.get(n.id);
   const dragPid = e.pointerId;
-  const startG = cwClientToGraph(e.clientX, e.clientY);
+  const anchorX = anchorClient != null && Number.isFinite(anchorClient.x) ? anchorClient.x : e.clientX;
+  const anchorY = anchorClient != null && Number.isFinite(anchorClient.y) ? anchorClient.y : e.clientY;
+  const startG = cwClientToGraph(anchorX, anchorY);
   const sx = startG.gx - p0.x;
   const sy = startG.gy - p0.y;
-  const excl = new Set(ids);
-  const mv = (ev) => {
-    if (ev.pointerId !== dragPid) return;
-    const g = cwClientToGraph(ev.clientX, ev.clientY);
-    const rawX = g.gx - sx;
-    const rawY = g.gy - sy;
+  const excl = new Set(visualIds);
+  const dragWrappers = [];
+  for (const id of visualIds) {
+    const w = document.getElementById('nw-' + id);
+    const st = start.get(id);
+    if (w && st != null) {
+      dragWrappers.push(w);
+      w.style.zIndex = '1000';
+      w.style.willChange = 'transform';
+      w.style.left = st.x + 'px';
+      w.style.top = st.y + 'px';
+      w.style.transform = 'translate3d(0,0,0)';
+    }
+  }
+  const captureEl =
+    e.target && e.target instanceof Element && typeof e.target.setPointerCapture === 'function'
+      ? e.target
+      : document.body;
+  try {
+    captureEl.setPointerCapture(dragPid);
+  } catch (_) {}
+  let dragRaf = null;
+  let edgesRaf = null;
+  let pendingEv = null;
+  let lastClient = { x: e.clientX, y: e.clientY };
+  const paintEdgesDeferred = () => {
+    if (edgesRaf != null) return;
+    edgesRaf = requestAnimationFrame(() => {
+      edgesRaf = null;
+      drawEdges();
+    });
+  };
+  const applyDragPositions = (rawX, rawY) => {
     const { x: snapX, y: snapY } = snapNodePosition(n, rawX, rawY, excl);
     const ddx = snapX - p0.x;
     const ddy = snapY - p0.y;
-    for (const id of ids) {
+    for (const id of visualIds) {
       const node = find(id);
       const st = start.get(id);
       if (!node || st == null) continue;
@@ -3215,25 +3326,93 @@ function sDrag(e, n, isShiftPressed) {
       node.my = st.y + ddy;
       const w = document.getElementById('nw-' + id);
       if (w) {
+        w.style.transform = `translate3d(${ddx}px,${ddy}px,0)`;
+      }
+    }
+    drawSmartGuides(collectAlignmentGuides(n, snapX, snapY, excl));
+    paintEdgesDeferred();
+  };
+  const flushDragFrame = () => {
+    dragRaf = null;
+    const ev = pendingEv;
+    pendingEv = null;
+    if (!ev) return;
+    lastClient.x = ev.clientX;
+    lastClient.y = ev.clientY;
+    const g = cwClientToGraph(ev.clientX, ev.clientY);
+    applyDragPositions(g.gx - sx, g.gy - sy);
+  };
+  const cleanupDragVisual = () => {
+    for (const id of visualIds) {
+      const node = find(id);
+      const w = document.getElementById('nw-' + id);
+      if (!w) continue;
+      if (node && node.mx != null && node.my != null) {
         w.style.left = node.mx + 'px';
         w.style.top = node.my + 'px';
       }
+      w.style.transform = '';
     }
-    const guides = collectAlignmentGuides(n, snapX, snapY, excl);
-    drawSmartGuides(guides);
-    drawEdges();
-    scheduleUpdMM();
+    for (const w of dragWrappers) {
+      w.style.zIndex = '';
+      w.style.willChange = '';
+    }
+    try {
+      if (captureEl.hasPointerCapture && captureEl.hasPointerCapture(dragPid)) {
+        captureEl.releasePointerCapture(dragPid);
+      }
+    } catch (_) {}
+  };
+  const commitDragCoords = (ddx, ddy) => {
+    const persistSet = new Set(persistIds);
+    for (const id of visualIds) {
+      const node = find(id);
+      const st = start.get(id);
+      if (!node || st == null) continue;
+      if (persistSet.has(id) || hadManual.get(id)) {
+        node.mx = st.x + ddx;
+        node.my = st.y + ddy;
+      } else {
+        node.mx = null;
+        node.my = null;
+      }
+    }
+  };
+  const mv = (ev) => {
+    if (ev.pointerId !== dragPid) return;
+    try {
+      ev.preventDefault();
+    } catch (_) {}
+    pendingEv = ev;
+    if (dragRaf == null) dragRaf = requestAnimationFrame(flushDragFrame);
   };
   const up = (ev) => {
     if (ev && 'pointerId' in ev && ev.pointerId !== dragPid) return;
+    if (dragRaf != null) cancelAnimationFrame(dragRaf);
+    dragRaf = null;
+    if (pendingEv) flushDragFrame();
+    else if (ev && 'clientX' in ev) {
+      lastClient.x = ev.clientX;
+      lastClient.y = ev.clientY;
+    }
     clearSmartGuides();
     document.removeEventListener('pointermove', mv);
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);
-    const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(ids);
+    const g = cwClientToGraph(lastClient.x, lastClient.y);
+    const rawX = g.gx - sx;
+    const rawY = g.gy - sy;
+    const { x: snapX, y: snapY } = snapNodePosition(n, rawX, rawY, excl);
+    commitDragCoords(snapX - p0.x, snapY - p0.y);
+    cleanupDragVisual();
+    if (edgesRaf != null) cancelAnimationFrame(edgesRaf);
+    edgesRaf = null;
+    drawEdges();
+    scheduleUpdMM();
+    const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(persistIds);
     render();
     flushPersistNow();
-    sendMoveNodeStructureOps(ids);
+    sendMoveNodeStructureOps(persistIds);
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
   };
   document.addEventListener('pointermove', mv);
