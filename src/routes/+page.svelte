@@ -5902,9 +5902,10 @@
     padding: 8px 4px 2px;
     gap: 6px;
   }
+  /* 위치(right/bottom)는 plannodePilot render() 인라인이 우선 — fallback만 여기 */
   :global(.pb2) {
     position: absolute;
-    right: -19px;
+    right: -10px;
     top: 50%;
     transform: translateY(-50%);
     width: 20px;
