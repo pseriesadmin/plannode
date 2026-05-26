@@ -204,9 +204,10 @@ const COL_W = 244,
   NODE_CARD_W_CHILD = 294,
   /** 하위분포: 깊이(행) 간격 — 부모~자식 간 수직 여유(간선 분기) */
   TOPDOWN_ROW_GAP_MULT = 2.42,
-  /** 하위분포 `.pb2` +버튼: 스타일과 동일 `bottom:-22`·높이 20 */
-  TOPDOWN_PB2_BELOW_NW = 22,
-  TOPDOWN_PB2_H = 20,
+  /** 하위분포: + 버튼 카드 하단 중앙 아웃라인 걸침 (`bottom`, px) */
+  TOPDOWN_PLUS_BOTTOM = -10,
+  /** 하위분포·우측분포: + ↔ 펼침 버튼 간격 */
+  BRANCH_BTN_GAP = 6,
   /** 하위분포 좌측 뎁스 스트립 폭 — 노드 카드와 수평 겹침 방지·라벨 여유 */
   TOPDOWN_DEPTH_STRIP_W = 44,
   /** 하위분포: 뎁스 스트립 오른쪽 ~ 트리 열 사이 간격 */
@@ -961,8 +962,14 @@ function isStrictDescendantOf(nid, ancId) {
   }
   return false;
 }
-/** 트리 접기 버튼 표시 크기(22px 대비 30% 축소). viewBox는 22 유지 */
-const NODE_COLLAPSE_BTN_PX = 22 * 0.7;
+/** 트리 접기·+ 버튼 표시 크기(동일 20px). viewBox는 22 유지 */
+const NODE_COLLAPSE_BTN_PX = 20;
+/** 하위분포: 펼침 버튼 `bottom` — + 아래 BRANCH_BTN_GAP 유지 */
+const TOPDOWN_COLLAPSE_BOTTOM = TOPDOWN_PLUS_BOTTOM - NODE_COLLAPSE_BTN_PX - BRANCH_BTN_GAP;
+/** 우측분포: + 버튼 카드 우측 중앙 아웃라인 걸침 (`right`, px) */
+const RIGHT_PLUS_OUTSET = -10;
+/** 우측분포: 펼침 버튼 `right` — + 바깥쪽 BRANCH_BTN_GAP 유지 */
+const RIGHT_COLLAPSE_OUTSET = RIGHT_PLUS_OUTSET - NODE_COLLAPSE_BTN_PX - BRANCH_BTN_GAP;
 /** 노드 카드·상세 모달 제목 입력 상한(한·영·숫자 공통 글자 수) */
 const NODE_TITLE_MAX_LEN = 50;
 /**
@@ -2685,9 +2692,15 @@ function nodeBottomY(n) {
   if (el && el.offsetHeight > 0) return top + el.offsetHeight;
   return top + 88;
 }
-/** 하위분포: `+`(pb2) 버튼 중심 Y — 간선은 카드 하단이 아니라 여기서 출발 */
-function nodeTopdownPlusCenterY(n) {
-  return nodeBottomY(n) + (TOPDOWN_PB2_BELOW_NW - TOPDOWN_PB2_H / 2);
+/** 하위분포: 펼침(자식 있음) 또는 +(자식 없음) 버튼 중심 Y — 간선 출발 */
+function nodeTopdownBranchAnchorY(n) {
+  const bottom = nodeHasAnyChild(n.id) ? TOPDOWN_COLLAPSE_BOTTOM : TOPDOWN_PLUS_BOTTOM;
+  return nodeBottomY(n) + (-bottom - NODE_COLLAPSE_BTN_PX / 2);
+}
+/** 우측분포: 펼침(자식 있음) 또는 +(자식 없음) 버튼 중심 X — 간선 출발 */
+function nodeRightBranchAnchorX(n, pp) {
+  const right = nodeHasAnyChild(n.id) ? RIGHT_COLLAPSE_OUTSET : RIGHT_PLUS_OUTSET;
+  return pp.x + nodeCardWidth(n) + (-right - NODE_COLLAPSE_BTN_PX / 2);
 }
 
 /** @type {string | null | undefined} */
@@ -2968,8 +2981,8 @@ function render() {
       cb.setAttribute(
         'style',
         nodeMapLayoutMode === 'topdown'
-          ? `position:absolute;left:50%;bottom:14px;transform:translateX(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:0;box-shadow:none;overflow:visible`
-          : `position:absolute;right:12px;top:50%;transform:translateY(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:0;box-shadow:none;overflow:visible`
+          ? `position:absolute;left:50%;bottom:${TOPDOWN_COLLAPSE_BOTTOM}px;top:auto;right:auto;transform:translateX(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:0;box-shadow:none;overflow:visible`
+          : `position:absolute;right:${RIGHT_COLLAPSE_OUTSET}px;top:50%;transform:translateY(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:0;box-shadow:none;overflow:visible`
       );
       cb.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -3013,8 +3026,8 @@ function render() {
       pb.setAttribute(
         'style',
         nodeMapLayoutMode === 'topdown'
-          ? `position:absolute;left:50%;bottom:-22px;top:auto;right:auto;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
-          : `position:absolute;right:-19px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+          ? `position:absolute;left:50%;bottom:${TOPDOWN_PLUS_BOTTOM}px;top:auto;right:auto;transform:translateX(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
+          : `position:absolute;right:${RIGHT_PLUS_OUTSET}px;top:50%;transform:translateY(-50%);width:${NODE_COLLAPSE_BTN_PX}px;height:${NODE_COLLAPSE_BTN_PX}px;border-radius:50%;border:none;background:${bc};color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,.2)`
       );
       pb.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
@@ -3131,7 +3144,7 @@ function drawEdges() {
         const pw = nodeCardWidth(n),
           cw = nodeCardWidth(c);
         const x1 = pp.x + pw / 2,
-          y1 = nodeTopdownPlusCenterY(n),
+          y1 = nodeTopdownBranchAnchorY(n),
           x2 = cp.x + cw / 2,
           y2top = nodeTopY(c),
           y2 = y2top - 20,
@@ -3144,8 +3157,7 @@ function drawEdges() {
         if (dyStart + dEnd > dist - 8) dEnd = Math.max(dist * 0.5, dist - dyStart - 8);
         pathD = `M${x1},${y1} C${cx1},${y1 + dyStart} ${x2},${y2 - dEnd} ${x2},${y2}`;
       } else {
-        const pw = nodeCardWidth(n);
-        const x1 = pp.x + pw,
+        const x1 = nodeRightBranchAnchorX(n, pp),
           y1 = nodeCenterY(n),
           x2raw = cp.x,
           x2 = x2raw - 12,
