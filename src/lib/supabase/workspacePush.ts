@@ -7,7 +7,11 @@ import {
 } from '$lib/supabase/sync';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { workspaceIsDirty, markCloudWorkspaceSyncing, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
-import { dedupeProjectsStoreByLatestUpdatedAt } from '$lib/stores/projects';
+import { dedupeProjectsStoreByLatestUpdatedAt, currentProject } from '$lib/stores/projects';
+import { authUser } from '$lib/stores/authSession';
+
+const CLOUD_FLUSH_MS_DEFAULT = 500;
+const CLOUD_FLUSH_MS_SHARED_COLLAB = 300;
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let bidirectionalBusy = false;
@@ -45,15 +49,24 @@ export async function flushCloudWorkspaceNow(reason: string): Promise<boolean> {
   return false;
 }
 
-/** 짧은 디바운스(탭 전환·연속 출력 등) */
-export function scheduleCloudFlush(reason: string, delayMs = 500): void {
+/** 짧은 디바운스(탭 전환·연속 출력 등). 공유 멤버 프로젝트는 300ms(T0-4). */
+export function scheduleCloudFlush(reason: string, delayMs?: number): void {
   if (!browser || !isSupabaseCloudConfigured()) return;
   if (!get(workspaceIsDirty)) return;
+  let ms = delayMs ?? CLOUD_FLUSH_MS_DEFAULT;
+  if (delayMs === undefined) {
+    const proj = get(currentProject);
+    const uid = get(authUser)?.id ?? null;
+    const src = proj?.cloud_workspace_source_user_id ?? null;
+    if (src && uid && src !== uid) {
+      ms = CLOUD_FLUSH_MS_SHARED_COLLAB;
+    }
+  }
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = window.setTimeout(() => {
     debounceTimer = null;
     void flushCloudWorkspaceNow(reason);
-  }, delayMs);
+  }, ms);
 }
 
 /**

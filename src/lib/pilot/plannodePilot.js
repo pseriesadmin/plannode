@@ -297,6 +297,7 @@ let onRemoteStructureStoreSync = null;
 let getAccessToken = null;
 /** EPIC C/D — Supabase auth uid (text·structure ops Broadcast) */
 let getCollabAuthUserId = null;
+let getCollabWorkspaceSourceUserId = null;
 let structureOpsApplyingRemote = false;
 let textOpsDescLastValue = '';
 let textOpsApplyingRemote = false;
@@ -307,6 +308,9 @@ let textOpsDescInputCleanup = null;
 let getPlanProjectId = null;
 /** @type {null | (() => any[])} 모달 저장 시 pull로만 갱신된 스토어 노드를 파일럿에 합침 */
 let getStoreNodesForCollabMerge = null;
+let shouldPreserveNodeOnCollabPrune = null;
+/** @type {null | (() => Promise<{ ok?: boolean; reason?: string } | void>)} 모달 저장 직전 save-barrier (Phase D) */
+let onBeforeModalPersist = null;
 let persistTimer = null;
 
 /** Undo·Redo: 노드 전체 스냅샷 스택. 각 스택 최대 UNDO_MAX개(메모리 한도) — 연속 Undo/Redo는 이 길이를 넘기지 않음 */
@@ -549,6 +553,7 @@ function applyRemoteAddNodeFromStructureOp(payload) {
       }
     ];
     syncNcFromNodes();
+    if (curP?.id) registerRecentlyAddedNodeIdsForCloudMerge(curP.id, [node.id]);
     render();
   } finally {
     structureOpsApplyingRemote = false;
@@ -625,31 +630,68 @@ function armStructureOpsForProject(projectId, userId) {
   void subscribeProjectStructureOps(projectId.trim(), userId.trim(), handleRemoteStructureOp);
 }
 
+function collabPersistOpts() {
+  if (!curP?.id) return undefined;
+  const src =
+    typeof getCollabWorkspaceSourceUserId === 'function'
+      ? getCollabWorkspaceSourceUserId()
+      : null;
+  return src ? { workspaceUserId: src } : undefined;
+}
+
 function sendAddNodeStructureOp(nn) {
   if (!curP?.id || !nn?.id) return;
   const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
   if (!collabUid) return;
   const pos = gp(nn);
-  sendProjectStructureOp(curP.id, {
-    type: 'add_node',
-    node: {
-      id: nn.id,
-      parent_id: nn.parent_id,
-      name: nn.name ?? '',
-      description: nn.description ?? '',
-      node_type: nn.node_type ?? 'detail',
-      num: nn.num ?? '',
-      mx: nn.mx != null ? nn.mx : pos.x,
-      my: nn.my != null ? nn.my : pos.y
-    }
-  });
+  sendProjectStructureOp(
+    curP.id,
+    {
+      type: 'add_node',
+      node: {
+        id: nn.id,
+        parent_id: nn.parent_id,
+        name: nn.name ?? '',
+        description: nn.description ?? '',
+        node_type: nn.node_type ?? 'detail',
+        num: nn.num ?? '',
+        mx: nn.mx != null ? nn.mx : pos.x,
+        my: nn.my != null ? nn.my : pos.y
+      }
+    },
+    collabPersistOpts()
+  );
+}
+
+function sendUpdateNodeStructureOp(node) {
+  if (!curP?.id || !node?.id) return;
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (!collabUid) return;
+  sendProjectStructureOp(
+    curP.id,
+    {
+      type: 'update_node',
+      node: {
+        id: node.id,
+        parent_id: node.parent_id,
+        name: node.name ?? '',
+        description: node.description ?? '',
+        node_type: node.node_type ?? 'detail',
+        num: node.num ?? '',
+        mx: node.mx,
+        my: node.my,
+        updated_at: node.updated_at ?? new Date().toISOString()
+      }
+    },
+    collabPersistOpts()
+  );
 }
 
 function sendDeleteNodeStructureOp(rootId) {
   if (!curP?.id || !rootId) return;
   const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
   if (!collabUid) return;
-  sendProjectStructureOp(curP.id, { type: 'delete_node', node_id: rootId });
+  sendProjectStructureOp(curP.id, { type: 'delete_node', node_id: rootId }, collabPersistOpts());
 }
 
 /** sDrag pointerup — 드래그된 노드마다 move_node (형제 num·좌표 반영 후) */
@@ -669,7 +711,7 @@ function sendMoveNodeStructureOps(draggedIds) {
       my: node.my != null ? node.my : pos.y
     };
     if (node.num != null && String(node.num).trim() !== '') op.num = String(node.num);
-    sendProjectStructureOp(curP.id, op);
+    sendProjectStructureOp(curP.id, op, collabPersistOpts());
   }
 }
 
@@ -721,7 +763,15 @@ function mergeStoreNodesIntoPilotBeforePersist(protectId) {
   }
   if (!Array.isArray(storePilot) || !storePilot.length) return;
 
+  const storeIds = new Set(storePilot.map((sn) => sn?.id).filter(Boolean));
   const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const id of [...byId.keys()]) {
+    if (id === protectId) continue;
+    if (typeof shouldPreserveNodeOnCollabPrune === 'function' && shouldPreserveNodeOnCollabPrune(id)) {
+      continue;
+    }
+    if (!storeIds.has(id)) byId.delete(id);
+  }
   for (const sn of storePilot) {
     if (!sn?.id || sn.id === protectId) continue;
     const prev = byId.get(sn.id);
@@ -3516,12 +3566,15 @@ function showEdit(n) {
       [
         '저장',
         V,
-        () => {
+        async () => {
+          if (import.meta.env.DEV) {
+            console.info('[collab-diag] modal-save-click', { nodeId: n.id, t: Date.now() });
+          }
           // hydrateFromStore(스토어 동기) 후 이전 노드 참조 n은 nodes 배열에 없을 수 있음 — id로 최신 객체를 잡는다
           const target = find(n.id);
           if (!target) {
             toast('동기화 직후 노드를 찾지 못했어요. 잠시 뒤 다시 저장해줘');
-            return;
+            return false;
           }
           if (skipFirstEditSaveUndo.has(n.id)) {
             skipFirstEditSaveUndo.delete(n.id);
@@ -3553,11 +3606,58 @@ function showEdit(n) {
           });
           target.badges = san.badges;
           target.metadata = san.metadata !== undefined ? san.metadata : {};
+          if (typeof onBeforeModalPersist === 'function') {
+            try {
+              const pre = await onBeforeModalPersist();
+              if (pre && pre.ok === false) {
+                toast('동기화를 맞추는 중이에요. 잠시 후 다시 저장해 주세요.');
+                return false;
+              }
+            } catch (_) {
+              if (import.meta.env.DEV) {
+                console.warn('[collab-diag] onBeforeModalPersist failed — continue save');
+              }
+            }
+          }
+          if (import.meta.env.DEV) {
+            let storePilot = [];
+            try {
+              if (typeof getStoreNodesForCollabMerge === 'function') {
+                storePilot = getStoreNodesForCollabMerge() || [];
+              }
+            } catch (_) {
+              storePilot = [];
+            }
+            const pilotById = new Map(nodes.map((nn) => [nn.id, nn]));
+            const mismatches = [];
+            for (const sn of storePilot) {
+              if (!sn?.id || sn.id === n.id) continue;
+              const pn = pilotById.get(sn.id);
+              const storeSnap = { id: sn.id, name: sn.name, updated_at: sn.updated_at };
+              const pilotSnap = pn
+                ? { id: pn.id, name: pn.name, updated_at: pn.updated_at }
+                : null;
+              if (
+                !pn ||
+                pn.name !== sn.name ||
+                String(pn.updated_at ?? '') !== String(sn.updated_at ?? '')
+              ) {
+                mismatches.push({ id: sn.id, pilot: pilotSnap, store: storeSnap });
+              }
+            }
+            console.info('[collab-diag] pre-merge-store-pilot', {
+              nodeId: n.id,
+              pilotCount: nodes.length,
+              storeCount: storePilot.length,
+              mismatches
+            });
+          }
           mergeStoreNodesIntoPilotBeforePersist(n.id);
           nodeEditModalCommittedSave = true;
           nodes = [...nodes];
           render();
           flushPersistNow({ force: true });
+          sendUpdateNodeStructureOp(target);
           armNodeEditSaveGuard(n.id);
           emitAutoCloudSync('node-edit');
           toast('저장됨(이 기기) · 클라우드 자동 반영');
@@ -3664,8 +3764,17 @@ function showIM(html, btns, extra, onClose) {
   btns.forEach(([l, c, fn]) => {
     const b = mkB(l, c, () => {
       if (fn) {
-        fn();
-        finish('ok');
+        const out = fn();
+        if (out != null && typeof out.then === 'function') {
+          void out
+            .then((v) => {
+              if (v === false) return;
+              finish('ok');
+            })
+            .catch(() => {});
+        } else {
+          finish('ok');
+        }
       } else {
         finish('dismiss');
       }
@@ -4066,7 +4175,10 @@ function syncNcFromNodes() {
  * @param {() => Promise<string | null | undefined>} [opts.getAccessToken] Supabase 세션(서버 /api/ai/messages)
  * @param {() => string | null | undefined} [opts.getPlanProjectId] plan_projects.id(UUID) — 있으면 AI 성공 후 plan_nodes 메타 동기
  * @param {() => any[]} [opts.getStoreNodesForCollabMerge] 모달 저장 시 스토어 최신 노드(상대 pull 반영분) 병합용
+ * @param {(nodeId: string) => boolean} [opts.shouldPreserveNodeOnCollabPrune] 모달 저장 prune 예외(동시 추가 id)
  * @param {() => string | null | undefined} [opts.getCollabAuthUserId] 텍스트 OT Broadcast용 auth uid
+ * @param {() => string | null | undefined} [opts.getCollabWorkspaceSourceUserId] EPIC E op persist용 소유자 workspace uid
+ * @param {() => Promise<{ ok?: boolean; reason?: string } | void>} [opts.onBeforeModalPersist] 모달 저장 직전 save-barrier
  */
 export function initPlannode(opts = {}) {
   const delegateTabs = opts.delegateTabs ?? false;
@@ -4078,8 +4190,16 @@ export function initPlannode(opts = {}) {
   getPlanProjectId = typeof opts.getPlanProjectId === 'function' ? opts.getPlanProjectId : null;
   getStoreNodesForCollabMerge =
     typeof opts.getStoreNodesForCollabMerge === 'function' ? opts.getStoreNodesForCollabMerge : null;
+  shouldPreserveNodeOnCollabPrune =
+    typeof opts.shouldPreserveNodeOnCollabPrune === 'function' ? opts.shouldPreserveNodeOnCollabPrune : null;
   getCollabAuthUserId =
     typeof opts.getCollabAuthUserId === 'function' ? opts.getCollabAuthUserId : null;
+  getCollabWorkspaceSourceUserId =
+    typeof opts.getCollabWorkspaceSourceUserId === 'function'
+      ? opts.getCollabWorkspaceSourceUserId
+      : null;
+  onBeforeModalPersist =
+    typeof opts.onBeforeModalPersist === 'function' ? opts.onBeforeModalPersist : null;
 
   R_ = document.getElementById('R');
   CW = document.getElementById('CW');
@@ -4588,7 +4708,10 @@ export function initPlannode(opts = {}) {
       getAccessToken = null;
       getPlanProjectId = null;
       getStoreNodesForCollabMerge = null;
+      shouldPreserveNodeOnCollabPrune = null;
       getCollabAuthUserId = null;
+      getCollabWorkspaceSourceUserId = null;
+      onBeforeModalPersist = null;
       teardownTextOpsDescEditor();
       teardownStructureOps();
       clearUndoStack();

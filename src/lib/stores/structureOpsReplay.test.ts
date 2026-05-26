@@ -1,0 +1,103 @@
+import { describe, expect, it } from 'vitest';
+import type { Node } from '$lib/supabase/client';
+import { replayStructureOpsOnNodes } from './projects';
+
+const projectId = 'proj-1';
+const rootId = `${projectId}-r`;
+
+function baseNodes(): Node[] {
+  const now = '2026-05-26T10:00:00.000Z';
+  return [
+    {
+      id: rootId,
+      project_id: projectId,
+      parent_id: null,
+      name: 'Root',
+      description: '',
+      node_type: 'root',
+      num: 'PRD',
+      created_at: now,
+      updated_at: now
+    }
+  ];
+}
+
+describe('replayStructureOpsOnNodes', () => {
+  it('add_node appends new id', () => {
+    const out = replayStructureOpsOnNodes(baseNodes(), [
+      {
+        type: 'add_node',
+        node: {
+          id: 'n1',
+          parent_id: rootId,
+          name: 'A',
+          mx: 10,
+          my: 20
+        }
+      }
+    ], projectId);
+    expect(out.some((n) => n.id === 'n1')).toBe(true);
+    expect(out).toHaveLength(2);
+  });
+
+  it('concurrent add from two clients preserves both ids', () => {
+    let list = baseNodes();
+    list = replayStructureOpsOnNodes(list, [
+      {
+        type: 'add_node',
+        node: { id: 'nA', parent_id: rootId, name: 'A', mx: 1, my: 1 }
+      }
+    ], projectId);
+    list = replayStructureOpsOnNodes(list, [
+      {
+        type: 'add_node',
+        node: { id: 'nB', parent_id: rootId, name: 'B', mx: 2, my: 2 }
+      }
+    ], projectId);
+    expect(list.map((n) => n.id).sort()).toEqual([rootId, 'nA', 'nB'].sort());
+  });
+
+  it('update_node patches fields', () => {
+    let list = replayStructureOpsOnNodes(baseNodes(), [
+      {
+        type: 'add_node',
+        node: { id: 'n1', parent_id: rootId, name: '', mx: 0, my: 0 }
+      }
+    ], projectId);
+    list = replayStructureOpsOnNodes(
+      list,
+      [
+        {
+          type: 'update_node',
+          node: {
+            id: 'n1',
+            name: 'Saved',
+            description: 'Body',
+            updated_at: '2026-05-26T10:01:00.000Z'
+          }
+        }
+      ],
+      projectId
+    );
+    const n1 = list.find((n) => n.id === 'n1');
+    expect(n1?.name).toBe('Saved');
+    expect(n1?.description).toBe('Body');
+  });
+
+  it('delete_node removes subtree', () => {
+    let list = replayStructureOpsOnNodes(baseNodes(), [
+      {
+        type: 'add_node',
+        node: { id: 'n1', parent_id: rootId, name: 'P', mx: 0, my: 0 }
+      }
+    ], projectId);
+    list = replayStructureOpsOnNodes(list, [
+      {
+        type: 'add_node',
+        node: { id: 'n2', parent_id: 'n1', name: 'C', mx: 0, my: 0 }
+      }
+    ], projectId);
+    list = replayStructureOpsOnNodes(list, [{ type: 'delete_node', node_id: 'n1' }], projectId);
+    expect(list.some((n) => n.id === 'n1' || n.id === 'n2')).toBe(false);
+  });
+});
