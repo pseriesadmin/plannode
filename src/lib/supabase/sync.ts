@@ -31,13 +31,20 @@ import {
   flushAllPendingStructureOpsPersist,
   fetchStructureOpsSince,
   getStructureOpsPersistAckSeq,
-  setStructureOpsPersistAckSeq
+  setStructureOpsPersistAckSeq,
+  collabPushCanSkipSliceMergeAfterOpsFlush,
+  collabPullCanSkipSliceMergeAfterOpsPull,
+  structureOpsPersistFlushKey,
+  hasPendingStructureOpsPersistForProject,
+  type StructureOpsPullResult
 } from '$lib/supabase/projectStructureOps';
 import {
   ensureOwnerAclRowForMyProject,
   fetchProjectSliceFromCloud,
   trySelectProject,
-  normalizeAclEmail
+  normalizeAclEmail,
+  isUsableAclProjectId,
+  isUsableCollabWorkspaceUserId
 } from '$lib/supabase/projectAcl';
 import type { Node, Project } from '$lib/supabase/client';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
@@ -77,23 +84,31 @@ function collabNodesForPush(projectId: string): Node[] {
   return loadLocalNodesForCollabMerge(projectId);
 }
 
-/** EPIC E — since ack seq 이후 structure ops pull + replay */
-export async function pullStructureOpsForProject(project: Project): Promise<boolean> {
-  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
+/** EPIC E — since ack seq 이후 structure ops pull + replay · 스토어 merge 즉시 · 캔버스 hydrate는 interaction guard 시 defer */
+export async function pullStructureOpsForProject(project: Project): Promise<StructureOpsPullResult> {
+  const none: StructureOpsPullResult = { ok: false, applied: 0 };
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return none;
   const uid = getAuthUserId();
-  if (!uid || !project?.id) return false;
+  if (!uid || !project?.id) return none;
   const src = project.cloud_workspace_source_user_id;
-  if (!src || src === uid) return false;
+  if (!src || src === uid) return none;
 
   const since = getStructureOpsPersistAckSeq(project.id);
   const bundle = await fetchStructureOpsSince(src, project.id, since);
-  if (!bundle) return false;
+  if (!bundle) return none;
 
   if (bundle.last_applied_seq > since) {
     setStructureOpsPersistAckSeq(project.id, bundle.last_applied_seq);
   }
 
-  if (!bundle.ops.length) return false;
+  const meta: StructureOpsPullResult = {
+    ok: true,
+    applied: 0,
+    lastAppliedSeq: bundle.last_applied_seq,
+    revision: bundle.revision
+  };
+
+  if (!bundle.ops.length) return meta;
 
   maybeFlushPilotBeforeCollabMerge(project.id);
   const local = loadLocalNodesForCollabMerge(project.id);
@@ -103,16 +118,37 @@ export async function pullStructureOpsForProject(project: Project): Promise<bool
     project.id
   );
   const ref = get(projects).find((p) => p.id === project.id) ?? project;
-  upsertImportedPlannodeTreeV1({
-    project: ref,
-    nodes: replayed,
-    openAfter: false
-  });
+  upsertImportedPlannodeTreeV1(ref, replayed, { openAfter: false, markDirty: false });
   if (get(currentProject)?.id === project.id) {
     const latest = get(projects).find((p) => p.id === project.id);
     if (latest) selectProject(latest);
   }
-  return true;
+  return { ...meta, applied: bundle.ops.length };
+}
+
+/** PUSH-P2-01 — push `revision_stale` 후: structure_ops 우선 · full slice는 해당 프로젝트만 fallback */
+async function recoverCollabProjectAfterRevisionStale(projectId: string): Promise<void> {
+  const ref = get(projects).find((p) => p.id === projectId);
+  if (!ref) return;
+  maybeFlushPilotBeforeCollabMerge(projectId);
+  const prePull = loadLocalNodesForCollabMerge(projectId);
+
+  const opsResult = await pullStructureOpsForProject(ref);
+  if (opsResult.applied > 0) {
+    if (import.meta.env.DEV) {
+      console.info('[recoverCollabProjectAfterRevisionStale] structure_ops applied', { projectId });
+    }
+  } else {
+    const merged = await mergeSharedProjectSliceFromCloudIfApplicable(ref);
+    if (import.meta.env.DEV) {
+      console.info('[recoverCollabProjectAfterRevisionStale] slice fallback', {
+        projectId,
+        merged
+      });
+    }
+  }
+
+  reinjectCollabPreservedNodesAfterPullMerge(projectId, prePull);
 }
 
 /** EPIC E — 공유 멤버 pending structure ops → 소유자 op log */
@@ -125,7 +161,7 @@ export async function appendStructureOpsToOwner(
   return { ok: r.ok, flushed: r.flushed };
 }
 
-/** pull·poll — revision 같아도 슬라이스 hash 가 로컬과 다르면 반영 필요 */
+/** pull·poll — revision+ack 경량 판정 실패 시에만 full slice hash 비교 (fallback) */
 async function collabRemoteSliceHashDiffers(
   workspaceUserId: string,
   projectId: string
@@ -136,6 +172,111 @@ async function collabRemoteSliceHashDiffers(
   return (
     projectWorkspaceNodesJsonSnapshot(slice.nodes) !== projectWorkspaceNodesJsonSnapshot(local)
   );
+}
+
+type CollabPullLightAssessment = {
+  pullNeeded: boolean;
+  viaLightweight: boolean;
+  ackSeq: number;
+  lastAppliedSeq?: number;
+  pendingOpsSinceAck?: number;
+};
+
+/** COLLAB-PERF-2 E2 — revision 동일 + since ack 이후 ops 0 + ack ≥ last_applied → pull 불필요 (slice fetch 0) */
+async function assessCollabPullByRevisionAndOpsAck(
+  workspaceUserId: string,
+  projectId: string,
+  remoteRev: number,
+  cachedRev: number | null
+): Promise<CollabPullLightAssessment> {
+  const ackSeq = getStructureOpsPersistAckSeq(projectId);
+  if (cachedRev === null || cachedRev !== remoteRev) {
+    return { pullNeeded: true, viaLightweight: true, ackSeq };
+  }
+
+  const bundle = await fetchStructureOpsSince(workspaceUserId, projectId, ackSeq);
+  if (!bundle) {
+    return { pullNeeded: true, viaLightweight: false, ackSeq };
+  }
+
+  if (bundle.ops.length > 0) {
+    return {
+      pullNeeded: true,
+      viaLightweight: true,
+      ackSeq,
+      lastAppliedSeq: bundle.last_applied_seq,
+      pendingOpsSinceAck: bundle.ops.length
+    };
+  }
+
+  if (ackSeq >= bundle.last_applied_seq) {
+    return {
+      pullNeeded: false,
+      viaLightweight: true,
+      ackSeq,
+      lastAppliedSeq: bundle.last_applied_seq
+    };
+  }
+
+  return {
+    pullNeeded: true,
+    viaLightweight: true,
+    ackSeq,
+    lastAppliedSeq: bundle.last_applied_seq
+  };
+}
+
+async function collabSliceOutOfSyncAfterPull(
+  workspaceUserId: string,
+  projectId: string,
+  opsResult: StructureOpsPullResult,
+  sliceMerged: boolean
+): Promise<boolean> {
+  if (sliceMerged || opsResult.applied > 0) return false;
+  if (opsResult.ok && opsResult.lastAppliedSeq !== undefined) {
+    const ackSeq = getStructureOpsPersistAckSeq(projectId);
+    if (ackSeq >= opsResult.lastAppliedSeq) return false;
+  }
+  return collabRemoteSliceHashDiffers(workspaceUserId, projectId);
+}
+
+/** COLLAB-PERF P0-02 — revision 동일·hash 불일치 poll 연속 N회 시 pull 생략 */
+const COLLAB_HASH_MISMATCH_MAX_POLL_STREAK = 3;
+const collabHashMismatchPollStreak = new Map<string, number>();
+const collabPollPausedToastAt = new Map<string, number>();
+
+function resetCollabHashMismatchPollStreak(workspaceUserId: string, projectId: string): void {
+  collabHashMismatchPollStreak.delete(collabRevisionCacheKey(workspaceUserId, projectId));
+}
+
+/** visibility/focus nudge 등 — poll pause 해제(다음 poll에서 pull 재개) */
+export function resetCollabHashMismatchPollPauseForProject(project: Project): void {
+  if (typeof window === 'undefined' || !project?.id) return;
+  const uid = getAuthUserId();
+  if (!uid) return;
+  const workspaceUserId = project.cloud_workspace_source_user_id ?? uid;
+  resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+}
+
+function notifyCollabPollPausedManualSyncToast(projectId: string, projectName: string | undefined): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  const prev = collabPollPausedToastAt.get(projectId) ?? 0;
+  if (now - prev < MERGE_SLICE_WARN_COOLDOWN_MS) return;
+  collabPollPausedToastAt.set(projectId, now);
+  const nm = projectName?.trim() ?? '';
+  const label = nm ? `「${nm.length > 40 ? `${nm.slice(0, 40)}…` : nm}」` : '공유 프로젝트';
+  try {
+    window.dispatchEvent(
+      new CustomEvent('plannode-pilot-toast', {
+        detail: {
+          message: `${label}: 자동 동기화 확인을 잠시 쉬었어. 탭을 나갔다 돌아오거나 노드를 한 번 저장하면 다시 맞출게.`
+        }
+      })
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 function markCollabRevisionCachedIfSynced(
@@ -270,7 +411,61 @@ type UpsertBundleRpcResult = {
   ok?: boolean;
   reason?: string;
   server_updated_at?: string | null;
+  collab_revision_bumps?: unknown;
 };
+
+type CollabRevisionBumpRow = {
+  project_id?: string;
+  revision?: number;
+};
+
+function parseCollabRevisionBumps(raw: unknown): CollabRevisionBumpRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CollabRevisionBumpRow[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    const project_id = String(r.project_id ?? '').trim();
+    const revision = Number(r.revision);
+    if (!project_id || !Number.isFinite(revision)) continue;
+    out.push({ project_id, revision: Math.floor(revision) });
+  }
+  return out;
+}
+
+/** PUSH-P2-04 — owner upsert·fallback bump RPC 결과 → revision 캐시·hash streak reset */
+function applyOwnerCollabRevisionBumps(workspaceUserId: string, bumps: CollabRevisionBumpRow[]): void {
+  if (!bumps.length) return;
+  for (const row of bumps) {
+    const pid = row.project_id;
+    const rev = row.revision;
+    if (!pid || rev == null) continue;
+    setCachedCollabRevision(workspaceUserId, pid, rev);
+    collabHashMismatchPollStreak.delete(collabRevisionCacheKey(workspaceUserId, pid));
+    if (import.meta.env.DEV) {
+      console.info('[applyOwnerCollabRevisionBumps]', pid, rev);
+    }
+  }
+}
+
+async function bumpOwnerCollabRevisionsAfterFallbackUpload(
+  userId: string,
+  bundle: WorkspaceBundle
+): Promise<void> {
+  const ids = bundle.projects.map((p) => p.id).filter(Boolean);
+  if (!ids.length) return;
+  const { data, error } = await supabase.rpc('plannode_bump_owner_collab_revisions_for_projects', {
+    p_project_ids: ids
+  });
+  if (error) {
+    if (import.meta.env.DEV && !isCollabRevisionRpcMissing(error)) {
+      console.warn('[bumpOwnerCollabRevisionsAfterFallbackUpload]', error.message);
+    }
+    return;
+  }
+  const root = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+  applyOwnerCollabRevisionBumps(userId, parseCollabRevisionBumps(root?.bumped));
+}
 
 /**
  * merge/lock RPC는 ACL에 JWT 이메일(및 세션 헬퍼) 일치까지 요구함 — project_id·workspace 소스만 맞고
@@ -278,6 +473,9 @@ type UpsertBundleRpcResult = {
  * SELECT 사전 검사도 동일 축(email)으로 해 불필요한 RPC 폭주를 줄인다.
  */
 async function canPushMergeSliceForProject(projectId: string, workspaceUserId: string): Promise<boolean> {
+  if (!isUsableAclProjectId(projectId) || !isUsableCollabWorkspaceUserId(workspaceUserId)) {
+    return false;
+  }
   const email = getAuthEmail();
   if (!email) return false;
   const em = normalizeAclEmail(email);
@@ -438,19 +636,27 @@ function warnMergeSliceThrottled(projectId: string, message: string): void {
 }
 
 async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string): Promise<void> {
-  /** push 전 pull이 unpushed recent-add를 지우지 않도록 pre-merge 스냅 + flush */
-  const prePullByProject = new Map<string, Node[]>();
-  for (const p of get(projects)) {
+  const pushTargetIds: string[] = [];
+  for (const p of bundle.projects) {
     const src = p.cloud_workspace_source_user_id;
     if (!src || src === userId) continue;
+    pushTargetIds.push(p.id);
+  }
+  if (!pushTargetIds.length) return;
+
+  /** push 전 pull이 unpushed recent-add를 지우지 않도록 pre-merge 스냅 + flush (push 대상만) */
+  const prePullByProject = new Map<string, Node[]>();
+  for (const pid of pushTargetIds) {
+    const p = get(projects).find((x) => x.id === pid);
+    if (!p) continue;
     maybeFlushPilotBeforeCollabMerge(p.id);
     prePullByProject.set(p.id, loadLocalNodesForCollabMerge(p.id));
   }
-  await pullSharedProjectSlicesIfNewer();
+  await pullSharedProjectSlicesIfNewer(pushTargetIds);
   for (const [pid, pre] of prePullByProject) {
     reinjectCollabPreservedNodesAfterPullMerge(pid, pre);
   }
-  await flushAllPendingStructureOpsPersist();
+  const structureOpsBatchFlush = await flushAllPendingStructureOpsPersist();
   for (const p of bundle.projects) {
     const src = p.cloud_workspace_source_user_id;
     if (!src || src === userId) continue;
@@ -471,6 +677,35 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       const fresh = gatherWorkspaceBundle();
       const proj = fresh.projects.find((x) => x.id === p.id);
       if (!proj) break;
+
+      let baseRevision: number | null = revisionHintFromStale;
+      if (baseRevision === null && !revisionStaleNotifiedThisPush) {
+        const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
+          p_workspace_user_id: src,
+          p_project_id: p.id
+        });
+        if (!revErr) {
+          const rn = rpcBigintToNumber(revData);
+          if (rn !== null) baseRevision = rn;
+        } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
+          console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
+        }
+      }
+
+      const opsFlush = await flushStructureOpsPersistForProject(p.id, src, baseRevision);
+      structureOpsBatchFlush.set(structureOpsPersistFlushKey(src, p.id), opsFlush);
+
+      if (
+        collabPushCanSkipSliceMergeAfterOpsFlush(p.id, src, structureOpsBatchFlush, opsFlush)
+      ) {
+        if (import.meta.env.DEV) {
+          console.info('[pushProjectSlicesToOwners] structure_ops-only — skip slice merge', p.id);
+        }
+        lastErr = null;
+        revisionHintFromStale = null;
+        break;
+      }
+
       maybeFlushPilotBeforeCollabMerge(p.id);
       const prePushLocal = loadLocalNodesForCollabMerge(p.id);
       let pushNodes = collabNodesForPush(p.id);
@@ -505,27 +740,6 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
         );
       }
       const { cloud_workspace_source_user_id: _cw, ...meta } = pushProj;
-
-      let baseRevision: number | null = revisionHintFromStale;
-      if (baseRevision === null && !revisionStaleNotifiedThisPush) {
-        const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
-          p_workspace_user_id: src,
-          p_project_id: p.id
-        });
-        if (!revErr) {
-          const rn = rpcBigintToNumber(revData);
-          if (rn !== null) baseRevision = rn;
-        } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
-          console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
-        }
-      }
-
-      const opsFlush = await flushStructureOpsPersistForProject(p.id, src, baseRevision);
-      if (opsFlush.ok && opsFlush.flushed > 0) {
-        lastErr = null;
-        revisionHintFromStale = null;
-        break;
-      }
 
       let lockHeld = false;
       const { data: lockData, error: lockErr } = await supabase.rpc('plannode_project_collab_try_acquire_lock', {
@@ -578,7 +792,7 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
         if (msg.includes('revision_stale') || det.includes('revision_stale')) {
           const hinted = parseStaleRevisionFromCollabError(mErr);
           if (hinted !== null) revisionHintFromStale = hinted;
-          await pullSharedProjectSlicesIfNewer();
+          await recoverCollabProjectAfterRevisionStale(p.id);
           const dedupUntil = modalSavePushStaleToastDedupUntil.get(p.id) ?? 0;
           const skipStaleToast = Date.now() < dedupUntil;
           if (!revisionStaleNotifiedThisPush && !skipStaleToast) {
@@ -619,15 +833,54 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
   }
 }
 
-/** 로컬 전체 → Supabase 한 행 upsert(RPC 조건부 갱신 우선, 충돌 시 병합 후 최대 3회 재시도) */
-export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: string }> {
+export type UploadWorkspaceResult = {
+  ok: boolean;
+  message: string;
+  /** RPC `reason: conflict` 또는 재시도 한도 소진 */
+  conflict?: boolean;
+  /** E8-1 — conflict exhaustion 후 쿨다운 구간( dirty 유지 · RPC 생략) */
+  conflictCooldown?: boolean;
+};
+
+/** COLLAB-PERF-2 E8-1 — conflict exhaustion 후 upload RPC 최소 간격 */
+export const UPLOAD_CONFLICT_COOLDOWN_MS = 30_000;
+
+let lastUploadConflictExhaustedAt = 0;
+
+export function shouldDeferWorkspaceUploadDueToConflict(): boolean {
+  return Date.now() - lastUploadConflictExhaustedAt < UPLOAD_CONFLICT_COOLDOWN_MS;
+}
+
+function recordUploadConflictExhausted(): void {
+  lastUploadConflictExhaustedAt = Date.now();
+}
+
+function clearUploadConflictCooldown(): void {
+  lastUploadConflictExhaustedAt = 0;
+}
+
+/** 로컬 전체 → Supabase 한 행 upsert(RPC 조건부 갱신 우선, 충돌 시 병합 후 최대 1회 재시도) */
+export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
   if (!isSupabaseCloudConfigured()) {
     return { ok: false, message: 'Supabase URL/키가 .env에 없어.' };
   }
   const { userId, error: authErr } = await requireSessionUserId();
   if (!userId) return { ok: false, message: authErr || '로그인 실패' };
 
-  const MAX_ATTEMPTS = 4;
+  if (shouldDeferWorkspaceUploadDueToConflict()) {
+    if (import.meta.env.DEV) {
+      console.info('[uploadWorkspaceToCloud] conflict cooldown — upload deferred');
+    }
+    return {
+      ok: false,
+      message: '클라우드 버전 충돌. 잠시 후 다시 동기화할게.',
+      conflict: true,
+      conflictCooldown: true
+    };
+  }
+
+  /** COLLAB-PERF-2 E7 — conflict 즉시 재시도 1회만 · 2회 실패 시 다음 틱 위임 */
+  const MAX_ATTEMPTS = 2;
   let lastConflict = false;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -683,6 +936,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
           };
         }
         await pushProjectSlicesToOwners(bundle, userId);
+        await bumpOwnerCollabRevisionsAfterFallbackUpload(userId, bundle);
         try {
           localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, payload.updated_at);
         } catch {
@@ -702,25 +956,16 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
     if (res?.ok === false && res.reason === 'conflict') {
       lastConflict = true;
       if (attempt < MAX_ATTEMPTS - 1) continue;
-      const { error: upErr } = await supabase.from(TABLE).upsert(payload, { onConflict: 'user_id' });
-      if (upErr) {
-        markCloudWorkspaceFailed();
-        console.error('[plannode cloud upload] 충돌 후 폴백 upsert', upErr);
-        return { ok: false, message: upErr.message };
-      }
-      await pushProjectSlicesToOwners(bundle, userId);
-      try {
-        localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, payload.updated_at);
-      } catch {
-        /* ignore */
-      }
-      clearPendingWorkspaceDeletions();
-      markCloudWorkspaceSynced();
+      markCloudWorkspaceFailed();
+      recordUploadConflictExhausted();
       if (import.meta.env.DEV) {
-        console.info('[uploadWorkspaceToCloud] 서버 타임스탬프 충돌 반복 → 무조건 upsert로 마무리했어.');
+        console.info('[uploadWorkspaceToCloud] conflict — 재시도 한도, 다음 틱 위임');
       }
-      scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
-      return { ok: true, message: '클라우드에 올렸어 ✓' };
+      return {
+        ok: false,
+        message: '클라우드 버전 충돌. 잠시 후 다시 동기화할게.',
+        conflict: true
+      };
     }
 
     if (!res?.ok) {
@@ -732,6 +977,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
     }
 
     const serverTs = res.server_updated_at != null && String(res.server_updated_at) ? String(res.server_updated_at) : payload.updated_at;
+    applyOwnerCollabRevisionBumps(userId, parseCollabRevisionBumps(res.collab_revision_bumps));
     await pushProjectSlicesToOwners(bundle, userId);
     try {
       localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, serverTs);
@@ -740,6 +986,7 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
     }
     clearPendingWorkspaceDeletions();
     markCloudWorkspaceSynced();
+    clearUploadConflictCooldown();
     if (lastConflict && import.meta.env.DEV) {
       console.info('[uploadWorkspaceToCloud] 충돌 후 재병합·재시도로 저장 완료.');
     }
@@ -748,6 +995,14 @@ export async function uploadWorkspaceToCloud(): Promise<{ ok: boolean; message: 
   }
 
   markCloudWorkspaceFailed();
+  if (lastConflict) {
+    recordUploadConflictExhausted();
+    return {
+      ok: false,
+      message: '클라우드 버전 충돌. 잠시 후 다시 동기화할게.',
+      conflict: true
+    };
+  }
   return { ok: false, message: '클라우드 저장 재시도 한도를 넘었어. 잠시 후 다시 시도해줘.' };
 }
 
@@ -900,7 +1155,7 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
 
   maybeFlushPilotBeforeCollabMerge(localRef.id);
 
-  const slice = await fetchProjectSliceFromCloud(src, localRef.id);
+  const slice = await fetchProjectSliceForCollabAssess(src, localRef.id);
   if (!slice) return false;
 
   const parseTs = (iso: string | undefined): number => {
@@ -971,6 +1226,95 @@ const ENSURE_SLICE_BUSY_POLL_MAX = 4;
 const MODAL_SAVE_PUSH_STALE_TOAST_DEDUP_MS = 12_000;
 const modalSavePushStaleToastDedupUntil = new Map<string, number>();
 
+/** E14-2 — modal-save 2차 assess+rePull defer (1차 merge·upload D6 unchanged) */
+const MODAL_SAVE_FRESH_RECHECK_POLL_MS = 250;
+const MODAL_SAVE_FRESH_RECHECK_MAX_POLLS = 48;
+
+let modalSaveFreshRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+let modalSaveFreshRecheckProjectId: string | null = null;
+
+async function runModalSaveDeferredFreshRecheck(
+  projectId: string,
+  workspaceUserId: string,
+  reason: string
+): Promise<void> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return;
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+  const ref = get(projects).find((p) => p.id === projectId);
+  if (!ref) return;
+  if (get(currentProject)?.id !== projectId) return;
+
+  const src = ref.cloud_workspace_source_user_id;
+  if (!src || src !== workspaceUserId) return;
+
+  const fresh = await assessCollabSliceFreshness(ref, workspaceUserId);
+  if (!fresh?.needsMerge) {
+    if (import.meta.env.DEV) {
+      console.info('[ensureCollabSliceFresh] deferred recheck — skip rev+hash ok', projectId);
+    }
+    return;
+  }
+
+  if (import.meta.env.DEV) {
+    console.info('[ensureCollabSliceFresh] deferred rePull', {
+      projectId,
+      reason,
+      trigger: 'modal-save-deferred',
+      cachedRev: fresh.cachedRev,
+      remoteRev: fresh.remoteRev,
+      hashDiff: fresh.hashDiff,
+      revDiff: fresh.revDiff
+    });
+  }
+  await mergeCollabSliceFromFreshness(ref, `${reason}-rePull-deferred`, fresh);
+}
+
+async function runModalSaveDeferredFreshRecheckWhenIdle(
+  projectId: string,
+  workspaceUserId: string,
+  reason: string,
+  pollAttempt = 0
+): Promise<void> {
+  if (pollAttempt >= MODAL_SAVE_FRESH_RECHECK_MAX_POLLS) {
+    if (import.meta.env.DEV) {
+      console.info('[ensureCollabSliceFresh] deferred recheck — poll cap', projectId);
+    }
+    return;
+  }
+  if (await collabPullShouldDeferForInteraction()) {
+    setTimeout(
+      () => void runModalSaveDeferredFreshRecheckWhenIdle(projectId, workspaceUserId, reason, pollAttempt + 1),
+      MODAL_SAVE_FRESH_RECHECK_POLL_MS
+    );
+    return;
+  }
+  await runModalSaveDeferredFreshRecheck(projectId, workspaceUserId, reason);
+}
+
+function scheduleModalSaveFreshRecheck(
+  project: Project,
+  workspaceUserId: string,
+  reason: string
+): void {
+  if (typeof window === 'undefined') return;
+
+  if (modalSaveFreshRecheckTimer && modalSaveFreshRecheckProjectId === project.id) {
+    clearTimeout(modalSaveFreshRecheckTimer);
+  }
+  modalSaveFreshRecheckProjectId = project.id;
+
+  modalSaveFreshRecheckTimer = setTimeout(() => {
+    modalSaveFreshRecheckTimer = null;
+    modalSaveFreshRecheckProjectId = null;
+    void runModalSaveDeferredFreshRecheckWhenIdle(project.id, workspaceUserId, reason);
+  }, 0);
+
+  if (import.meta.env.DEV) {
+    console.info('[ensureCollabSliceFresh] schedule deferred recheck', project.id);
+  }
+}
+
 type CollabSliceFreshness = {
   remoteRev: number | null;
   cachedRev: number | null;
@@ -981,19 +1325,134 @@ type CollabSliceFreshness = {
   needsMerge: boolean;
 };
 
+/** E14-1 — rev 일치 시 slice fetch 생략용 (full assess 후 갱신) */
+const collabRemoteHashAtRevisionCache = new Map<string, { revision: number; remoteHash: string }>();
+
+function collabRemoteHashCacheKey(workspaceUserId: string, projectId: string): string {
+  return `${workspaceUserId}:${projectId}`;
+}
+
+function rememberCollabRemoteHashAtRevision(
+  workspaceUserId: string,
+  projectId: string,
+  revision: number | null,
+  remoteHash: string
+): void {
+  if (revision === null) return;
+  collabRemoteHashAtRevisionCache.set(collabRemoteHashCacheKey(workspaceUserId, projectId), {
+    revision,
+    remoteHash
+  });
+}
+
+/** E14-4 — modal-save assess·merge 경로 slice fetch ≤2s 결과 재사용 (E4-2 in-flight + completed) */
+const MODAL_SLICE_FETCH_RECENT_TTL_MS = 2_000;
+type ProjectSliceFetchResult = Awaited<ReturnType<typeof fetchProjectSliceFromCloud>>;
+
+type RecentModalSliceFetchEntry = {
+  promise: Promise<ProjectSliceFetchResult>;
+  result?: ProjectSliceFetchResult;
+  fetchedAt: number;
+};
+
+const recentModalSliceFetch = new Map<string, RecentModalSliceFetchEntry>();
+let modalSaveSliceCacheProjectId: string | null = null;
+
+function modalSliceFetchRecentKey(workspaceUserId: string, projectId: string): string {
+  return `${workspaceUserId}:${projectId}`;
+}
+
+async function fetchProjectSliceFromCloudRecentForModalSave(
+  workspaceUserId: string,
+  projectId: string
+): Promise<ProjectSliceFetchResult> {
+  const key = modalSliceFetchRecentKey(workspaceUserId, projectId);
+  const now = Date.now();
+  const existing = recentModalSliceFetch.get(key);
+
+  if (existing) {
+    const age = now - existing.fetchedAt;
+    if (existing.result !== undefined && age <= MODAL_SLICE_FETCH_RECENT_TTL_MS) {
+      if (import.meta.env.DEV) {
+        console.info('[fetchProjectSliceFromCloud] recent cache hit (E14-4)', {
+          projectId,
+          ageMs: age
+        });
+      }
+      return existing.result;
+    }
+    if (existing.result === undefined && age <= MODAL_SLICE_FETCH_RECENT_TTL_MS) {
+      if (import.meta.env.DEV) {
+        console.info('[fetchProjectSliceFromCloud] recent in-flight join (E14-4)', { projectId });
+      }
+      return existing.promise;
+    }
+  }
+
+  const entry: RecentModalSliceFetchEntry = {
+    promise: Promise.resolve(null),
+    fetchedAt: now
+  };
+  const promise = fetchProjectSliceFromCloud(workspaceUserId, projectId).then((result) => {
+    entry.result = result;
+    entry.fetchedAt = Date.now();
+    return result;
+  });
+  entry.promise = promise;
+  recentModalSliceFetch.set(key, entry);
+
+  return promise;
+}
+
+function fetchProjectSliceForCollabAssess(
+  workspaceUserId: string,
+  projectId: string
+): Promise<ProjectSliceFetchResult> {
+  if (modalSaveSliceCacheProjectId === projectId) {
+    return fetchProjectSliceFromCloudRecentForModalSave(workspaceUserId, projectId);
+  }
+  return fetchProjectSliceFromCloud(workspaceUserId, projectId);
+}
+
 async function assessCollabSliceFreshness(
   project: Project,
   workspaceUserId: string
 ): Promise<CollabSliceFreshness | null> {
-  const slice = await fetchProjectSliceFromCloud(workspaceUserId, project.id);
-  if (!slice) return null;
-
-  const remoteRev = await fetchCollabRevision(workspaceUserId, project.id);
-  const cachedRev = getCachedCollabRevision(workspaceUserId, project.id);
   const localNodes = loadLocalNodesForCollabMerge(project.id);
   const localHash = projectWorkspaceNodesJsonSnapshot(localNodes);
+  const cachedRev = getCachedCollabRevision(workspaceUserId, project.id);
+  const hashCacheKey = collabRemoteHashCacheKey(workspaceUserId, project.id);
+
+  const remoteRev = await fetchCollabRevision(workspaceUserId, project.id);
+  if (remoteRev === null) return null;
+
+  const revDiff = cachedRev !== null && cachedRev !== remoteRev;
+  const hasPendingOps = hasPendingStructureOpsPersistForProject(project.id, workspaceUserId);
+
+  if (!revDiff && cachedRev !== null && !hasPendingOps) {
+    const cachedRemote = collabRemoteHashAtRevisionCache.get(hashCacheKey);
+    if (cachedRemote && cachedRemote.revision === remoteRev && localHash === cachedRemote.remoteHash) {
+      if (import.meta.env.DEV) {
+        console.info('[assessCollabSliceFreshness] rev+hash cache ok — skip slice fetch', project.id);
+      }
+      return {
+        remoteRev,
+        cachedRev,
+        localHash,
+        remoteHash: cachedRemote.remoteHash,
+        revDiff: false,
+        hashDiff: false,
+        needsMerge: false
+      };
+    }
+  }
+
+  const slice = await fetchProjectSliceForCollabAssess(workspaceUserId, project.id);
+  if (!slice) return null;
+
   const remoteHash = projectWorkspaceNodesJsonSnapshot(slice.nodes ?? []);
-  const revDiff = remoteRev !== null && cachedRev !== remoteRev;
+  rememberCollabRemoteHashAtRevision(workspaceUserId, project.id, remoteRev, remoteHash);
+
   const hashDiff = localHash !== remoteHash;
   return {
     remoteRev,
@@ -1018,8 +1477,49 @@ async function mergeCollabSliceFromFreshness(
   });
 }
 
-async function waitForCloudBidirectionalSyncIdle(maxMs = ENSURE_SLICE_BUSY_POLL_MS * ENSURE_SLICE_BUSY_POLL_MAX): Promise<boolean> {
+/** E14-3 — modal-save ops-first: `pullStructureOpsForProject` 후 slice assess 생략 가능 시 `{ merged }` */
+async function tryModalSaveOpsFirstSkipSliceAssess(
+  project: Project,
+  workspaceUserId: string
+): Promise<{ merged: boolean } | null> {
+  const remoteRev = await fetchCollabRevision(workspaceUserId, project.id);
+  if (remoteRev === null) return null;
+
+  const cachedRev = getCachedCollabRevision(workspaceUserId, project.id);
+  const ref = get(projects).find((p) => p.id === project.id) ?? project;
+  const opsResult = await pullStructureOpsForProject(ref);
+  const revisionUnchanged = cachedRev !== null && cachedRev === remoteRev;
+
+  const skipSliceAssess = collabPullCanSkipSliceMergeAfterOpsPull(ref.id, workspaceUserId, opsResult, {
+    revisionUnchanged
+  });
+
+  if (import.meta.env.DEV) {
+    console.info('[ensureCollabSliceFresh] ops-first', {
+      projectId: project.id,
+      skipSliceAssess,
+      applied: opsResult.applied,
+      revisionUnchanged,
+      cachedRev,
+      remoteRev
+    });
+  }
+
+  if (!skipSliceAssess) return null;
+
+  if (import.meta.env.DEV) {
+    console.info('[ensureCollabSliceFresh] ops-first — skip slice assess', project.id);
+  }
+
+  return { merged: opsResult.applied > 0 };
+}
+
+async function waitForCloudBidirectionalSyncIdle(
+  maxMs = ENSURE_SLICE_BUSY_POLL_MS * ENSURE_SLICE_BUSY_POLL_MAX,
+  opts?: { noWait?: boolean }
+): Promise<boolean> {
   const { isCloudBidirectionalSyncBusy } = await import('$lib/supabase/workspacePush');
+  if (opts?.noWait) return !isCloudBidirectionalSyncBusy();
   const deadline = Date.now() + maxMs;
   while (Date.now() < deadline) {
     if (!isCloudBidirectionalSyncBusy()) return true;
@@ -1051,7 +1551,7 @@ export async function ensureCollabSliceFreshBeforePersist(
 
   const modalSaveBarrier = reason.startsWith('modal-save');
 
-  if (!(await waitForCloudBidirectionalSyncIdle())) {
+  if (!(await waitForCloudBidirectionalSyncIdle(undefined, { noWait: modalSaveBarrier }))) {
     /** modal-save: 저장 자체를 막지 않음 — push 직전 re-pull(D6)·revision retry가 보완 */
     if (modalSaveBarrier) {
       if (import.meta.env.DEV) {
@@ -1065,64 +1565,97 @@ export async function ensureCollabSliceFreshBeforePersist(
   maybeFlushPilotBeforeCollabMerge(project.id);
 
   const workspaceUserId = src;
-  let fresh = await assessCollabSliceFreshness(project, workspaceUserId);
-  if (!fresh) {
+  const useModalSliceRecentCache = modalSaveBarrier;
+  if (useModalSliceRecentCache) modalSaveSliceCacheProjectId = project.id;
+
+  try {
     if (modalSaveBarrier) {
-      if (import.meta.env.DEV) {
-        console.info('[ensureCollabSliceFresh] skip slice-fetch — modal-save non-blocking', project.id);
+      const opsFirst = await tryModalSaveOpsFirstSkipSliceAssess(project, workspaceUserId);
+      if (opsFirst) {
+        if (opsFirst.merged) {
+          /** E14-2: ops 적용 후에만 deferred recheck — revision-only skip은 assess no-merge와 동일 */
+          scheduleModalSaveFreshRecheck(project, workspaceUserId, reason);
+        }
+        modalSavePushStaleToastDedupUntil.set(
+          project.id,
+          Date.now() + MODAL_SAVE_PUSH_STALE_TOAST_DEDUP_MS
+        );
+        return {
+          ok: true,
+          merged: opsFirst.merged,
+          reason: opsFirst.merged ? 'ops-first-applied' : 'ops-first-skip'
+        };
       }
-      return { ok: true, merged: false, reason: 'slice-fetch-skipped' };
     }
-    return { ok: false, merged: false, reason: 'slice-fetch' };
-  }
 
-  if (import.meta.env.DEV) {
-    console.info('[ensureCollabSliceFresh]', {
-      projectId: project.id,
-      reason,
-      cachedRev: fresh.cachedRev,
-      remoteRev: fresh.remoteRev,
-      localHash: fresh.localHash,
-      remoteHash: fresh.remoteHash,
-      needsMerge: fresh.needsMerge
-    });
-  }
-
-  if (!fresh.needsMerge) {
-    if (import.meta.env.DEV) {
-      console.info('[ensureCollabSliceFresh] skip rev+hash ok');
+    let fresh = await assessCollabSliceFreshness(project, workspaceUserId);
+    if (!fresh) {
+      if (modalSaveBarrier) {
+        if (import.meta.env.DEV) {
+          console.info('[ensureCollabSliceFresh] skip slice-fetch — modal-save non-blocking', project.id);
+        }
+        return { ok: true, merged: false, reason: 'slice-fetch-skipped' };
+      }
+      return { ok: false, merged: false, reason: 'slice-fetch' };
     }
-    return { ok: true, merged: false };
-  }
 
-  let merged = await mergeCollabSliceFromFreshness(project, reason, fresh);
-
-  /** D6: 1차 merge 직후 재평가 — 동시 저장으로 revision/hash가 다시 어긋나면 pull 1회만 */
-  fresh = await assessCollabSliceFreshness(project, workspaceUserId);
-  if (fresh?.needsMerge) {
     if (import.meta.env.DEV) {
-      console.info('[ensureCollabSliceFresh] rePull', {
+      console.info('[ensureCollabSliceFresh]', {
         projectId: project.id,
         reason,
-        trigger: 'revision_stale-path',
         cachedRev: fresh.cachedRev,
         remoteRev: fresh.remoteRev,
-        hashDiff: fresh.hashDiff,
-        revDiff: fresh.revDiff
+        localHash: fresh.localHash,
+        remoteHash: fresh.remoteHash,
+        needsMerge: fresh.needsMerge
       });
     }
-    const reMerged = await mergeCollabSliceFromFreshness(project, `${reason}-rePull`, fresh);
-    merged = merged || reMerged;
-  }
 
-  if (reason.startsWith('modal-save')) {
-    modalSavePushStaleToastDedupUntil.set(
-      project.id,
-      Date.now() + MODAL_SAVE_PUSH_STALE_TOAST_DEDUP_MS
-    );
-  }
+    if (!fresh.needsMerge) {
+      if (import.meta.env.DEV) {
+        console.info('[ensureCollabSliceFresh] skip rev+hash ok');
+      }
+      return { ok: true, merged: false };
+    }
 
-  return { ok: true, merged };
+    let merged = await mergeCollabSliceFromFreshness(project, reason, fresh);
+
+    if (modalSaveBarrier) {
+      /** E14-2: 2차 assess+rePull은 저장 UI(모달 닫힘) 후 defer — upload D6 rePull unchanged */
+      scheduleModalSaveFreshRecheck(project, workspaceUserId, reason);
+    } else {
+      /** D6: 1차 merge 직후 재평가 — 동시 저장으로 revision/hash가 다시 어긋나면 pull 1회만 */
+      fresh = await assessCollabSliceFreshness(project, workspaceUserId);
+      if (fresh?.needsMerge) {
+        if (import.meta.env.DEV) {
+          console.info('[ensureCollabSliceFresh] rePull', {
+            projectId: project.id,
+            reason,
+            trigger: 'revision_stale-path',
+            cachedRev: fresh.cachedRev,
+            remoteRev: fresh.remoteRev,
+            hashDiff: fresh.hashDiff,
+            revDiff: fresh.revDiff
+          });
+        }
+        const reMerged = await mergeCollabSliceFromFreshness(project, `${reason}-rePull`, fresh);
+        merged = merged || reMerged;
+      }
+    }
+
+    if (reason.startsWith('modal-save')) {
+      modalSavePushStaleToastDedupUntil.set(
+        project.id,
+        Date.now() + MODAL_SAVE_PUSH_STALE_TOAST_DEDUP_MS
+      );
+    }
+
+    return { ok: true, merged };
+  } finally {
+    if (useModalSliceRecentCache && modalSaveSliceCacheProjectId === project.id) {
+      modalSaveSliceCacheProjectId = null;
+    }
+  }
 }
 
 /**
@@ -1145,21 +1678,59 @@ export async function pullCollabSliceForProject(
       ? opts.knownRemoteRevision
       : await fetchCollabRevision(workspaceUserId, project.id);
   const cachedRev = getCachedCollabRevision(workspaceUserId, project.id);
-  const willSkipRev =
-    !opts?.forceMerge && remoteRev !== null && cachedRev !== null && cachedRev === remoteRev;
+
+  if (remoteRev !== null) {
+    const cached = cachedRev;
+    if (!opts?.forceMerge && cached !== null && cached === remoteRev) {
+      const light = await assessCollabPullByRevisionAndOpsAck(
+        workspaceUserId,
+        project.id,
+        remoteRev,
+        cached
+      );
+      if (!light.pullNeeded) {
+        if (import.meta.env.DEV) {
+          console.info('[collab-diag] pullCollabSliceForProject skip', {
+            projectId: project.id,
+            reason,
+            cachedRev,
+            remoteRev,
+            willSkipRev: true,
+            hashEqual: true,
+            viaRevisionOpsAck: true,
+            ackSeq: light.ackSeq,
+            lastAppliedSeq: light.lastAppliedSeq
+          });
+        }
+        return false;
+      }
+      if (!light.viaLightweight) {
+        const hashDiffers = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+        if (!hashDiffers) {
+          if (import.meta.env.DEV) {
+            console.info('[collab-diag] pullCollabSliceForProject skip', {
+              projectId: project.id,
+              reason,
+              cachedRev,
+              remoteRev,
+              willSkipRev: true,
+              hashEqual: true,
+              viaRevisionOpsAck: false
+            });
+          }
+          return false;
+        }
+      }
+    }
+  }
 
   if (import.meta.env.DEV) {
     const cur = get(currentProject);
     const localNodes =
       cur?.id === project.id ? get(nodes) : loadProjectNodesFromLocalStorage(project.id);
     const localSnapHash = projectWorkspaceNodesJsonSnapshot(localNodes);
-    let remoteSnapHash: string | null = null;
-    try {
-      const slice = await fetchProjectSliceFromCloud(workspaceUserId, project.id);
-      remoteSnapHash = projectWorkspaceNodesJsonSnapshot(slice?.nodes ?? []);
-    } catch {
-      remoteSnapHash = null;
-    }
+    const willSkipRev =
+      !opts?.forceMerge && remoteRev !== null && cachedRev !== null && cachedRev === remoteRev;
     console.info('[collab-diag] pullCollabSliceForProject', {
       projectId: project.id,
       reason,
@@ -1167,25 +1738,42 @@ export async function pullCollabSliceForProject(
       remoteRev,
       willSkipRev,
       localSnapHash,
-      remoteSnapHash,
-      hashEqual: remoteSnapHash !== null && localSnapHash === remoteSnapHash
+      hashEqual: null,
+      note: 'skip 판정 이후 — remote slice fetch 생략 (E2)'
     });
-  }
-
-  if (remoteRev !== null) {
-    const cached = cachedRev;
-    if (!opts?.forceMerge && cached !== null && cached === remoteRev) {
-      const hashDiffers = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
-      if (!hashDiffers) return false;
-    }
   }
 
   const src = project.cloud_workspace_source_user_id;
   let changed = false;
+  let sliceMerged = false;
+  let memberOpsResult: StructureOpsPullResult | null = null;
   if (src && src !== uid) {
     const ref = get(projects).find((p) => p.id === project.id) ?? project;
-    changed = (await pullStructureOpsForProject(ref)) || changed;
-    changed = (await mergeSharedProjectSliceFromCloudIfApplicable(ref)) || changed;
+    const opsResult = await pullStructureOpsForProject(ref);
+    memberOpsResult = opsResult;
+    if (opsResult.applied > 0) changed = true;
+
+    const revisionUnchanged =
+      remoteRev !== null && cachedRev !== null && cachedRev === remoteRev;
+    const skipSliceMerge =
+      (opts?.forceMerge === true && revisionUnchanged) ||
+      collabPullCanSkipSliceMergeAfterOpsPull(ref.id, src, opsResult, { revisionUnchanged });
+
+    if (!skipSliceMerge) {
+      const merged = await mergeSharedProjectSliceFromCloudIfApplicable(ref);
+      if (merged) {
+        changed = true;
+        sliceMerged = true;
+      }
+    } else if (import.meta.env.DEV) {
+      console.info('[collab-diag] pullCollabSliceForProject skip slice merge', {
+        projectId: project.id,
+        reason,
+        applied: opsResult.applied,
+        revisionUnchanged,
+        forceMergeOpsOnly: opts?.forceMerge === true && revisionUnchanged
+      });
+    }
   } else {
     const n = await pullOwnWorkspaceIfChanged();
     changed = n > 0;
@@ -1199,7 +1787,18 @@ export async function pullCollabSliceForProject(
   }
 
   if (remoteRev !== null) {
-    const hashDiffersAfter = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+    const hashDiffersAfter =
+      memberOpsResult != null
+        ? await collabSliceOutOfSyncAfterPull(
+            workspaceUserId,
+            project.id,
+            memberOpsResult,
+            sliceMerged
+          )
+        : await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+    if (!hashDiffersAfter) {
+      resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+    }
     markCollabRevisionCachedIfSynced(
       workspaceUserId,
       project.id,
@@ -1218,24 +1817,152 @@ export async function pullCollabSliceForProject(
   return changed;
 }
 
-/** Realtime 누락·미배포 SQL 대비 — revision 변경 시에만 pull-only */
+/** COLLAB-PERF-2 E4-1 — drag/zoom/모달 중 collab pull defer (hydrate defer와 동일 조건 · CANVAS_INTERACTION_DEFER 확장) */
+type PendingCollabPull =
+  | { mode: 'poll'; projectId: string }
+  | { mode: 'revision-flush'; projectId: string; reason: string; revisionHint: number | null };
+
+let pendingCollabPull: PendingCollabPull | null = null;
+let collabPullDeferBypass = false;
+
+async function collabPullShouldDeferForInteraction(): Promise<boolean> {
+  if (collabPullDeferBypass || typeof window === 'undefined') return false;
+  const { pilotShouldDeferCollabPull } = await import('$lib/pilot/pilotBridge');
+  return pilotShouldDeferCollabPull();
+}
+
+function queuePendingCollabPull(entry: PendingCollabPull): void {
+  pendingCollabPull = entry;
+  if (import.meta.env.DEV) {
+    console.info('[collab-pull-defer] queued', entry);
+  }
+}
+
+/** pointerup · wheel idle · 모달 닫힘 · `pilotFlushPendingStoreHydrate` 시 1회 flush */
+export function flushPendingCollabPull(): void {
+  const pending = pendingCollabPull;
+  pendingCollabPull = null;
+  if (!pending) return;
+  if (get(currentProject)?.id !== pending.projectId) return;
+
+  collabPullDeferBypass = true;
+  try {
+    const ref = get(projects).find((p) => p.id === pending.projectId);
+    if (!ref) return;
+    if (pending.mode === 'poll') {
+      void pollCollabRevisionFallback(ref);
+    } else {
+      void flushCollabRevisionPull(pending.projectId, pending.reason, pending.revisionHint);
+    }
+    if (import.meta.env.DEV) {
+      console.info('[collab-pull-defer] flushed', pending);
+    }
+  } finally {
+    collabPullDeferBypass = false;
+  }
+}
+
+/** Realtime 누락·미배포 SQL 대비 — revision 변경 시 pull-only; hash mismatch 연속 N회 시 poll skip (P0-02) */
 export async function pollCollabRevisionFallback(project: Project): Promise<boolean> {
   if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return false;
   const uid = getAuthUserId();
   if (!uid || !project?.id) return false;
+
+  if (await collabPullShouldDeferForInteraction()) {
+    queuePendingCollabPull({ mode: 'poll', projectId: project.id });
+    return false;
+  }
 
   const workspaceUserId = project.cloud_workspace_source_user_id ?? uid;
   const remoteRev = await fetchCollabRevision(workspaceUserId, project.id);
   if (remoteRev === null) return false;
 
   const cached = getCachedCollabRevision(workspaceUserId, project.id);
+  const streakKey = collabRevisionCacheKey(workspaceUserId, project.id);
+
+  if (cached !== null && cached !== remoteRev) {
+    resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+  }
+
   if (cached !== null && cached === remoteRev) {
-    const hashDiffers = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
-    if (!hashDiffers) return false;
+    const light = await assessCollabPullByRevisionAndOpsAck(
+      workspaceUserId,
+      project.id,
+      remoteRev,
+      cached
+    );
+    if (!light.pullNeeded) {
+      resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+      return false;
+    }
+
+    if (!light.viaLightweight) {
+      const streak = collabHashMismatchPollStreak.get(streakKey) ?? 0;
+      if (streak >= COLLAB_HASH_MISMATCH_MAX_POLL_STREAK) {
+        if (import.meta.env.DEV) {
+          console.info('[pollCollabRevisionFallback] poll paused (hash mismatch streak)', {
+            projectId: project.id,
+            streak
+          });
+        }
+        return false;
+      }
+
+      const hashDiffers = await collabRemoteSliceHashDiffers(workspaceUserId, project.id);
+      if (!hashDiffers) {
+        resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+        return false;
+      }
+
+      const nextStreak = streak + 1;
+      collabHashMismatchPollStreak.set(streakKey, nextStreak);
+      if (nextStreak >= COLLAB_HASH_MISMATCH_MAX_POLL_STREAK) {
+        notifyCollabPollPausedManualSyncToast(project.id, project.name);
+        if (import.meta.env.DEV) {
+          console.info('[pollCollabRevisionFallback] poll paused after hash streak', {
+            projectId: project.id,
+            streak: nextStreak
+          });
+        }
+        return false;
+      }
+    } else if (!light.pendingOpsSinceAck) {
+      const ref = get(projects).find((p) => p.id === project.id) ?? project;
+      return pullCollabSliceForProject(ref, 'collab-rev-poll', {
+        knownRemoteRevision: remoteRev
+      });
+    }
   }
 
   const ref = get(projects).find((p) => p.id === project.id) ?? project;
-  return pullCollabSliceForProject(ref, 'collab-rev-poll', { forceMerge: true });
+  const revChanged = cached === null || cached !== remoteRev;
+
+  if (revChanged) {
+    return pullCollabSliceForProject(ref, 'collab-rev-poll', {
+      knownRemoteRevision: remoteRev
+    });
+  }
+
+  /** COLLAB-PERF P1-01 — revision 동일·hash 불일치: structure_ops만, full slice merge 생략 */
+  const opsResult = await pullStructureOpsForProject(ref);
+  const hashDiffersAfter = await collabSliceOutOfSyncAfterPull(
+    workspaceUserId,
+    project.id,
+    opsResult,
+    false
+  );
+  if (!hashDiffersAfter) {
+    resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+    setCachedCollabRevision(workspaceUserId, project.id, remoteRev);
+  }
+  if (import.meta.env.DEV) {
+    console.info('[pollCollabRevisionFallback] hash-only ops pull', {
+      projectId: project.id,
+      applied: opsResult.applied,
+      hashDiffersAfter
+    });
+  }
+  return opsResult.applied > 0 || !hashDiffersAfter;
 }
 
 const COLLAB_REV_PULL_DEBOUNCE_MS = 200;
@@ -1288,6 +2015,11 @@ async function flushCollabRevisionPull(
 ): Promise<void> {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
   if (get(currentProject)?.id !== projectId) return;
+
+  if (await collabPullShouldDeferForInteraction()) {
+    queuePendingCollabPull({ mode: 'revision-flush', projectId, reason, revisionHint });
+    return;
+  }
 
   const { isCloudBidirectionalSyncBusy } = await import('$lib/supabase/workspacePush');
   if (isCloudBidirectionalSyncBusy()) {
@@ -1367,14 +2099,86 @@ export function unsubscribeCollabRevisionRealtime(): void {
   }
 }
 
-/** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영 */
-export async function pullSharedProjectSlicesIfNewer(): Promise<number> {
+/** COLLAB-PERF-2 E5/E5-2 — bidirectional 전체 공유 pull 최소 간격 */
+const SHARED_FULL_PULL_COOLDOWN_MS = 60_000;
+/** interval 틱에서 나머지 공유 pull 허용 최소 idle */
+const SHARED_FULL_PULL_IDLE_MS = 30_000;
+
+/** E5-2: 0이면 첫 full-pull 쿨다운이 즉시 통과됨 → 로드 시각으로 초기화 */
+let lastFullSharedPullTs = typeof window !== 'undefined' ? Date.now() : 0;
+
+function isSharedCollabMemberProjectRecord(p: Project, uid: string): boolean {
+  const src = p.cloud_workspace_source_user_id ?? null;
+  return !!(src && src !== uid);
+}
+
+/**
+ * E5-2 — 나머지 공유 full-pull: **idle-long** 또는 **interval+idle≥30s** 만.
+ * start/visibility/focus는 현재 프로젝트 pull만(상위 함수) — N건 일괄 fetch 금지.
+ */
+export function shouldPullAllSharedSlices(reason: string, idleMs?: number): boolean {
+  if (Date.now() - lastFullSharedPullTs < SHARED_FULL_PULL_COOLDOWN_MS) return false;
+  if (reason === 'idle-long') return true;
+  if (reason === 'interval') return (idleMs ?? 0) >= SHARED_FULL_PULL_IDLE_MS;
+  return false;
+}
+
+export function recordLastFullSharedPullTs(): void {
+  lastFullSharedPullTs = Date.now();
+}
+
+/**
+ * COLLAB-PERF-2 E5 — bidirectional: 현재 프로젝트만 매 틱 · 나머지 공유는 idle+쿨다운 시만
+ */
+export async function pullSharedProjectSlicesForBidirectionalSync(
+  reason: string,
+  opts?: { idleMs?: number }
+): Promise<number> {
   if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
   const uid = getAuthUserId();
   if (!uid) return 0;
 
+  const curId = get(currentProject)?.id?.trim() || null;
+  const sharedOtherIds = get(projects)
+    .filter((p) => {
+      if (curId && p.id === curId) return false;
+      return isSharedCollabMemberProjectRecord(p, uid);
+    })
+    .map((p) => p.id);
+
+  let n = 0;
+  if (curId) {
+    n += await pullSharedProjectSlicesIfNewer([curId]);
+  }
+
+  if (sharedOtherIds.length && shouldPullAllSharedSlices(reason, opts?.idleMs)) {
+    n += await pullSharedProjectSlicesIfNewer(sharedOtherIds);
+    recordLastFullSharedPullTs();
+    if (import.meta.env.DEV) {
+      console.info('[collab-shared-pull] full-pull', reason, sharedOtherIds.length);
+    }
+  } else if (import.meta.env.DEV && sharedOtherIds.length) {
+    console.info('[collab-shared-pull] current-only', reason, curId, `(others=${sharedOtherIds.length})`);
+  }
+
+  return n;
+}
+
+/** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영 */
+export async function pullSharedProjectSlicesIfNewer(
+  onlyProjectIds?: readonly string[]
+): Promise<number> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
+  const uid = getAuthUserId();
+  if (!uid) return 0;
+
+  const filter =
+    onlyProjectIds?.length &&
+    new Set(onlyProjectIds.map((id) => id.trim()).filter(Boolean));
+
   let n = 0;
   for (const p of get(projects)) {
+    if (filter && !filter.has(p.id)) continue;
     const changed = await mergeSharedProjectSliceFromCloudIfApplicable(p);
     if (changed) n++;
   }

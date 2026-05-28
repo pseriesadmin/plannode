@@ -15,13 +15,13 @@ import { authUser } from '$lib/stores/authSession';
 const INTERVAL_MS_DEFAULT = 32000;
 /**
  * 소유자 워크스페이스에 붙은 공유 프로젝트(`cloud_workspace_source_user_id` ≠ 내 uid)이면서
- * 클라우드 더티일 때 — P-8 ≤15s·플랜 §6.1 상한에 맞춘 보조 틱.
+ * 클라우드 더티일 때 — COLLAB-PERF-2 E6: 8s→15s (폭주 완화 · 저장 ≤15s 목표).
  */
-const INTERVAL_MS_SHARED_WORKSPACE_DIRTY = 8000;
+const INTERVAL_MS_SHARED_WORKSPACE_DIRTY = 15000;
 /** 공유 멤버 프로젝트 열림·클린 — 양방향 틱 보조(P-8 ≤15s) */
 const INTERVAL_MS_SHARED_WORKSPACE_OPEN = 10000;
-/** collab_meta revision 폴백 poll — Realtime 누락·일시 끊김 대비 (Tier 0 T0-4: 4s→2s) */
-export const COLLAB_FALLBACK_POLL_MS = 2000;
+/** collab_meta revision 폴백 poll — Realtime 누락·일시 끊김 대비 (COLLAB-PERF P0-01: 2s→6s) */
+export const COLLAB_FALLBACK_POLL_MS = 6000;
 /** 사용자 입력 없이 이 시간이 지난 뒤 주기 틱에서 동기 이유를 `idle-long`으로 표시(NOW-75). */
 const LONG_IDLE_MS = 5 * 60 * 1000;
 
@@ -60,7 +60,7 @@ function onWindowFocus() {
 function onIntervalTick(): void {
   const idleMs = Date.now() - lastUserActivityMs;
   const reason = idleMs >= LONG_IDLE_MS ? 'idle-long' : 'interval';
-  void runBidirectionalCloudSync(reason);
+  void runBidirectionalCloudSync(reason, { idleMs });
 }
 
 /** 공유 멤버가 소유자 슬라이스에 반영 중이고 로컬이 더티할 때만 짧은 간격. */

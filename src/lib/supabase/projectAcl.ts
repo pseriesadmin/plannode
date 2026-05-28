@@ -16,6 +16,7 @@ import {
 import { isMissingRelationError, userFacingAclErrorFromSupabase } from '$lib/supabase/aclErrors';
 import { isPlatformMaster } from '$lib/supabase/platformMaster';
 import { MAX_SHARED_COLLABORATORS } from '$lib/plannodeCollabLimits';
+import { isUuid } from '$lib/isUuid';
 
 const TABLE = 'plannode_project_acl';
 const OWN_WORKSPACE_TABLE = 'plannode_workspace';
@@ -67,6 +68,32 @@ export function normalizeAclEmail(raw: string): string {
     .toLowerCase();
 }
 
+/** COLLAB-PERF-2 E4-2 — `project_id=eq.undefined` 등 잘못된 ACL HEAD/SELECT 가드 */
+export function isUsableAclProjectId(projectId: unknown): projectId is string {
+  const id = String(projectId ?? '').trim();
+  if (!id) return false;
+  const lower = id.toLowerCase();
+  return lower !== 'undefined' && lower !== 'null';
+}
+
+/** Supabase Auth uid — slice·ACL workspace 소스 */
+export function isUsableCollabWorkspaceUserId(workspaceUserId: unknown): workspaceUserId is string {
+  const id = String(workspaceUserId ?? '').trim();
+  if (!id) return false;
+  const lower = id.toLowerCase();
+  if (lower === 'undefined' || lower === 'null') return false;
+  return isUuid(id);
+}
+
+const sliceFetchInflight = new Map<
+  string,
+  Promise<{ project: Project; nodes: Node[] } | null>
+>();
+
+function sliceFetchInflightKey(workspaceSourceUserId: string, projectId: string): string {
+  return `${workspaceSourceUserId}:${projectId}`;
+}
+
 /** Supabase 미설정 시: 로컬만 쓰는 구버전 호환(접근 허용 검사 생략) */
 export function isAclEnforced(): boolean {
   return isSupabaseCloudConfigured();
@@ -94,6 +121,12 @@ export function canOpenProjectShareSettingsUi(project: Project | null | undefine
 /** 행 개수. -2 = 테이블 없음·스키마 캐시(404·PGRST205), -1 = 기타 오류 */
 export async function countAclRows(projectId: string): Promise<number> {
   if (!isAclEnforced()) return 0;
+  if (!isUsableAclProjectId(projectId)) {
+    if (import.meta.env.DEV) {
+      console.warn('[countAclRows] skip invalid project_id', projectId);
+    }
+    return -1;
+  }
   const q = () =>
     supabase.from(TABLE).select('id', { count: 'exact', head: true }).eq('project_id', projectId);
   let { count, error } = await q();
@@ -111,6 +144,12 @@ export async function countAclRows(projectId: string): Promise<number> {
 /** 소유자 제외 멤버 행 개수. -2 = 테이블 없음, -1 = 기타 오류 */
 export async function countMemberAclRows(projectId: string): Promise<number> {
   if (!isAclEnforced()) return 0;
+  if (!isUsableAclProjectId(projectId)) {
+    if (import.meta.env.DEV) {
+      console.warn('[countMemberAclRows] skip invalid project_id', projectId);
+    }
+    return -1;
+  }
   const q = () =>
     supabase
       .from(TABLE)
@@ -135,6 +174,7 @@ export async function countMemberAclRows(projectId: string): Promise<number> {
  */
 export async function canAccessProject(project: Project): Promise<boolean> {
   if (!isAclEnforced()) return true;
+  if (!isUsableAclProjectId(project?.id)) return false;
   const uid = getAuthUserId();
   const email = getAuthEmail();
   if (!uid || !email) return false;
@@ -299,13 +339,41 @@ function parseProjectFromJson(obj: unknown): Project | null {
   };
 }
 
-/** RPC 슬라이스만 가져오기(동기화 루프·가져오기 공용) */
+/** RPC 슬라이스만 가져오기(동기화 루프·가져오기 공용) · in-flight dedupe(E4-2) */
 export async function fetchProjectSliceFromCloud(
   workspaceSourceUserId: string,
   projectId: string
 ): Promise<{ project: Project; nodes: Node[] } | null> {
   if (!isAclEnforced()) return null;
-  if (!workspaceSourceUserId || !projectId) return null;
+  if (!isUsableCollabWorkspaceUserId(workspaceSourceUserId) || !isUsableAclProjectId(projectId)) {
+    if (import.meta.env.DEV) {
+      console.warn('[fetchProjectSliceFromCloud] skip invalid ids', {
+        workspaceSourceUserId,
+        projectId
+      });
+    }
+    return null;
+  }
+
+  const key = sliceFetchInflightKey(workspaceSourceUserId, projectId);
+  const inflight = sliceFetchInflight.get(key);
+  if (inflight) return inflight;
+
+  const promise = fetchProjectSliceFromCloudOnce(workspaceSourceUserId, projectId);
+  sliceFetchInflight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (sliceFetchInflight.get(key) === promise) {
+      sliceFetchInflight.delete(key);
+    }
+  }
+}
+
+async function fetchProjectSliceFromCloudOnce(
+  workspaceSourceUserId: string,
+  projectId: string
+): Promise<{ project: Project; nodes: Node[] } | null> {
   const { data, error } = await supabase.rpc('plannode_workspace_fetch_project_slice', {
     p_workspace_user_id: workspaceSourceUserId,
     p_project_id: projectId
