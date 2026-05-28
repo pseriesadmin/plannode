@@ -12,7 +12,8 @@ import {
 import { applySanitizeImportedPlannodeNodeV1 } from '$lib/ai/badgePromptInjector';
 import { mergeLearnedBadgeRulesFromImportedNodes } from '$lib/ai/badgeMetadataInference';
 import type { PrdSectionKey } from '$lib/prdStandardV20';
-import { markCloudWorkspaceDirty, markCloudWorkspaceSynced } from '$lib/stores/workspaceDirty';
+import { markCloudWorkspaceDirty, markCloudWorkspaceSynced, markCollabStructureOpsPending } from '$lib/stores/workspaceDirty';
+import { getAuthUserId } from '$lib/stores/authSession';
 import {
   captureNodeSnapshot,
   listNodeSnapshots,
@@ -825,8 +826,57 @@ export function createProject(projectData: Omit<Project, 'id' | 'created_at' | '
   return newProject;
 }
 
+/** 공유 ACL 멤버 — 소유자 워크스페이스 슬라이스/ops 경로 */
+function isSharedCollabMemberProject(projectId: string): boolean {
+  const uid = getAuthUserId();
+  if (!uid) return false;
+  const proj =
+    get(projects).find((p) => p.id === projectId) ??
+    (get(currentProject)?.id === projectId ? get(currentProject) : null);
+  const src = proj?.cloud_workspace_source_user_id;
+  return !!(src && src !== uid);
+}
+
+/** parent/좌표/num·노드增删만 — structure ops·slice merge 경로 (모달 본문·배지는 full dirty) */
+function isStructureOnlyPilotPersist(prevSnap: Node[], list: Node[]): boolean {
+  const prevIds = new Set(prevSnap.map((n) => n.id));
+  const nextIds = new Set(list.map((n) => n.id));
+  if (prevIds.size !== nextIds.size) return true;
+  for (const id of prevIds) {
+    if (!nextIds.has(id)) return true;
+  }
+  const prevById = new Map(prevSnap.map((n) => [n.id, n]));
+  for (const n of list) {
+    const p = prevById.get(n.id);
+    if (!p) continue;
+    if ((p.parent_id ?? '') !== (n.parent_id ?? '')) return true;
+    if (p.mx !== n.mx || p.my !== n.my) return true;
+    if ((p.num ?? '') !== (n.num ?? '')) return true;
+    if (p.name !== n.name) return false;
+    if ((p.description ?? '') !== (n.description ?? '')) return false;
+    if (JSON.stringify(p.badges ?? []) !== JSON.stringify(n.badges ?? [])) return false;
+    if (JSON.stringify(p.metadata ?? {}) !== JSON.stringify(n.metadata ?? {})) return false;
+  }
+  return true;
+}
+
+function markCloudPersistForProjectTouch(
+  projectId: string,
+  kind: 'full' | 'structure-only'
+): void {
+  if (kind === 'structure-only' && isSharedCollabMemberProject(projectId)) {
+    markCollabStructureOpsPending(projectId);
+    return;
+  }
+  markCloudWorkspaceDirty();
+}
+
 /** 노드·캔버스 변경 시 프로젝트 `updated_at`만 갱신 — 클라우드 LWW 동기화용 */
-export function touchProjectUpdatedAt(projectId: string, iso?: string): void {
+export function touchProjectUpdatedAt(
+  projectId: string,
+  iso?: string,
+  opts?: { cloudPersist?: 'full' | 'structure-only' }
+): void {
   if (typeof window === 'undefined') return;
   const now = iso ?? new Date().toISOString();
   projects.update((plist) => {
@@ -847,10 +897,14 @@ export function touchProjectUpdatedAt(projectId: string, iso?: string): void {
       /* ignore */
     }
   }
-  markCloudWorkspaceDirty();
+  markCloudPersistForProjectTouch(projectId, opts?.cloudPersist ?? 'full');
   if (typeof window !== 'undefined') {
     try {
-      window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'node-edit' } }));
+      const reason =
+        opts?.cloudPersist === 'structure-only' && isSharedCollabMemberProject(projectId)
+          ? 'node-edit-structure'
+          : 'node-edit';
+      window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason } }));
     } catch {
       /* ignore */
     }
@@ -1006,9 +1060,25 @@ function syncProjectRootNodeTitle(projectId: string, name: string, now: string):
   }
 }
 
+/** structure Broadcast·pull replay 구간 — `persistNodesFromPilot`(더티·touch) 억제 */
+let remoteStructureOpApplyDepth = 0;
+
+export function enterRemoteStructureOpApply(): void {
+  remoteStructureOpApplyDepth++;
+}
+
+export function exitRemoteStructureOpApply(): void {
+  remoteStructureOpApplyDepth = Math.max(0, remoteStructureOpApplyDepth - 1);
+}
+
+export function isRemoteStructureOpApplyActive(): boolean {
+  return remoteStructureOpApplyDepth > 0;
+}
+
 /** 파일럿 캔버스에서 전체 노드 스냅샷 저장 (현재 프로젝트와 id 일치 시만) */
 export function persistNodesFromPilot(projectId: string, list: Node[]) {
   if (typeof window === 'undefined') return;
+  if (isRemoteStructureOpApplyActive()) return;
   
   // 정책 8: 프로젝트가 삭제 대기 중이면 저장 거부
   const pendingDeleted = getPendingWorkspaceDeletionIds();
@@ -1066,7 +1136,11 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
     }
     if (maxTs > 0) touchIso = new Date(maxTs).toISOString();
   }
-  touchProjectUpdatedAt(projectId, touchIso);
+  const cloudPersist: 'full' | 'structure-only' =
+    isSharedCollabMemberProject(projectId) && isStructureOnlyPilotPersist(prevSnap, list)
+      ? 'structure-only'
+      : 'full';
+  touchProjectUpdatedAt(projectId, touchIso, { cloudPersist });
   schedulePersistNodeSnapshotAfterPilot(projectId);
 }
 

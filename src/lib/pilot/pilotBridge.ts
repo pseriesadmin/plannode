@@ -12,17 +12,18 @@ import {
 import { authSession, getAuthUserId } from '$lib/stores/authSession';
 import { supabase } from '$lib/supabase/client';
 import { isSupabaseCloudConfigured } from '$lib/supabase/env';
-import { ensureCollabSliceFreshBeforePersist, registerFlushPilotNodesBeforeCollabMerge } from '$lib/supabase/sync';
+import { ensureCollabSliceFreshBeforePersist, registerFlushPilotNodesBeforeCollabMerge, flushPendingCollabPull } from '$lib/supabase/sync';
 
 /**
  * EPIC D — structure ops vs hydrate/persist 이중 계약 (브리지 층 요약)
  *
  * | 경로 | 진실·역할 |
  * |------|-----------|
- * | **structure Broadcast** (`:structure` / `structure-op`) | 편집 중 **파일럿 `nodes`** 갱신 · 수신 직후 `persistNodesFromRemoteStructureOp`(더티·`touchProject` 없음, pull preserve용). |
+ * | **structure Broadcast** (`:structure` / `structure-op`) | 편집 중 **파일럿 `nodes`** 갱신(add/delete/move/**update_node**) · 수신 직후 `persistNodesFromRemoteStructureOp`(더티·`touchProject` 없음, pull preserve용). **PARITY-B:** 소유·공유 모두 Broadcast + (설정 시) op persist. |
  * | **onPersist** (아래) | 파일럿 → `persistNodesFromPilot` → revision pull(LWW). **저장본 정본**. |
  * | **nodesStore.subscribe → hydrateFromStore** | 클라우드 pull·스토어 병합 후 캔버스 반영. |
  * | **모달 열림** | hydrate는 파일럿 `hydrateFromStore`에서 **보류**(`MODAL_EDIT_HYDRATE_DEFER`). 브리지는 스토어 구독을 유지 — 닫을 때 pending 1회 반영. |
+ * | **캔버스 상호작용** | drag/pan/wheel burst 중 hydrate **보류**(`CANVAS_INTERACTION_DEFER` · P1-04) — pull·`nodes.set`은 즉시, pointerup·wheel idle 후 pending 1회. **collab revision poll/pull**도 동일 조건에서 defer(`pendingCollabPull` · E4-1). |
  * | **text ops** (`:text`) | 모달 description만. structure 채널과 **topic 분리**. |
  *
  * @see docs/plannode_ot2_tree_ops_channel_spike.md · plan-output P-12.3
@@ -113,6 +114,8 @@ export type PilotApi = NonNullable<ReturnType<typeof initPlannode>>;
 
 let pilotApi: PilotApi | null = null;
 let syncingFromStore = false;
+/** E12 — pointerup 후 collab pull burst 완화 (500ms debounce) */
+let collabPullDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function mountPilotBridge(): { destroy: () => void } {
   if (pilotApi) pilotApi.destroy();
@@ -159,12 +162,14 @@ export function mountPilotBridge(): { destroy: () => void } {
     },
     /** structure·text Broadcast 구독용 — EPIC D `armStructureOpsForProject`와 쌍 */
     getCollabAuthUserId: () => getAuthUserId(),
+    /** EPIC E op persist workspace uid — 공유 멤버=소유자 uid · 소유자=본인 uid (PARITY-B) */
     getCollabWorkspaceSourceUserId: () => {
       const p = get(currentProject);
       const uid = getAuthUserId();
-      if (!p?.cloud_workspace_source_user_id || !uid) return null;
-      if (p.cloud_workspace_source_user_id === uid) return null;
-      return p.cloud_workspace_source_user_id;
+      if (!p?.id || !uid) return null;
+      const src = p.cloud_workspace_source_user_id;
+      if (src && src !== uid) return src;
+      return uid;
     },
     /** 모달 저장 직전 — 공유 슬라이스 freshness best-effort (저장 차단 금지 · Phase D) */
     onBeforeModalPersist: async () => {
@@ -178,6 +183,13 @@ export function mountPilotBridge(): { destroy: () => void } {
         console.warn('[onBeforeModalPersist] degraded', p.id, r.reason);
       }
       return { ok: true, reason: r.reason, merged: r.merged };
+    },
+    onAfterPendingStoreHydrate: () => {
+      if (collabPullDebounceTimer) clearTimeout(collabPullDebounceTimer);
+      collabPullDebounceTimer = setTimeout(() => {
+        collabPullDebounceTimer = null;
+        flushPendingCollabPull();
+      }, 500);
     }
   });
 
@@ -221,7 +233,7 @@ export function mountPilotBridge(): { destroy: () => void } {
 
   /**
    * revision pull 등으로 스토어가 갱신될 때 캔버스 hydrate.
-   * 모달 열림 시 파일럿이 hydrate 본문을 보류해도 **구독 호출은 유지**(스토어는 즉시 병합, 캔버스는 MODAL_EDIT_HYDRATE_DEFER).
+   * 모달·캔버스 상호작용 중 파일럿이 hydrate 본문을 보류해도 **구독 호출은 유지**(스토어는 즉시 병합, 캔버스는 pending 1회).
    * structure 수신은 `onRemoteStructureStoreSync`로 스토어만 맞춤(`isNodesSetFromPilotPersist`로 재hydrate 스킵). 로컬 편집·저장은 `onPersist`·pull.
    */
   const unsubNodes = nodesStore.subscribe((list) => {
@@ -252,6 +264,10 @@ export function mountPilotBridge(): { destroy: () => void } {
 
   return {
     destroy() {
+      if (collabPullDebounceTimer) {
+        clearTimeout(collabPullDebounceTimer);
+        collabPullDebounceTimer = null;
+      }
       registerFlushPilotNodesBeforeCollabMerge(() => {});
       unsub();
       unsubNodes();
@@ -292,6 +308,19 @@ export function pilotExportSpecSheetCsv() {
 /** 기능명세 그리드 편집분 즉시 스토어 반영(지연 persist 플러시) */
 export function pilotFlushPersistNow() {
   pilotApi?.flushPersistNow?.();
+}
+
+export function pilotShouldDeferCollabPull(): boolean {
+  return pilotApi?.shouldDeferCollabPull?.() ?? pilotIsCanvasInteractionDeferHydrate();
+}
+
+/** pull 직후·상호작용 종료 시 pending hydrate + deferred collab pull 1회 반영 */
+export function pilotFlushPendingStoreHydrate(): void {
+  pilotApi?.flushPendingStoreHydrate?.();
+}
+
+export function pilotIsCanvasInteractionDeferHydrate(): boolean {
+  return pilotApi?.isCanvasInteractionDeferHydrate?.() ?? false;
 }
 
 export function pilotHasPendingGridPersist(): boolean {

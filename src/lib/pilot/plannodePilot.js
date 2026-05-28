@@ -32,7 +32,9 @@ import {
 import { insertAiGenerationL5 } from '$lib/supabase/aiGenerations';
 import {
   registerRecentlyAddedNodeIdsForCloudMerge,
-  registerRecentlyDeletedNodeIdsForCloudMerge
+  registerRecentlyDeletedNodeIdsForCloudMerge,
+  enterRemoteStructureOpApply,
+  exitRemoteStructureOpApply
 } from '$lib/stores/projects';
 import {
   subscribeProjectTextOps,
@@ -314,7 +316,10 @@ let getStoreNodesForCollabMerge = null;
 let shouldPreserveNodeOnCollabPrune = null;
 /** @type {null | (() => Promise<{ ok?: boolean; reason?: string } | void>)} 모달 저장 직전 save-barrier (Phase D) */
 let onBeforeModalPersist = null;
+let onAfterPendingStoreHydrate = null;
 let persistTimer = null;
+/** drag end 등 `render()` 직후 `flushPersistNow` — tail `schedulePersist` 1회 억제(CANVAS-P1-03) */
+let skipSchedulePersistOnce = false;
 
 /** Undo·Redo: 노드 전체 스냅샷 스택. 각 스택 최대 UNDO_MAX개(메모리 한도) — 연속 Undo/Redo는 이 길이를 넘기지 않음 */
 const UNDO_MAX = 40;
@@ -330,6 +335,60 @@ let nodeEditModalNodeId = null;
 let nodeEditModalCommittedSave = false;
 /** 모달 열림 중 쌓인 hydrate 요청 — 닫을 때(저장 안 한 경우만) 반영 */
 let pendingHydrateFromStore = null;
+/** CANVAS-P1-04 — pointer drag/pan·wheel burst 중 pull hydrate 보류(스토어 merge는 즉시) */
+let canvasPointerInteractionDepth = 0;
+let canvasWheelBurstTimer = null;
+const CANVAS_WHEEL_BURST_MS = 120;
+
+function isCanvasWheelBurstActive() {
+  return canvasWheelBurstTimer != null;
+}
+
+function isCanvasInteractionDeferHydrate() {
+  return canvasPointerInteractionDepth > 0 || isCanvasWheelBurstActive();
+}
+
+function beginCanvasPointerInteractionDeferHydrate() {
+  canvasPointerInteractionDepth++;
+}
+
+function endCanvasPointerInteractionDeferHydrate() {
+  canvasPointerInteractionDepth = Math.max(0, canvasPointerInteractionDepth - 1);
+  maybeFlushPendingStoreHydrateAfterInteraction();
+}
+
+function armCanvasWheelBurstDeferHydrate() {
+  if (canvasWheelBurstTimer != null) clearTimeout(canvasWheelBurstTimer);
+  canvasWheelBurstTimer = setTimeout(() => {
+    canvasWheelBurstTimer = null;
+    maybeFlushPendingStoreHydrateAfterInteraction();
+  }, CANVAS_WHEEL_BURST_MS);
+}
+
+function shouldDeferHydrateFromStore() {
+  return isNodeEditModalDomOpen() || isCanvasInteractionDeferHydrate();
+}
+
+function maybeFlushPendingStoreHydrateAfterInteraction() {
+  if (shouldDeferHydrateFromStore()) return;
+  flushPendingStoreHydrate();
+}
+
+function flushPendingStoreHydrate() {
+  if (isNodeEditModalDomOpen()) {
+    if (nodeEditModalCommittedSave) pendingHydrateFromStore = null;
+    return;
+  }
+  if (isCanvasInteractionDeferHydrate()) return;
+  const pending = pendingHydrateFromStore;
+  pendingHydrateFromStore = null;
+  if (!pending) {
+    onAfterPendingStoreHydrate?.();
+    return;
+  }
+  runHydrateFromStoreCore(pending.project, pending.pilotNodes);
+  onAfterPendingStoreHydrate?.();
+}
 /** 저장 직후 수 초간 원격 hydrate가 방금 저장한 노드를 덮지 않도록 */
 let nodeEditSaveGuard = null;
 const NODE_EDIT_SAVE_GUARD_MS = 8000;
@@ -538,29 +597,24 @@ function applyRemoteAddNodeFromStructureOp(payload) {
   if (!payload || payload.type !== 'add_node' || !payload.node?.id) return;
   const { node } = payload;
   if (find(node.id)) return;
-  structureOpsApplyingRemote = true;
-  try {
-    nodes = [
-      ...nodes,
-      {
-        id: node.id,
-        parent_id: node.parent_id,
-        name: node.name ?? '',
-        description: node.description ?? '',
-        node_type: node.node_type ?? 'detail',
-        num: node.num ?? '',
-        badges: [],
-        metadata: { badges: { dev: [], ux: [], prj: [] } },
-        mx: node.mx ?? null,
-        my: node.my ?? null
-      }
-    ];
-    syncNcFromNodes();
-    if (curP?.id) registerRecentlyAddedNodeIdsForCloudMerge(curP.id, [node.id]);
-    render();
-  } finally {
-    structureOpsApplyingRemote = false;
-  }
+  nodes = [
+    ...nodes,
+    {
+      id: node.id,
+      parent_id: node.parent_id,
+      name: node.name ?? '',
+      description: node.description ?? '',
+      node_type: node.node_type ?? 'detail',
+      num: node.num ?? '',
+      badges: [],
+      metadata: { badges: { dev: [], ux: [], prj: [] } },
+      mx: node.mx ?? null,
+      my: node.my ?? null
+    }
+  ];
+  syncNcFromNodes();
+  if (curP?.id) registerRecentlyAddedNodeIdsForCloudMerge(curP.id, [node.id]);
+  render();
 }
 
 function applyRemoteMoveNodeFromStructureOp(payload) {
@@ -570,17 +624,12 @@ function applyRemoteMoveNodeFromStructureOp(payload) {
   const mx = Number(payload.mx);
   const my = Number(payload.my);
   if (!Number.isFinite(mx) || !Number.isFinite(my)) return;
-  structureOpsApplyingRemote = true;
-  try {
-    node.parent_id = payload.parent_id;
-    node.mx = mx;
-    node.my = my;
-    if (payload.num != null && String(payload.num).trim() !== '') node.num = String(payload.num);
-    nodes = [...nodes];
-    render();
-  } finally {
-    structureOpsApplyingRemote = false;
-  }
+  node.parent_id = payload.parent_id;
+  node.mx = mx;
+  node.my = my;
+  if (payload.num != null && String(payload.num).trim() !== '') node.num = String(payload.num);
+  nodes = [...nodes];
+  render();
 }
 
 function applyRemoteDeleteNodeFromStructureOp(payload) {
@@ -588,20 +637,58 @@ function applyRemoteDeleteNodeFromStructureOp(payload) {
   const rootId = payload.node_id;
   if (!find(rootId)) return;
   const ids = collectNodeSubtreeIds(rootId);
-  structureOpsApplyingRemote = true;
-  try {
-    if (curP?.id) registerRecentlyDeletedNodeIdsForCloudMerge(curP.id, ids);
-    if (nodeEditModalNodeId && ids.includes(nodeEditModalNodeId)) {
-      teardownTextOpsDescEditor();
-      nodeEditModalNodeId = null;
-    }
-    if (selId && ids.includes(selId)) selId = null;
-    nodes = nodes.filter((x) => !ids.includes(x.id));
-    syncNcFromNodes();
-    render();
-  } finally {
-    structureOpsApplyingRemote = false;
+  if (curP?.id) registerRecentlyDeletedNodeIdsForCloudMerge(curP.id, ids);
+  if (nodeEditModalNodeId && ids.includes(nodeEditModalNodeId)) {
+    teardownTextOpsDescEditor();
+    nodeEditModalNodeId = null;
   }
+  if (selId && ids.includes(selId)) selId = null;
+  nodes = nodes.filter((x) => !ids.includes(x.id));
+  syncNcFromNodes();
+  render();
+}
+
+/** PARITY-A — 원격 `update_node` Broadcast → 캔버스·모달(해당 id) 반영 */
+function syncRemoteUpdateNodeToEditModal(nodeId, patch) {
+  if (nodeEditModalNodeId !== nodeId || !isNodeEditModalDomOpen()) return;
+  textOpsApplyingRemote = true;
+  try {
+    if (patch.name != null) {
+      const ein = document.querySelector('.mbg .ein');
+      if (ein) ein.value = String(patch.name);
+    }
+    if (patch.description != null) {
+      const eid = document.querySelector('.mbg .eid');
+      if (eid) {
+        eid.value = String(patch.description);
+        textOpsDescLastValue = String(patch.description);
+      }
+    }
+    if (patch.num != null) {
+      const einum = document.querySelector('.mbg .einum');
+      if (einum) einum.value = String(patch.num);
+    }
+  } finally {
+    textOpsApplyingRemote = false;
+  }
+}
+
+function applyRemoteUpdateNodeFromStructureOp(payload) {
+  if (!payload || payload.type !== 'update_node' || !payload.node?.id) return;
+  const patch = payload.node;
+  const node = find(patch.id);
+  if (!node) return;
+  if (patch.name != null) node.name = patch.name;
+  if (patch.description != null) node.description = patch.description;
+  if (patch.parent_id != null) node.parent_id = patch.parent_id;
+  if (patch.node_type != null) node.node_type = patch.node_type;
+  if (patch.num != null) node.num = patch.num;
+  if (patch.mx !== undefined) node.mx = patch.mx;
+  if (patch.my !== undefined) node.my = patch.my;
+  if (patch.updated_at != null) node.updated_at = patch.updated_at;
+  nodes = [...nodes];
+  syncRemoteUpdateNodeToEditModal(patch.id, patch);
+  render();
 }
 
 function syncStoreFromRemoteStructureOp() {
@@ -620,11 +707,23 @@ function handleRemoteStructureOp(op) {
   if (!op || !curP || op.project_id !== curP.id) return;
   if (structureOpsApplyingRemote) return;
   const payload = op.op;
-  if (payload?.type === 'add_node') applyRemoteAddNodeFromStructureOp(payload);
-  else if (payload?.type === 'delete_node') applyRemoteDeleteNodeFromStructureOp(payload);
-  else if (payload?.type === 'move_node') applyRemoteMoveNodeFromStructureOp(payload);
-  else return;
-  syncStoreFromRemoteStructureOp();
+  if (persistTimer != null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  structureOpsApplyingRemote = true;
+  enterRemoteStructureOpApply();
+  try {
+    if (payload?.type === 'add_node') applyRemoteAddNodeFromStructureOp(payload);
+    else if (payload?.type === 'delete_node') applyRemoteDeleteNodeFromStructureOp(payload);
+    else if (payload?.type === 'move_node') applyRemoteMoveNodeFromStructureOp(payload);
+    else if (payload?.type === 'update_node') applyRemoteUpdateNodeFromStructureOp(payload);
+    else return;
+    syncStoreFromRemoteStructureOp();
+  } finally {
+    structureOpsApplyingRemote = false;
+    exitRemoteStructureOpApply();
+  }
 }
 
 function armStructureOpsForProject(projectId, userId) {
@@ -860,14 +959,7 @@ function runHydrateFromStoreCore(project, pilotNodes) {
 }
 
 function flushPendingNodeEditHydrate() {
-  if (nodeEditModalCommittedSave) {
-    pendingHydrateFromStore = null;
-    return;
-  }
-  const pending = pendingHydrateFromStore;
-  pendingHydrateFromStore = null;
-  if (!pending) return;
-  runHydrateFromStoreCore(pending.project, pending.pilotNodes);
+  flushPendingStoreHydrate();
 }
 
 function clearUndoStack() {
@@ -2114,9 +2206,13 @@ function collectAlignmentGuides(n, nx, ny, excludeIds) {
 }
 
 function schedulePersist() {
-  if (!onPersist || syncing) return;
+  if (!onPersist || syncing || structureOpsApplyingRemote) return;
   clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
+    if (structureOpsApplyingRemote) {
+      persistTimer = null;
+      return;
+    }
     try {
       onPersist({ nodes: JSON.parse(JSON.stringify(nodes)), curP });
     } catch (_) {}
@@ -2132,7 +2228,7 @@ function flushPersistNow(opts) {
     persistTimer = null;
   }
   if (!onPersist || !curP) return;
-  if (!force && syncing) return;
+  if (!force && (syncing || structureOpsApplyingRemote)) return;
   try {
     onPersist({ nodes: JSON.parse(JSON.stringify(nodes)), curP });
   } catch (_) {}
@@ -3376,12 +3472,17 @@ function render() {
   
   if (curView === 'prd') buildPRD();
   if (curView === 'spec') buildSpec();
-  schedulePersist();
+  if (!skipSchedulePersistOnce) schedulePersist();
+  skipSchedulePersistOnce = false;
   maybeEmitNodeSelect();
 }
 
-function drawEdges() {
-  EG.innerHTML = '';
+function edgePathKey(parentId, childId) {
+  return `${parentId}|${childId}`;
+}
+
+function ensureEdgeArrowDefs() {
+  if (EG.querySelector('defs marker#ar')) return;
   const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
   const mk = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
   mk.setAttribute('id', 'ar');
@@ -3395,53 +3496,87 @@ function drawEdges() {
   py.setAttribute('fill', '#a78bfa');
   mk.appendChild(py);
   defs.appendChild(mk);
-  EG.appendChild(defs);
+  EG.insertBefore(defs, EG.firstChild);
+}
+
+function computeEdgePathD(parent, child) {
+  const pp = gp(parent);
+  const cp = gp(child);
+  if (nodeMapLayoutMode === 'topdown') {
+    const pw = nodeCardWidth(parent);
+    const cw = nodeCardWidth(child);
+    const x1 = pp.x + pw / 2;
+    const y1 = nodeTopdownBranchAnchorY(parent);
+    const x2 = cp.x + cw / 2;
+    const y2top = nodeTopY(child);
+    const y2 = y2top - 20;
+    const dist = Math.max(y2 - y1, 12);
+    const dx = Math.abs(x2 - x1);
+    const dyEnd = Math.min(168, Math.max(dist * 0.78, dx * 0.28));
+    const dyStart = Math.min(52, 18 + dist * 0.108);
+    const cx1 = x1 + (x2 - x1) * 0.2;
+    let dEnd = dyEnd;
+    if (dyStart + dEnd > dist - 8) dEnd = Math.max(dist * 0.5, dist - dyStart - 8);
+    return `M${x1},${y1} C${cx1},${y1 + dyStart} ${x2},${y2 - dEnd} ${x2},${y2}`;
+  }
+  const x1 = nodeRightBranchAnchorX(parent, pp);
+  const y1 = nodeCenterY(parent);
+  const x2raw = cp.x;
+  const x2 = x2raw - 12;
+  const y2 = nodeCenterY(child);
+  const dist = Math.max(Math.abs(x2 - x1), 8);
+  const dx = Math.min(88, dist * 0.52);
+  return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+}
+
+function upsertEdgePath(parent, child, hiKeys) {
+  const key = edgePathKey(parent.id, child.id);
+  let p = EG.querySelector(`path[data-pe="${key}"]`);
+  if (!p) {
+    p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('data-pe', key);
+    EG.appendChild(p);
+  }
+  p.setAttribute('d', computeEdgePathD(parent, child));
+  const hi = hiKeys.has(key);
+  const strokeCol = getDC(getDepth(parent.id));
+  p.setAttribute('stroke', hi ? strokeCol : strokeCol + '66');
+  p.setAttribute('stroke-width', hi ? '3.5' : '1.5');
+  p.setAttribute('fill', 'none');
+  p.setAttribute('marker-end', 'url(#ar)');
+  return p;
+}
+
+/** CANVAS-P1-01 — 드래그 중 이동 노드에 연결된 간선만 갱신 */
+function drawEdgesPartialForNodeIds(idSet) {
+  if (!idSet || !idSet.size) return;
+  ensureEdgeArrowDefs();
+  const hiKeys = buildSelectionHighlightEdgeKeys();
+  let touched = 0;
+  nodes.forEach((n) => {
+    if (!isTreeNodeShown(n)) return;
+    nodes
+      .filter((c) => c.parent_id === n.id && isTreeNodeShown(c))
+      .forEach((c) => {
+        if (!idSet.has(n.id) && !idSet.has(c.id)) return;
+        upsertEdgePath(n, c, hiKeys);
+        touched++;
+      });
+  });
+  if (touched === 0 && !EG.querySelector('path[data-pe]')) drawEdges();
+}
+
+function drawEdges() {
+  EG.innerHTML = '';
+  ensureEdgeArrowDefs();
   const hiKeys = buildSelectionHighlightEdgeKeys();
   nodes.forEach((n) => {
     if (!isTreeNodeShown(n)) return;
     nodes
       .filter((c) => c.parent_id === n.id && isTreeNodeShown(c))
       .forEach((c) => {
-      const d = getDepth(n.id),
-        pp = gp(n),
-        cp = gp(c);
-      const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      let pathD;
-      if (nodeMapLayoutMode === 'topdown') {
-        const pw = nodeCardWidth(n),
-          cw = nodeCardWidth(c);
-        const x1 = pp.x + pw / 2,
-          y1 = nodeTopdownBranchAnchorY(n),
-          x2 = cp.x + cw / 2,
-          y2top = nodeTopY(c),
-          y2 = y2top - 20,
-          dist = Math.max(y2 - y1, 12),
-          dx = Math.abs(x2 - x1),
-          dyEnd = Math.min(168, Math.max(dist * 0.78, dx * 0.28)),
-          dyStart = Math.min(52, 18 + dist * 0.108),
-          cx1 = x1 + (x2 - x1) * 0.2;
-        let dEnd = dyEnd;
-        if (dyStart + dEnd > dist - 8) dEnd = Math.max(dist * 0.5, dist - dyStart - 8);
-        pathD = `M${x1},${y1} C${cx1},${y1 + dyStart} ${x2},${y2 - dEnd} ${x2},${y2}`;
-      } else {
-        const x1 = nodeRightBranchAnchorX(n, pp),
-          y1 = nodeCenterY(n),
-          x2raw = cp.x,
-          x2 = x2raw - 12,
-          y2 = nodeCenterY(c),
-          dist = Math.max(Math.abs(x2 - x1), 8),
-          dx = Math.min(88, dist * 0.52);
-        pathD = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
-      }
-      p.setAttribute('d', pathD);
-      const hi = hiKeys.has(`${n.id}|${c.id}`);
-      const strokeCol = getDC(d);
-      p.setAttribute('stroke', hi ? strokeCol : strokeCol + '66');
-      p.setAttribute('stroke-width', hi ? '3.5' : '1.5');
-      p.setAttribute('fill', 'none');
-      p.setAttribute('marker-end', 'url(#ar)');
-      EG.appendChild(p);
-    });
+        upsertEdgePath(n, c, hiKeys);
+      });
   });
 }
 
@@ -3464,6 +3599,7 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     }
   }
   pushUndoSnapshot();
+  beginCanvasPointerInteractionDeferHydrate();
   const start = new Map();
   const hadManual = new Map();
   for (const id of visualIds) {
@@ -3509,7 +3645,7 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     if (edgesRaf != null) return;
     edgesRaf = requestAnimationFrame(() => {
       edgesRaf = null;
-      drawEdges();
+      drawEdgesPartialForNodeIds(visualSeen);
     });
   };
   const applyDragPositions = (rawX, rawY) => {
@@ -3605,13 +3741,14 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     cleanupDragVisual();
     if (edgesRaf != null) cancelAnimationFrame(edgesRaf);
     edgesRaf = null;
-    drawEdges();
     scheduleUpdMM();
     const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(persistIds);
+    skipSchedulePersistOnce = true;
     render();
     flushPersistNow();
     sendMoveNodeStructureOps(persistIds);
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
+    endCanvasPointerInteractionDeferHydrate();
   };
   document.addEventListener('pointermove', mv);
   document.addEventListener('pointerup', up);
@@ -3832,12 +3969,14 @@ function showEdit(n) {
     (how) => {
       teardownTextOpsDescEditor();
       if (nodeEditModalNodeId === n.id) nodeEditModalNodeId = null;
-      if (how !== 'ok' && abortAddChildOnEditDismiss(n.id)) {
+      if (how === 'ok') {
+        pendingHydrateFromStore = null;
+      } else if (abortAddChildOnEditDismiss(n.id)) {
         pendingHydrateFromStore = null;
         nodeEditModalCommittedSave = false;
       } else {
         flushPendingNodeEditHydrate();
-        if (how !== 'ok' && skipFirstEditSaveUndo.has(n.id)) {
+        if (skipFirstEditSaveUndo.has(n.id)) {
           skipFirstEditSaveUndo.delete(n.id);
         }
       }
@@ -4117,15 +4256,16 @@ function graphFromMiniMapClient(clientX, clientY) {
     mh = mc.offsetHeight || 72;
   return minimapPixelToWorldUniform(px, py, mmViewBox, mw, mh);
 }
-let mmRaf = null;
+let mmDebounceTimer = null;
+/** CANVAS-P1-05 — wheel·pan 연속 시 updMM 100ms 디바운스 */
+const MM_UPDMM_DEBOUNCE_MS = 100;
+
 function scheduleUpdMM() {
-  if (mmRaf != null) cancelAnimationFrame(mmRaf);
-  mmRaf = requestAnimationFrame(() => {
-    mmRaf = null;
-    requestAnimationFrame(() => {
-      updMM();
-    });
-  });
+  if (mmDebounceTimer != null) clearTimeout(mmDebounceTimer);
+  mmDebounceTimer = setTimeout(() => {
+    mmDebounceTimer = null;
+    requestAnimationFrame(() => updMM());
+  }, MM_UPDMM_DEBOUNCE_MS);
 }
 
 function applyTx() {
@@ -4348,6 +4488,8 @@ export function initPlannode(opts = {}) {
       : null;
   onBeforeModalPersist =
     typeof opts.onBeforeModalPersist === 'function' ? opts.onBeforeModalPersist : null;
+  onAfterPendingStoreHydrate =
+    typeof opts.onAfterPendingStoreHydrate === 'function' ? opts.onAfterPendingStoreHydrate : null;
 
   R_ = document.getElementById('R');
   CW = document.getElementById('CW');
@@ -4589,6 +4731,7 @@ export function initPlannode(opts = {}) {
       );
       pinchStartScale = scale;
       pinchActive = true;
+      beginCanvasPointerInteractionDeferHydrate();
       panning = false;
       activeCwPointerId = null;
       selectionBox = null;
@@ -4610,6 +4753,7 @@ export function initPlannode(opts = {}) {
     if (e.shiftKey && (e.pointerType !== 'mouse' || e.button === 0)) {
       const g = cwClientToGraph(e.clientX, e.clientY);
       selectionBox = { x0: g.gx, y0: g.gy, x: g.gx, y: g.gy };
+      beginCanvasPointerInteractionDeferHydrate();
       return;
     }
 
@@ -4622,6 +4766,7 @@ export function initPlannode(opts = {}) {
       render();
     }
     panning = true;
+    beginCanvasPointerInteractionDeferHydrate();
     ps = { x: e.clientX, y: e.clientY };
     CW.style.cursor = 'grabbing';
   };
@@ -4678,6 +4823,7 @@ export function initPlannode(opts = {}) {
 
     if (pinchActive && cwGesturePointers.size < 2) {
       pinchActive = false;
+      endCanvasPointerInteractionDeferHydrate();
       if (cwGesturePointers.size === 1) {
         const rem = [...cwGesturePointers.entries()][0];
         activeCwPointerId = rem[0];
@@ -4708,14 +4854,17 @@ export function initPlannode(opts = {}) {
       
       selectionBox = null;
       activeCwPointerId = null;
+      endCanvasPointerInteractionDeferHydrate();
       render();
       return;
     }
     panning = false;
     activeCwPointerId = null;
+    endCanvasPointerInteractionDeferHydrate();
     CW.style.cursor = 'default';
   };
   const onWheel = (e) => {
+    armCanvasWheelBurstDeferHydrate();
     if (e.ctrlKey) {
       e.preventDefault();
       const r = CW.getBoundingClientRect(),
@@ -4849,6 +4998,10 @@ export function initPlannode(opts = {}) {
         clearTimeout(persistTimer);
         persistTimer = null;
       }
+      if (mmDebounceTimer != null) {
+        clearTimeout(mmDebounceTimer);
+        mmDebounceTimer = null;
+      }
       disposers.forEach((d) => d());
       disposers = [];
       onPersist = null;
@@ -4867,6 +5020,11 @@ export function initPlannode(opts = {}) {
       nodeEditModalCommittedSave = false;
       pendingHydrateFromStore = null;
       nodeEditSaveGuard = null;
+      if (canvasWheelBurstTimer != null) {
+        clearTimeout(canvasWheelBurstTimer);
+        canvasWheelBurstTimer = null;
+      }
+      canvasPointerInteractionDepth = 0;
     },
     /** 스토어 프로젝트 메타만 갱신 — 노드·Undo 유지 (`touchProjectUpdatedAt` 등) */
     patchProjectMeta(project) {
@@ -4877,13 +5035,22 @@ export function initPlannode(opts = {}) {
       if (curView === 'prd') buildPRD();
     },
     hydrateFromStore(project, pilotNodes) {
-      if (isNodeEditModalDomOpen()) {
-        // 스토어는 Svelte에서 이미 병합됨 — 캔버스는 보류. 닫을 때 pending 1회(편집 노드 description은 mergeProtected에서 .eid 유지).
+      if (shouldDeferHydrateFromStore()) {
+        // 스토어는 Svelte에서 이미 병합됨 — 캔버스는 보류(MODAL_EDIT · CANVAS-P1-04 interaction).
         pendingHydrateFromStore = { project, pilotNodes };
         return;
       }
       pendingHydrateFromStore = null;
       runHydrateFromStoreCore(project, pilotNodes);
+    },
+    isCanvasInteractionDeferHydrate() {
+      return isCanvasInteractionDeferHydrate();
+    },
+    shouldDeferCollabPull() {
+      return shouldDeferHydrateFromStore();
+    },
+    flushPendingStoreHydrate() {
+      flushPendingStoreHydrate();
     },
     clearCanvas() {
       syncing = true;

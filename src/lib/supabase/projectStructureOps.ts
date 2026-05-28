@@ -330,6 +330,14 @@ function schedulePersistFlush(): void {
   }, PERSIST_FLUSH_DEBOUNCE_MS);
 }
 
+/** PUSH-P2-03 — cloud upload 예약 시 append 단독 flush 취소(upload 경로에서 일괄 flush) */
+export function cancelStructureOpsPersistDebounce(): void {
+  if (persistFlushTimer !== undefined && typeof window !== 'undefined') {
+    window.clearTimeout(persistFlushTimer);
+    persistFlushTimer = undefined;
+  }
+}
+
 /** EPIC E — cloud persist 큐에 op 추가 (Broadcast와 병행) */
 export function enqueueStructureOpForCloudPersist(
   projectId: string,
@@ -352,11 +360,45 @@ function isStructureOpsRpcMissing(err: { message?: string; code?: string } | nul
   return msg.includes('plannode_append_structure_ops') || msg.includes('could not find');
 }
 
-export async function flushStructureOpsPersistForProject(
+/** E9-1 — concurrent append race · PK (workspace, project, seq) duplicate */
+function isStructureOpsDuplicateKeyError(err: { message?: string; code?: string; details?: string } | null): boolean {
+  if (!err) return false;
+  const blob = `${String(err.message ?? '')} ${String(err.details ?? '')} ${String(err.code ?? '')}`.toLowerCase();
+  return err.code === '23505' || blob.includes('duplicate key') || blob.includes('structure_ops_pkey');
+}
+
+const persistFlushInFlight = new Map<string, Promise<StructureOpsFlushResult>>();
+
+async function recoverStructureOpsFlushAfterDuplicateKey(
+  projectId: string,
+  workspaceUserId: string,
+  batchSize: number
+): Promise<StructureOpsFlushResult> {
+  const ack = getStructureOpsPersistAckSeq(projectId);
+  const bundle = await fetchStructureOpsSince(workspaceUserId, projectId, ack);
+  if (bundle && bundle.last_applied_seq > ack) {
+    setStructureOpsPersistAckSeq(projectId, bundle.last_applied_seq);
+    if (import.meta.env.DEV) {
+      console.info('[flushStructureOpsPersistForProject] duplicate key — ack recovered', projectId, {
+        ack,
+        last: bundle.last_applied_seq
+      });
+    }
+    return {
+      ok: true,
+      flushed: batchSize,
+      lastSeq: bundle.last_applied_seq,
+      revision: bundle.revision
+    };
+  }
+  return { ok: false, flushed: 0 };
+}
+
+async function flushStructureOpsPersistForProjectInner(
   projectId: string,
   workspaceUserId: string,
   baseRevision: number | null = null
-): Promise<{ ok: boolean; flushed: number; lastSeq?: number; revision?: number }> {
+): Promise<StructureOpsFlushResult> {
   if (!isSupabaseCloudConfigured() || typeof window === 'undefined') {
     return { ok: true, flushed: 0 };
   }
@@ -381,6 +423,15 @@ export async function flushStructureOpsPersistForProject(
   if (error) {
     if (isStructureOpsRpcMissing(error)) {
       return { ok: false, flushed: 0 };
+    }
+    if (isStructureOpsDuplicateKeyError(error)) {
+      const recovered = await recoverStructureOpsFlushAfterDuplicateKey(pid, wid, opsPayload.length);
+      if (recovered.ok) {
+        pendingPersistOps = pendingPersistOps.filter(
+          (p) => !(p.projectId === pid && p.workspaceUserId === wid)
+        );
+        return recovered;
+      }
     }
     if (import.meta.env.DEV) {
       console.warn('[flushStructureOpsPersistForProject]', pid, error.message);
@@ -407,14 +458,102 @@ export async function flushStructureOpsPersistForProject(
   };
 }
 
-export async function flushAllPendingStructureOpsPersist(): Promise<void> {
+export async function flushStructureOpsPersistForProject(
+  projectId: string,
+  workspaceUserId: string,
+  baseRevision: number | null = null
+): Promise<StructureOpsFlushResult> {
+  const pid = projectId.trim();
+  const wid = workspaceUserId.trim();
+  if (!pid || !wid) return { ok: true, flushed: 0 };
+
+  const key = structureOpsPersistFlushKey(wid, pid);
+  const inflight = persistFlushInFlight.get(key);
+  if (inflight) return inflight;
+
+  const run = flushStructureOpsPersistForProjectInner(pid, wid, baseRevision);
+  persistFlushInFlight.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (persistFlushInFlight.get(key) === run) {
+      persistFlushInFlight.delete(key);
+    }
+  }
+}
+
+export type StructureOpsFlushResult = {
+  ok: boolean;
+  flushed: number;
+  lastSeq?: number;
+  revision?: number;
+};
+
+export function structureOpsPersistFlushKey(workspaceUserId: string, projectId: string): string {
+  return `${workspaceUserId.trim()}:${projectId.trim()}`;
+}
+
+/** PUSH-P2-02 — 해당 프로젝트에 cloud persist 대기 op가 남았는지 */
+export function hasPendingStructureOpsPersistForProject(
+  projectId: string,
+  workspaceUserId: string
+): boolean {
+  const pid = projectId.trim();
+  const wid = workspaceUserId.trim();
+  if (!pid || !wid) return false;
+  return pendingPersistOps.some((p) => p.projectId === pid && p.workspaceUserId === wid);
+}
+
+/** append 성공 + pending 없음 → slice merge RPC 생략 가능 */
+export function collabPushCanSkipSliceMergeAfterOpsFlush(
+  projectId: string,
+  workspaceUserId: string,
+  priorBatchFlush: Map<string, StructureOpsFlushResult>,
+  attemptFlush: StructureOpsFlushResult
+): boolean {
+  if (hasPendingStructureOpsPersistForProject(projectId, workspaceUserId)) return false;
+  const key = structureOpsPersistFlushKey(workspaceUserId, projectId);
+  const prior = priorBatchFlush.get(key);
+  const batchSynced = prior?.ok === true && (prior.flushed ?? 0) > 0;
+  const attemptSynced = attemptFlush.ok === true && attemptFlush.flushed > 0;
+  if (attemptFlush.ok === false) return false;
+  return batchSynced || attemptSynced;
+}
+
+/** COLLAB-PERF-2 E1 — pullStructureOpsForProject 결과 + revision 판정 */
+export type StructureOpsPullResult = {
+  ok: boolean;
+  applied: number;
+  lastAppliedSeq?: number;
+  revision?: number;
+};
+
+/** ops RPC 성공 + (적용됨 또는 revision 동일) → full slice merge 생략 가능 */
+export function collabPullCanSkipSliceMergeAfterOpsPull(
+  projectId: string,
+  workspaceUserId: string,
+  pullResult: StructureOpsPullResult,
+  opts: { revisionUnchanged: boolean }
+): boolean {
+  if (hasPendingStructureOpsPersistForProject(projectId, workspaceUserId)) return false;
+  if (!pullResult.ok) return false;
+  if (pullResult.applied > 0) return true;
+  return opts.revisionUnchanged;
+}
+
+export async function flushAllPendingStructureOpsPersist(): Promise<
+  Map<string, StructureOpsFlushResult>
+> {
+  const results = new Map<string, StructureOpsFlushResult>();
   const seen = new Set<string>();
   for (const item of [...pendingPersistOps]) {
-    const key = `${item.workspaceUserId}:${item.projectId}`;
+    const key = structureOpsPersistFlushKey(item.workspaceUserId, item.projectId);
     if (seen.has(key)) continue;
     seen.add(key);
-    await flushStructureOpsPersistForProject(item.projectId, item.workspaceUserId);
+    const r = await flushStructureOpsPersistForProject(item.projectId, item.workspaceUserId);
+    results.set(key, r);
   }
+  return results;
 }
 
 export type FetchedStructureOpsBundle = {
