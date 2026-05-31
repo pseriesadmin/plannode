@@ -5087,6 +5087,21 @@ export function initPlannode(opts = {}) {
     const t = e.target;
     if (isPilotTypingTarget(t)) return;
 
+    /** 자동정렬: Ctrl+V (Win·Mac 동일 — ⌘V 붙여넣기와 분리) */
+    const isV =
+      e.code === 'KeyV' ||
+      String(e.key || '')
+        .toLowerCase()
+        .trim() === 'v';
+    const autoAlignChord = isV && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
+    if (autoAlignChord) {
+      if (!curP) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resetAllManualLayout();
+      return;
+    }
+
     /** 다시 실행: Ctrl+Shift+Z / ⌘⇧Z 또는 Ctrl+Y / ⌘Y */
     const isZ =
       e.code === 'KeyZ' ||
