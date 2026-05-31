@@ -237,7 +237,8 @@ export function mountPilotBridge(): { destroy: () => void } {
    * structure 수신은 `onRemoteStructureStoreSync`로 스토어만 맞춤(`isNodesSetFromPilotPersist`로 재hydrate 스킵). 로컬 편집·저장은 `onPersist`·pull.
    */
   const unsubNodes = nodesStore.subscribe((list) => {
-    if (!pilotApi || syncingFromStore || isNodesSetFromPilotPersist()) return;
+    // Phase-3: relayout·materialize 중 spurious hydrate 차단 (isRelayoutInProgress 파일럿 노출값)
+    if (!pilotApi || syncingFromStore || isNodesSetFromPilotPersist() || pilotApi.isRelayoutInProgress?.()) return;
     const p = get(currentProject);
     if (!p?.id) return;
     if (list.length > 0) {

@@ -24,8 +24,11 @@ export type AddNodeOp = {
     description?: string;
     node_type?: string;
     num?: string;
-    mx: number;
-    my: number;
+    /** true: 수신측 bld 자동배치 — mx/my 무시(공유 add 스켈레톤) */
+    layout_auto?: boolean;
+    /** @deprecated layout_auto 없을 때만 — 구 ops 호환 */
+    mx?: number;
+    my?: number;
   };
 };
 
@@ -140,11 +143,18 @@ function parseAddNodeOp(raw: Record<string, unknown>): AddNodeOp | null {
   if (!isRecord(nodeRaw)) return null;
   const id = parseNonEmptyString(nodeRaw.id);
   const parent_id = parseNonEmptyString(nodeRaw.parent_id);
+  if (!id || !parent_id) return null;
+  const layout_auto = nodeRaw.layout_auto === true;
   const mx = parseFiniteNumber(nodeRaw.mx);
   const my = parseFiniteNumber(nodeRaw.my);
-  if (!id || !parent_id || mx === null || my === null) return null;
+  if (!layout_auto && (mx === null || my === null)) return null;
   const name = nodeRaw.name != null ? String(nodeRaw.name) : '';
-  const node: AddNodeOp['node'] = { id, parent_id, name, mx, my };
+  const node: AddNodeOp['node'] = { id, parent_id, name };
+  if (layout_auto) node.layout_auto = true;
+  else {
+    node.mx = mx;
+    node.my = my;
+  }
   const description = parseNonEmptyString(nodeRaw.description);
   if (description) node.description = description;
   const node_type = parseNonEmptyString(nodeRaw.node_type);

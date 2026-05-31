@@ -341,7 +341,18 @@ export function recentAddIdsForCloudMerge(projectId: string | null | undefined):
   return new Set(b.ids);
 }
 
-/** pull·push 병합 직후 recent-add id가 빠졌으면 pre-merge 스냅에서 복원 */
+/** 동시 추가 시 (parent_id·name 동일 + 30s 시간창) 의미 중복 감지 */
+function isCollabSemanticDuplicate(local: Node, remote: Node): boolean {
+  if ((local.parent_id ?? null) !== (remote.parent_id ?? null)) return false;
+  if (local.name.trim() !== remote.name.trim()) return false;
+  const lt = Date.parse(String(local.created_at ?? ''));
+  const rt = Date.parse(String(remote.created_at ?? ''));
+  if (!Number.isFinite(lt) || !Number.isFinite(rt)) return false;
+  return Math.abs(lt - rt) < 30_000;
+}
+
+/** pull·push 병합 직후 recent-add id가 빠졌으면 pre-merge 스냅에서 복원.
+ *  단, merged에 의미 중복 노드(같은 parent+name, 30s 이내 동시 생성)가 있으면 스켈레톤을 버린다. */
 export function unionCollabPreserveLocalNodes(
   projectId: string,
   preMergeLocal: Node[],
@@ -353,10 +364,13 @@ export function unionCollabPreserveLocalNodes(
   const preById = new Map(preMergeLocal.map((n) => [n.id, n]));
   const extra: Node[] = [];
   for (const id of preserveIds) {
-    if (!mergedIds.has(id) && preById.has(id)) {
-      extra.push(preById.get(id)!);
-      mergedIds.add(id);
-    }
+    if (mergedIds.has(id)) continue;
+    const local = preById.get(id);
+    if (!local) continue;
+    // 의미 중복 감지: merged에 같은 parent+name+시간창 노드가 있으면 스켈레톤 폐기
+    if (merged.some((r) => isCollabSemanticDuplicate(local, r))) continue;
+    extra.push(local);
+    mergedIds.add(id);
   }
   return extra.length ? [...merged, ...extra] : merged;
 }
@@ -406,7 +420,12 @@ export function reinjectCollabPreservedNodesAfterPullMerge(
   const preById = new Map(preMergeLocal.map((n) => [n.id, n]));
   const missing: Node[] = [];
   for (const id of preserveIds) {
-    if (!curIds.has(id) && preById.has(id)) missing.push(preById.get(id)!);
+    if (curIds.has(id)) continue;
+    const local = preById.get(id);
+    if (!local) continue;
+    // 의미 중복 감지: cur에 같은 parent+name+시간창 노드가 있으면 스켈레톤 폐기
+    if (cur.some((r) => isCollabSemanticDuplicate(local, r))) continue;
+    missing.push(local);
   }
   if (!missing.length) return false;
   const next = [...cur, ...missing];
@@ -1236,8 +1255,8 @@ export function replayStructureOpsOnNodes(
         description: node.description ?? '',
         node_type: node.node_type ?? 'detail',
         num: node.num ?? '',
-        mx: node.mx,
-        my: node.my,
+        mx: null,
+        my: null,
         created_at: existing?.created_at ?? now,
         updated_at: now
       };
@@ -1975,6 +1994,10 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
  */
 function preserveManualCoordsOnCloudMergeWinner(remote: Node, local: Node | undefined): Node {
   if (!local) return remote;
+  /** layout_auto·원격 add: 명시 null이면 local 픽셀 보존 금지 — 교차 보기모드(우측↔하위) 형제 쏠림(FIX-11) */
+  if (remote.mx === null && remote.my === null) {
+    return { ...remote, mx: null, my: null };
+  }
   const mx = remote.mx != null ? remote.mx : local.mx;
   const my = remote.my != null ? remote.my : local.my;
   if (mx === remote.mx && my === remote.my) return remote;
