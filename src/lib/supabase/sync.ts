@@ -19,7 +19,8 @@ import {
   selectProject,
   projectWorkspaceNodesJsonSnapshot,
   clearPendingWorkspaceDeletions,
-  pruneDeletedProjectTombstonesAgainstCloudProjectIds,
+  releaseDeletedProjectTombstonesAfterUpload,
+  workspaceDeletedProjectSkipIds,
   getDeletedProjectTombstoneIds,
   mergeProjectMetaForCloudSync,
   reconcileProjectRecord,
@@ -349,8 +350,6 @@ async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
   if (remoteTs === prev) return;
 
   mergeWorkspaceBundleFromCloudRemote(bundle);
-  pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set(bundle.projects.map((p) => p.id)));
-  /** 캐시 갱신 — 업로드 루프가 동일 원격 번들을 중복 병합하지 않도록 */
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
   } catch {
@@ -886,6 +885,7 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     await mergeRemoteWorkspaceBeforeUpload(userId);
 
+    const excludedFromBundle = workspaceDeletedProjectSkipIds();
     const bundle = gatherWorkspaceBundle();
     for (const p of bundle.projects) {
       if (p.owner_user_id === userId) {
@@ -943,6 +943,7 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
           /* ignore */
         }
         clearPendingWorkspaceDeletions();
+        releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle);
         markCloudWorkspaceSynced();
         scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
         return { ok: true, message: '클라우드에 올렸어 ✓' };
@@ -985,6 +986,7 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
       /* ignore */
     }
     clearPendingWorkspaceDeletions();
+    releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle);
     markCloudWorkspaceSynced();
     clearUploadConflictCooldown();
     if (lastConflict && import.meta.env.DEV) {
@@ -1116,7 +1118,6 @@ export async function pullOwnWorkspaceIfChanged(): Promise<number> {
   if (!bundle) return 0;
 
   const n = mergeWorkspaceBundleFromCloudRemote(bundle);
-  pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set(bundle.projects.map((p) => p.id)));
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
   } catch {

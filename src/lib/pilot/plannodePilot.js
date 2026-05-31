@@ -628,6 +628,12 @@ function applyRemoteMoveNodeFromStructureOp(payload) {
   node.mx = mx;
   node.my = my;
   if (payload.num != null && String(payload.num).trim() !== '') node.num = String(payload.num);
+  // [수정] P1 (2026-05-31): 원격 이동 시 자식 mx/my null 처리 추가
+  // 이유: 공유 환경에서 상대 이동 시 자식이 부모를 따라가지 않는 현상 해소
+  for (const childId of collectShownSubtreeIds(node.id).slice(1)) {
+    const child = find(childId);
+    if (child) { child.mx = null; child.my = null; }
+  }
   nodes = [...nodes];
   render();
 }
@@ -796,12 +802,12 @@ function sendDeleteNodeStructureOp(rootId) {
   sendProjectStructureOp(curP.id, { type: 'delete_node', node_id: rootId }, collabPersistOpts());
 }
 
-/** sDrag pointerup — 드래그된 노드마다 move_node (형제 num·좌표 반영 후) */
-function sendMoveNodeStructureOps(draggedIds) {
-  if (!curP?.id || !draggedIds?.length) return;
+/** sDrag pointerup — 드래그 루트만 move_node 전송 (자식 subtree 제외 — CSP-TRAFFIC) */
+function sendMoveNodeStructureOps(draggedRootIds) {
+  if (!curP?.id || !draggedRootIds?.length) return;
   const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
   if (!collabUid) return;
-  for (const id of draggedIds) {
+  for (const id of draggedRootIds) {
     const node = find(id);
     if (!node || node.parent_id == null) continue;
     const pos = gp(node);
@@ -2025,12 +2031,45 @@ function defaultNumForNode(node) {
 
 /** 형제 그룹의 수동 좌표 제거 → bld/ap 자동 열 배치만 사용 */
 function clearSiblingManualLayout(parentId) {
-  for (const n of nodes) {
-    if (n.parent_id === parentId) {
-      n.mx = null;
-      n.my = null;
+  // [수정] P0-1 (2026-05-31): 직계 형제만 → 각 형제의 shown-subtree 전체 null 처리
+  // 이유: 드래그 후 손자 노드의 옛 좌표가 잔존하여 쏠림 발생 → subtree 전체 정리
+  for (const sib of nodes.filter((n) => n.parent_id === parentId)) {
+    for (const sid of collectShownSubtreeIds(sib.id)) {
+      const nd = find(sid);
+      if (nd) { nd.mx = null; nd.my = null; }
     }
   }
+}
+
+/** 드래그 종료 — persist 루트 subtree clear 후 render·materialize */
+function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds) {
+  for (const id of persistIds) {
+    for (const sid of collectNodeSubtreeIds(id)) {
+      if (sid === id) continue;
+      const node = find(sid);
+      if (node) { node.mx = null; node.my = null; }
+    }
+  }
+  skipSchedulePersistOnce = true;
+  render();
+  const materializeIdSet = new Set(persistIds);
+  // [수정] P0-2 (2026-05-31): affectedParentIds 직계 자식만 → 각 형제 shown-subtree 전체 materialize
+  // 이유: clearSiblingManualLayout과 범위 동기화 (손자 노드 포함)
+  for (const pid of affectedParentIds) {
+    for (const sib of nodes.filter((n) => n.parent_id === pid)) {
+      for (const sid of collectShownSubtreeIds(sib.id)) {
+        materializeIdSet.add(sid);
+      }
+    }
+  }
+  for (const id of persistIds) {
+    for (const sid of collectShownSubtreeIds(id)) {
+      materializeIdSet.add(sid);
+    }
+  }
+  const materializeIds = [...materializeIdSet];
+  materializeDisplayCoordsForNodes(materializeIds);
+  return materializeIds;
 }
 
 /**
@@ -2080,7 +2119,7 @@ function applyHierarchyNumsFromTreeOrder() {
 
 /** 수동 드래그 종료: 형제 순서·번호·자동열 배치 반영 */
 function syncSiblingOrderAndNumsAfterDrag(draggedIds) {
-  if (!draggedIds.length || !nodes.length) return { changedOrder: false };
+  if (!draggedIds.length || !nodes.length) return { changedOrder: false, affectedParentIds: [] };
   const parents = new Set();
   for (const id of draggedIds) {
     const node = find(id);
@@ -2088,12 +2127,13 @@ function syncSiblingOrderAndNumsAfterDrag(draggedIds) {
   }
   let changedOrder = false;
   for (const pid of parents) {
-    if (reorderFlatSiblingsByVisualY(pid)) changedOrder = true;
-    clearSiblingManualLayout(pid);
+    if (pid != null && reorderFlatSiblingsByVisualY(pid)) changedOrder = true;
+    if (pid != null) clearSiblingManualLayout(pid);
   }
   applyHierarchyNumsFromTreeOrder();
   nodes = [...nodes];
-  return { changedOrder };
+  const affectedParentIds = [...parents].filter((pid) => pid != null);
+  return { changedOrder, affectedParentIds };
 }
 
 function getDepth(id, v = new Set()) {
@@ -2705,12 +2745,34 @@ function resetAllManualLayout() {
     return;
   }
   pushUndoSnapshot();
+  // [수정] Fix2 개선 (2026-05-31): 사용자 편집 num 보존
+  // 문제: applyHierarchyNumsFromTreeOrder()가 모든 num을 배열 순서 기준으로 덮어씀
+  // 해결: defaultNumForNode와 다른 num만 백업 후 복원 → 사용자 편집값 보존
+  const userEditedNums = new Map();
+  for (const n of nodes) {
+    const defaultNum = defaultNumForNode(n);
+    if (n.num && String(n.num).trim() && String(n.num).trim() !== String(defaultNum || '').trim()) {
+      userEditedNums.set(n.id, n.num);
+    }
+  }
+  applyHierarchyNumsFromTreeOrder();
+  // 사용자 편집 num 복원
+  for (const [id, num] of userEditedNums) {
+    const node = find(id);
+    if (node) node.num = num;
+  }
   for (const n of nodes) {
     n.mx = null;
     n.my = null;
   }
   render();
-  schedulePersist();
+  // [수정] Fix1-보정 (2026-05-31): schedulePersist(50ms debounce) → flushPersistNow({force})
+  // 이유: schedulePersist는 50ms 후 markCloudWorkspaceDirty를 호출하지만
+  //       emitAutoCloudSync → scheduleCloudFlush → hasAnyCloudSyncPending() 체크가 먼저
+  //       실행되어 dirty=false 상태로 조기 return → 클라우드 플러시 취소됨.
+  //       flushPersistNow({force:true})로 즉시 persist → dirty flag 선설정 후 이벤트 발행.
+  flushPersistNow({ force: true });
+  emitAutoCloudSync('reset-layout');
   toast('수동 위치 전체 초기화 ✓');
 }
 
@@ -2734,6 +2796,9 @@ function dlFile(c, t, f) {
 }
 
 /** Svelte 측 하이브리드 클라우드 자동 저장 트리거 */
+// [수정] P3 (2026-05-31): emitAutoCloudSyncImmediate wrapper 제거 → emitAutoCloudSync 통일
+// 변경 사항: L420, L1838, L1934, L2781, L2785, L2861, L4019, L4861, L4873 (9곳 호출처)
+// 이유: 불필요한 간접 계층 제거, 파일럿 이벤트 발행 체계 단순화
 function emitAutoCloudSync(reason) {
   try {
     if (typeof window !== 'undefined') {
@@ -2855,7 +2920,15 @@ function rightLayoutRowSpanForNode(n) {
 }
 
 function bld(nid, col, r) {
-  const kids = collapsedNodeIds.has(nid) ? [] : nodes.filter((n) => n.parent_id === nid);
+  const kids = collapsedNodeIds.has(nid)
+    ? []
+    : nodes
+        .filter((n) => n.parent_id === nid)
+        .sort(
+          (a, b) =>
+            String(a.num ?? '').localeCompare(String(b.num ?? ''), undefined, { numeric: true }) ||
+            String(a.id).localeCompare(String(b.id))
+        );
   if (!kids.length) {
     // 리프 노드: col, row 바로 저장
     lm[nid] = { col, row: r };
@@ -3006,6 +3079,33 @@ const ap = (id) => {
   return l ? { x: l.col * layoutColW() + layoutOriginX(), y: l.row * layoutRowH() + 30 } : { x: 0, y: 0 };
 };
 const gp = (n) => (n.mx != null && n.my != null ? { x: n.mx, y: n.my } : ap(n.id));
+
+/** render() 직후 화면 좌표를 mx/my에 고정 — 공유 persist·slice 정합 (CSP) */
+function materializeDisplayCoordsForNodes(nodeIds) {
+  if (!nodeIds?.length) return;
+  const idSet = new Set(nodeIds);
+  let touched = false;
+  for (const id of idSet) {
+    const node = find(id);
+    if (!node) continue;
+    const w = document.getElementById('nw-' + id);
+    if (w) {
+      const lx = parseFloat(w.style.left);
+      const ty = parseFloat(w.style.top);
+      if (Number.isFinite(lx) && Number.isFinite(ty)) {
+        node.mx = lx;
+        node.my = ty;
+        touched = true;
+        continue;
+      }
+    }
+    const pos = gp(node);
+    node.mx = pos.x;
+    node.my = pos.y;
+    touched = true;
+  }
+  if (touched) nodes = [...nodes];
+}
 
 /** 연결선·SVG 앵커 Y — ·nd 실제 세로 중앙(`.nw`의 `top:50%` + 버튼과 동일). 고정 44px은 가변 카드 높이에서 +와 어긋남 */
 function nodeCenterY(n) {
@@ -3742,10 +3842,10 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     if (edgesRaf != null) cancelAnimationFrame(edgesRaf);
     edgesRaf = null;
     scheduleUpdMM();
-    const { changedOrder } = syncSiblingOrderAndNumsAfterDrag(persistIds);
-    skipSchedulePersistOnce = true;
-    render();
-    flushPersistNow();
+    const { changedOrder, affectedParentIds } = syncSiblingOrderAndNumsAfterDrag(persistIds);
+    relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds);
+    flushPersistNow({ force: true });
+    pendingHydrateFromStore = null;
     sendMoveNodeStructureOps(persistIds);
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
     endCanvasPointerInteractionDeferHydrate();
@@ -3785,7 +3885,17 @@ function addChild(pid) {
   nodes = [...nodes, nn];
   skipFirstEditSaveUndo.add(nn.id);
   selId = nn.id;
+  // [수정] 신규 형제 추가 시 겹침 버그 (2026-05-31):
+  // bld()는 mx/my를 무시하고 트리 기준 row를 계산하지만, 기존 형제는 mx/my(구 좌표)를 유지하여
+  // gp()가 lm 대신 mx/my를 반환 → 새 노드(lm 기준)가 기존 형제 위치와 겹칩.
+  // 형제 및 서브트리 mx/my를 null로 초기화 → render() 시 bld() 기준 일관 배치.
+  clearSiblingManualLayout(pid);
   render();
+  // [수정] 신규 노드 materialize 제거 (2026-05-31):
+  // materializeDisplayCoordsForNodes([nn.id])를 호출하면 B.mx/my가 num='' 기준 row 위치로 고정됨.
+  // 모달 저장 시 사용자가 num을 입력하면 bld() 재정렬로 B의 lm row가 바뀌지만
+  // mx/my는 구 row를 가리켜 기존 형제(mx=null → lm 사용)와 겹침 발생.
+  // 신규 노드는 mx/my=null 유지 → 매 render()마다 bld() lm 기준으로 일관 배치.
   queueMicrotask(() => {
     publishNewNodeSkeletonToCloud();
     sendAddNodeStructureOp(nn);
@@ -3861,7 +3971,8 @@ function showEdit(n) {
             toast('동기화 직후 노드를 찾지 못했어요. 잠시 뒤 다시 저장해줘');
             return false;
           }
-          if (skipFirstEditSaveUndo.has(n.id)) {
+          const isNewNodeFirstSave = skipFirstEditSaveUndo.has(n.id);
+          if (isNewNodeFirstSave) {
             skipFirstEditSaveUndo.delete(n.id);
           } else {
             pushUndoSnapshot();
@@ -3938,6 +4049,14 @@ function showEdit(n) {
             });
           }
           mergeStoreNodesIntoPilotBeforePersist(n.id);
+          // [수정] 신규 노드 첫 저장 후 형제 좌표 재정리 (2026-05-31):
+          // mergeStoreNodesIntoPilotBeforePersist()에서 스토어의 구 mx/my(배경 sync로 덮인 값)가
+          // ?? 연산자를 통해 형제 노드에 복원될 수 있음 → 신규 노드와 겹침 발생.
+          // addChild 시 clearSiblingManualLayout(pid)로 정리했어도 merge가 되돌리므로
+          // 첫 저장 시점에서 다시 form 상태를 보장한다.
+          if (isNewNodeFirstSave && target.parent_id) {
+            clearSiblingManualLayout(target.parent_id);
+          }
           nodeEditModalCommittedSave = true;
           nodes = [...nodes];
           render();
@@ -4453,6 +4572,105 @@ function syncNcFromNodes() {
   nc = Math.max(nc, max);
 }
 
+const NODES_LS_PREFIX_AUDIT = 'plannode_nodes_v3_';
+const CURRENT_PROJECT_LS_AUDIT = 'plannode_current_project_v3';
+
+/** CSP-L-0 — DevTools·GATE D: localStorage mx/my 혼재 진단 */
+function resolveLayoutAuditProjectId(projectId) {
+  if (projectId != null && String(projectId).trim()) return String(projectId).trim();
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CURRENT_PROJECT_LS_AUDIT);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed?.id ?? raw;
+    } catch (_) {
+      return raw;
+    }
+  } catch (_) {
+    return null;
+  }
+}
+
+/** @returns {{ total: number; withMxMy: number; nullBoth: number; partial: number; mixed: boolean; mixedParentGroups: number; manualSample: object[] } | { error: string }} */
+function analyzeNodesArrayForLayoutAudit(arr) {
+  if (!Array.isArray(arr)) return { error: 'not_array' };
+  let withMxMy = 0;
+  let nullBoth = 0;
+  let partial = 0;
+  const manualSample = [];
+  const byParent = {};
+  for (const n of arr) {
+    const hasMx = n.mx != null && n.mx !== '';
+    const hasMy = n.my != null && n.my !== '';
+    if (hasMx && hasMy) {
+      withMxMy++;
+      if (manualSample.length < 12) {
+        manualSample.push({
+          id: n.id,
+          name: String(n.name ?? '').slice(0, 28),
+          num: n.num ?? '',
+          mx: n.mx,
+          my: n.my,
+          parent_id: n.parent_id ?? null
+        });
+      }
+    } else if (!hasMx && !hasMy) {
+      nullBoth++;
+    } else {
+      partial++;
+    }
+    const p = n.parent_id ?? '__root__';
+    if (!byParent[p]) byParent[p] = { manual: 0, auto: 0 };
+    if (hasMx && hasMy) byParent[p].manual++;
+    else byParent[p].auto++;
+  }
+  const mixedParentGroups = Object.values(byParent).filter((v) => v.manual > 0 && v.auto > 0).length;
+  return {
+    total: arr.length,
+    withMxMy,
+    nullBoth,
+    partial,
+    mixed: withMxMy > 0 && nullBoth > 0,
+    allManual: withMxMy === arr.length && arr.length > 0,
+    allAuto: nullBoth === arr.length && arr.length > 0,
+    mixedParentGroups,
+    manualSample
+  };
+}
+
+/**
+ * CSP-LAYOUT GATE — `localStorage` plannode_nodes_v3_* mx/my null vs 숫자 혼재 스캔.
+ * @param {string} [projectId] — 생략 시 `plannode_current_project_v3`
+ */
+function pnLayoutAudit(projectId) {
+  if (typeof localStorage === 'undefined') return { error: 'no_localStorage' };
+  const pid = resolveLayoutAuditProjectId(projectId);
+  if (!pid) return { error: 'no_project_id' };
+  const key = NODES_LS_PREFIX_AUDIT + pid;
+  const raw = localStorage.getItem(key);
+  if (!raw) return { error: 'missing', projectId: pid, key };
+  let arr;
+  try {
+    arr = JSON.parse(raw);
+  } catch (_) {
+    return { error: 'parse_fail', projectId: pid, key };
+  }
+  const layoutMap = readLayoutMap();
+  const analysis = analyzeNodesArrayForLayoutAudit(arr);
+  if (analysis.error) return { ...analysis, projectId: pid, key };
+  return {
+    checkedAt: new Date().toISOString(),
+    projectId: pid,
+    key,
+    layoutMode: layoutMap[pid] || 'right(default)',
+    pilotLayoutMode: typeof nodeMapLayoutMode === 'string' ? nodeMapLayoutMode : null,
+    pilotOpenProjectId: curP?.id ?? null,
+    ...analysis
+  };
+}
+
 /**
  * @param {object} opts
  * @param {boolean} [opts.delegateTabs]
@@ -4506,6 +4724,10 @@ export function initPlannode(opts = {}) {
   }
 
   migrateLegacyLayoutIfNeeded();
+
+  if (typeof window !== 'undefined') {
+    window.__pnLayoutAudit = pnLayoutAudit;
+  }
 
   if (CTX) {
     CTX.addEventListener('click', onCtxClick);
@@ -5025,6 +5247,9 @@ export function initPlannode(opts = {}) {
         canvasWheelBurstTimer = null;
       }
       canvasPointerInteractionDepth = 0;
+      if (typeof window !== 'undefined' && window.__pnLayoutAudit === pnLayoutAudit) {
+        delete window.__pnLayoutAudit;
+      }
     },
     /** 스토어 프로젝트 메타만 갱신 — 노드·Undo 유지 (`touchProjectUpdatedAt` 등) */
     patchProjectMeta(project) {
@@ -5097,6 +5322,7 @@ export function initPlannode(opts = {}) {
     setNodeMapLayout(mode) {
       applyNodeMapLayout(mode);
     },
+    layoutAudit: pnLayoutAudit,
     /** PRD 탭에서 스토어·메타 동기 후 본문 재생성 (PILOT §9) */
     refreshPrdView() {
       if (curView === 'prd') buildPRD();
