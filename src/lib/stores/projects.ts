@@ -512,7 +512,8 @@ export function getPendingWorkspaceDeletionIds(): Set<string> {
 /**
  * 서버 `projects_json`에 고스트로 남은 id가 pending 제거·캐시 일부 삭제 후 `mergeWorkspaceBundleFromCloudRemote`로
  * 되살아오는 것을 막음. pending과 별도 TTL(전체 사이트 데이터 삭제 시 키도 사라짐 — 서버 정본 반영이 최종 해결).
- * NOW-DEL-WS-02: `pruneDeletedProjectTombstonesAgainstCloudProjectIds`로 정본에 없으면 항목 제거.
+ * NOW-DEL-WS-02 / NOW-P0-DEL-WS-06: tombstone은 TTL·업로드 성공 후 `releaseDeletedProjectTombstonesAfterUpload`로만 해제.
+ * 클라우드 fetch만으로 tombstone prune 하지 않음(조기 해제 → stale pull 일괄 복원 레ース).
  */
 const WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY = 'plannode_workspace_deleted_project_tombstones_v1';
 const TOMBSTONE_MAP_MAX_IDS = 240;
@@ -552,26 +553,78 @@ function pruneExpiredDeletedProjectTombstones(map: Record<string, number>, now: 
   return Object.fromEntries(entries);
 }
 
-/** 서버 정본 `projects_json` id 집합에 없으면 톰브스톤 제거(업로드 반영·고스트 소거 후). */
-export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudProjectIds: Set<string>): void {
+/** 삭제·보류·모달 ghost-hide id — 병합 skip·번들 업로드 제외 공통 집합(추가 RPC 없음) */
+export function workspaceDeletedProjectSkipIds(): Set<string> {
+  const skip = new Set<string>([
+    ...readPendingWorkspaceDeletionSet(),
+    ...readDeletedProjectTombstoneIdSet()
+  ]);
+  const uid = getAuthUserId();
+  if (uid) {
+    for (const id of getOwnedProjectGhostHideIdsForModal(uid)) skip.add(id);
+  }
+  return skip;
+}
+
+/**
+ * pull/merge 경로에서 이미 로컬에 되살아난 삭제 id 제거 — deleteProject 재호출 없음(더티·tombstone 중복 방지).
+ * @returns 제거한 프로젝트 수
+ */
+export function stripResurrectedDeletedProjectsFromLocal(skipIds?: ReadonlySet<string>): number {
+  if (typeof window === 'undefined') return 0;
+  const skip = skipIds ?? workspaceDeletedProjectSkipIds();
+  if (!skip.size) return 0;
+  const plist = get(projects);
+  const toRemove = plist.filter((p) => skip.has(p.id));
+  if (!toRemove.length) return 0;
+  const next = plist.filter((p) => !skip.has(p.id));
+  try {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(next));
+    for (const p of toRemove) {
+      localStorage.removeItem(NODES_KEY_PREFIX + p.id);
+    }
+  } catch (e) {
+    console.error('Failed to strip resurrected deleted projects:', e);
+    return 0;
+  }
+  projects.set(next);
+  const cur = get(currentProject);
+  if (cur && skip.has(cur.id)) {
+    currentProject.set(null);
+    nodes.set([]);
+    try {
+      localStorage.removeItem(CURRENT_PROJECT_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+  return toRemove.length;
+}
+
+/** 서버 정본에 id가 없을 때 tombstone 제거 — 레거시 호출부(+page 모달)는 TTL 만료만 수행(조기 prune 레ース 방지). */
+export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(_cloudProjectIds: Set<string>): void {
   if (typeof window === 'undefined') return;
   const now = Date.now();
-  let map = pruneExpiredDeletedProjectTombstones(readDeletedProjectTombstoneMap(), now);
+  const raw = readDeletedProjectTombstoneMap();
+  const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
+  if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+}
+
+/**
+ * 업로드 성공 직후: 번들에서 의도적으로 제외한 삭제 id의 tombstone 해제.
+ * 서버 fetch 없음 — gatherWorkspaceBundle 제외 집합 = 삭제 반영 payload.
+ */
+export function releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle: ReadonlySet<string>): void {
+  if (typeof window === 'undefined' || !excludedFromBundle.size) return;
+  const map = { ...readDeletedProjectTombstoneMap() };
   let changed = false;
-  for (const id of Object.keys(map)) {
-    if (!cloudProjectIds.has(id)) {
+  for (const id of excludedFromBundle) {
+    if (map[id]) {
       delete map[id];
       changed = true;
     }
   }
-  map = pruneExpiredDeletedProjectTombstones(map, now);
-  if (changed) {
-    writeDeletedProjectTombstoneMap(map);
-    return;
-  }
-  const raw = readDeletedProjectTombstoneMap();
-  const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
-  if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+  if (changed) writeDeletedProjectTombstoneMap(map);
 }
 
 /** 모달 보조 필터·테스트: 삭제 톰브스톤 id 집합 */
@@ -1656,7 +1709,8 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
   if (typeof window === 'undefined') {
     return { projects: get(projects), nodesByProject: {} };
   }
-  const plist = get(projects);
+  const skip = workspaceDeletedProjectSkipIds();
+  const plist = get(projects).filter((p) => !skip.has(p.id));
   const nodesByProject: Record<string, Node[]> = {};
   for (const p of plist) {
     nodesByProject[p.id] = loadLocalNodesForCollabMerge(p.id);
@@ -1668,6 +1722,7 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
   const allSnapshots: Array<{ projectId: string; snapshot: any }> = [];
 
   for (const p of plist) {
+    if (skip.has(p.id)) continue;
     const snaps = listNodeSnapshots(p.id);
     for (const snap of snaps) {
       allSnapshots.push({
@@ -1816,7 +1871,13 @@ export function replaceWorkspaceFromBundle(bundle: WorkspaceBundle): void {
 export function upsertImportedPlannodeTreeV1(
   project: Project,
   nodeList: Node[],
-  opts?: { openAfter?: boolean; markDirty?: boolean; preserveRemoteUpdatedAt?: boolean }
+  opts?: {
+    openAfter?: boolean;
+    markDirty?: boolean;
+    preserveRemoteUpdatedAt?: boolean;
+    /** false = 클라우드 pull 병합(의도적 re-import 아님) — tombstone 유지 */
+    clearDeletedTombstone?: boolean;
+  }
 ): Project | null {
   if (typeof window === 'undefined') return null;
 
@@ -1873,7 +1934,9 @@ export function upsertImportedPlannodeTreeV1(
   if (opts?.markDirty !== false) {
     markCloudWorkspaceDirty();
   }
-  clearDeletedProjectTombstoneForReimport(merged.id);
+  if (opts?.clearDeletedTombstone !== false) {
+    clearDeletedProjectTombstoneForReimport(merged.id);
+  }
   return selected;
 }
 
@@ -1908,7 +1971,16 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
  * **원격 메타가 더 최신이어도** 로컬에 없을 때는 넣지 않음(소유자 슬라이스가 merge 실패 등으로 옛 목록을 유지할 때 되살림 방지).
  * `preserveLocalNewIds`: `remoteProjectMetaNewer === true`일 때 원격 목록에 없는 로컬 id를 통째 삭제하지 않도록
  * **예외 집합**(아직 소유자 슬라이스에 안 올라간 신규 노드 등). 보존된 노드는 원격 순서 뒤에 **로컬 배열 순서**로 붙인다.
+ * CSP: id LWW로 remote row가 이겼을 때 `mx`/`my`가 없으면 local non-null 좌표를 유지(Broadcast 후 slice 덮어쓰기 완화).
  */
+function preserveManualCoordsOnCloudMergeWinner(remote: Node, local: Node | undefined): Node {
+  if (!local) return remote;
+  const mx = remote.mx != null ? remote.mx : local.mx;
+  const my = remote.my != null ? remote.my : local.my;
+  if (mx === remote.mx && my === remote.my) return remote;
+  return { ...remote, mx, my };
+}
+
 export function mergeNodeListsForCloud(
   localNodes: Node[],
   remoteNodes: Node[],
@@ -1936,7 +2008,7 @@ export function mergeNodeListsForCloud(
       const cur = byId.get(rn.id);
       if (!cur && suppress.has(rn.id)) continue;
       if (!cur || parseTs(rn.updated_at) >= parseTs(cur.updated_at)) {
-        byId.set(rn.id, rn);
+        byId.set(rn.id, preserveManualCoordsOnCloudMergeWinner(rn, cur));
       }
     }
     /** 원격 스냅샷의 평면 배열 순서 유지 — 파일럿 형제 순서·레이아웃(`nodes.filter(parent_id)`)과 일치 */
@@ -1968,7 +2040,7 @@ export function mergeNodeListsForCloud(
         continue;
       }
       if (parseTs(rn.updated_at) > parseTs(cur.updated_at)) {
-        byId.set(rn.id, rn);
+        byId.set(rn.id, preserveManualCoordsOnCloudMergeWinner(rn, cur));
       }
     }
     /**
@@ -2124,10 +2196,7 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   if (typeof window === 'undefined') return 0;
   let n = 0;
   const rp = Array.isArray(remote.projects) ? remote.projects : [];
-  const skipIds = new Set<string>([
-    ...readPendingWorkspaceDeletionSet(),
-    ...readDeletedProjectTombstoneIdSet()
-  ]);
+  const skipIds = workspaceDeletedProjectSkipIds();
   const map =
     remote.nodesByProject && typeof remote.nodesByProject === 'object' ? remote.nodesByProject : {};
 
@@ -2164,7 +2233,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
       upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
         openAfter: false,
         markDirty: false,
-        preserveRemoteUpdatedAt: true
+        preserveRemoteUpdatedAt: true,
+        clearDeletedTombstone: false
       });
       n++;
       continue;
@@ -2186,7 +2256,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
       upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
         openAfter: false,
         markDirty: false,
-        preserveRemoteUpdatedAt: remoteProjectMetaNewer
+        preserveRemoteUpdatedAt: remoteProjectMetaNewer,
+        clearDeletedTombstone: false
       });
       n++;
     }
@@ -2194,6 +2265,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
 
   /** 히스토리 병합(append-only, LWW) */
   mergeHistoryEntriesFromCloudRemote(remote.historyEntries ?? []);
+
+  stripResurrectedDeletedProjectsFromLocal(skipIds);
 
   if (n > 0) {
     const cur = get(currentProject);

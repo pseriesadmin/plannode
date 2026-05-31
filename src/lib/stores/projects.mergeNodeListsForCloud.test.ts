@@ -223,6 +223,40 @@ describe('mergeNodeListsForCloud', () => {
     expect(out.map((x) => x.id)).toEqual(['keep', 'just_added']);
   });
 
+  it('remoteProjectMetaNewer=false: preserves local mx/my when remote wins without coords (CSP)', () => {
+    const tOld = '2026-01-01T00:00:00.000Z';
+    const tNew = '2026-01-02T00:00:00.000Z';
+    const local = [{ ...N('shared', tOld), mx: 120, my: 340, name: 'local' }];
+    const remote = [{ ...N('shared', tNew), name: 'remote_newer' }];
+    const out = mergeNodeListsForCloud(local, remote, false, null);
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('remote_newer');
+    expect(out[0].mx).toBe(120);
+    expect(out[0].my).toBe(340);
+  });
+
+  it('remoteProjectMetaNewer=true: preserves local mx/my when remote wins without coords (CSP)', () => {
+    const tOld = '2026-01-01T00:00:00.000Z';
+    const tNew = '2026-01-02T00:00:00.000Z';
+    const local = [{ ...N('shared', tOld), mx: 88, my: 200, name: 'local' }];
+    const remote = [{ ...N('shared', tNew), name: 'remote' }];
+    const out = mergeNodeListsForCloud(local, remote, true, null);
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('remote');
+    expect(out[0].mx).toBe(88);
+    expect(out[0].my).toBe(200);
+  });
+
+  it('remoteProjectMetaNewer=false: remote mx/my wins over local when both present', () => {
+    const tOld = '2026-01-01T00:00:00.000Z';
+    const tNew = '2026-01-02T00:00:00.000Z';
+    const local = [{ ...N('shared', tOld), mx: 10, my: 20 }];
+    const remote = [{ ...N('shared', tNew), mx: 300, my: 400 }];
+    const out = mergeNodeListsForCloud(local, remote, false, null);
+    expect(out[0].mx).toBe(300);
+    expect(out[0].my).toBe(400);
+  });
+
   it('suppressRecentDeletesProjectId skips re-adding suppressed remote id when missing locally', () => {
     if (typeof window === 'undefined') return;
     registerRecentlyDeletedNodeIdsForCloudMerge(PID, ['ghost']);
