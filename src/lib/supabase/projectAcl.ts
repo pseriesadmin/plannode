@@ -23,6 +23,26 @@ const OWN_WORKSPACE_TABLE = 'plannode_workspace';
 
 /** `canAccessProject` 반복 호출 시 짧게 재사용 — 내 워크스페이스 행의 프로젝트 id 집합 */
 let cachedOwnWorkspaceProjectIds: { uid: string; ids: Set<string>; at: number } | null = null;
+
+/** `fetchMyAclInviteSummaries` 15s TTL 캐시 — 동기 사이클당 중복 호출 제거 */
+let _aclInviteCache: { email: string; rows: AclInviteSummary[]; at: number } | null = null;
+const ACL_INVITE_CACHE_TTL_MS = 15_000;
+
+export function invalidateAclInviteCache(): void {
+  _aclInviteCache = null;
+}
+
+/** `countAclRows` 30s TTL 캐시 (프로젝트별) */
+const _countAclCache = new Map<string, { count: number; at: number }>();
+const COUNT_ACL_CACHE_TTL_MS = 30_000;
+
+export function invalidateCountAclCache(projectId?: string): void {
+  if (projectId) {
+    _countAclCache.delete(projectId);
+  } else {
+    _countAclCache.clear();
+  }
+}
 const OWN_WORKSPACE_IDS_CACHE_MS = 8000;
 
 async function getCachedProjectIdsFromOwnWorkspaceRow(): Promise<Set<string>> {
@@ -127,6 +147,10 @@ export async function countAclRows(projectId: string): Promise<number> {
     }
     return -1;
   }
+  const now = Date.now();
+  const cached = _countAclCache.get(projectId);
+  if (cached && now - cached.at < COUNT_ACL_CACHE_TTL_MS) return cached.count;
+
   const q = () =>
     supabase.from(TABLE).select('id', { count: 'exact', head: true }).eq('project_id', projectId);
   let { count, error } = await q();
@@ -138,7 +162,9 @@ export async function countAclRows(projectId: string): Promise<number> {
     if (isMissingRelationError(error)) return -2;
     return -1;
   }
-  return count ?? 0;
+  const result = count ?? 0;
+  _countAclCache.set(projectId, { count: result, at: now });
+  return result;
 }
 
 /** 소유자 제외 멤버 행 개수. -2 = 테이블 없음, -1 = 기타 오류 */
@@ -270,6 +296,11 @@ export async function fetchMyAclInviteSummaries(): Promise<{ rows: AclInviteSumm
   if (!email) return { rows: [], error: '로그인이 필요해.' };
   const em = normalizeAclEmail(email);
 
+  const now = Date.now();
+  if (_aclInviteCache && _aclInviteCache.email === em && now - _aclInviteCache.at < ACL_INVITE_CACHE_TTL_MS) {
+    return { rows: _aclInviteCache.rows };
+  }
+
   // 명시적으로 없는 컬럼을 select 하면 400 → '*' 는 «존재하는 컬럼만» 반환(옛·신 스키마 공통).
   const q = () => supabase.from(TABLE).select('*').eq('email', em);
 
@@ -292,7 +323,9 @@ export async function fetchMyAclInviteSummaries(): Promise<{ rows: AclInviteSumm
     is_owner: !!(r as { is_owner?: boolean }).is_owner
   }));
 
-  return { rows: rows.filter((x) => x.project_id) };
+  const filtered = rows.filter((x) => x.project_id);
+  _aclInviteCache = { email: em, rows: filtered, at: now };
+  return { rows: filtered };
 }
 
 /** ACL·소유자 판별용 최소 Project (로컬에 없는 id만 알 때) */
@@ -889,13 +922,14 @@ export async function repairOwnedProjectsAclWorkspaceSources(
   const owned = projectList.filter((p) => p.owner_user_id === authUserId);
   if (!owned.length) return { repaired: 0, rpcMissing: false };
 
-  // ✅ FIX-04: 디버그 로그 추가
-  console.debug('[repairOwnedProjectsAclWorkspaceSources] START', {
-    supabaseConfigured: isAclEnforced(),
-    authUserId,
-    ownedProjectsCount: owned.length,
-    ownedProjects: owned.map((p) => ({ id: p.id }))
-  });
+  if (import.meta.env.DEV) {
+    console.debug('[repairOwnedProjectsAclWorkspaceSources] START', {
+      supabaseConfigured: isAclEnforced(),
+      authUserId,
+      ownedProjectsCount: owned.length,
+      ownedProjects: owned.map((p) => ({ id: p.id }))
+    });
+  }
 
   if (lastRepairAuthUid !== authUserId) {
     lastRepairAuthUid = authUserId;
@@ -925,11 +959,12 @@ export async function repairOwnedProjectsAclWorkspaceSources(
     }
     if ((r.fixed ?? 0) > 0) repaired += r.fixed ?? 0;
   }
-  // ✅ FIX-04: 완료 로그
-  console.debug('[repairOwnedProjectsAclWorkspaceSources] END', {
-    totalRepaired: repaired,
-    rpcMissing
-  });
+  if (import.meta.env.DEV) {
+    console.debug('[repairOwnedProjectsAclWorkspaceSources] END', {
+      totalRepaired: repaired,
+      rpcMissing
+    });
+  }
   return { repaired, rpcMissing };
 }
 
@@ -990,6 +1025,8 @@ export async function addAllowedEmail(
     return { ok: false, message: userFacingAclErrorFromSupabase(error) };
   }
 
+  invalidateAclInviteCache();
+  invalidateCountAclCache(projectId);
   void repairProjectAclWorkspaceSources(projectId);
 
   const { scheduleCloudFlush } = await import('$lib/supabase/workspacePush');
@@ -1013,6 +1050,8 @@ export async function removeAclEmail(
   if (error) {
     return { ok: false, message: userFacingAclErrorFromSupabase(error) };
   }
+  invalidateAclInviteCache();
+  invalidateCountAclCache(projectId);
   return { ok: true, message: '제거했어.' };
 }
 

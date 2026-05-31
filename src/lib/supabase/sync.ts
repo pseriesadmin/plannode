@@ -372,11 +372,13 @@ function isWorkspaceUpsertRpcMissing(err: { message?: string; code?: string; det
 }
 
 /** revision/락 RPC 미배포 시 조용히 생략 (docs/supabase/plannode_project_collab_revision_lock.sql) */
-function isCollabRevisionRpcMissing(err: { message?: string; code?: string; details?: string } | null): boolean {
+function isCollabRevisionRpcMissing(err: { message?: string; code?: string; details?: string; status?: number } | null): boolean {
   if (!err) return false;
   const m = (String(err.message ?? '') + ' ' + String(err.details ?? '')).toLowerCase();
   const c = String(err.code ?? '');
+  const status = (err as { status?: number }).status;
   return (
+    status === 404 ||
     c === 'PGRST202' ||
     c === 'PGRST301' ||
     /\b404\b/.test(m) ||
@@ -384,7 +386,8 @@ function isCollabRevisionRpcMissing(err: { message?: string; code?: string; deta
     m.includes('could not find') ||
     /plannode_project_collab_get_revision/i.test(String(err.message ?? '')) ||
     /plannode_project_collab_try_acquire_lock/i.test(String(err.message ?? '')) ||
-    /plannode_project_collab_release_lock/i.test(String(err.message ?? ''))
+    /plannode_project_collab_release_lock/i.test(String(err.message ?? '')) ||
+    /plannode_project_collab_merge_atomic/i.test(String(err.message ?? ''))
   );
 }
 
@@ -397,6 +400,10 @@ function rpcBigintToNumber(data: unknown): number | null {
   }
   return null;
 }
+
+// Phase-4: merge_atomic 미지원 환경 감지 — 모듈 스코프로 유지해 호출마다 404 재시도 방지
+// SQL 적용 전 환경에서 매 push마다 404 추가 왕복이 생기는 Bug-1 수정
+let _mergeAtomicUnsupported = false;
 
 /** `revision_stale` 예외의 `detail`(현재 서버 revision 문자열) → 재시도 `p_base_revision` 힌트 */
 function parseStaleRevisionFromCollabError(err: {
@@ -662,10 +669,14 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
     const can = await canPushMergeSliceForProject(p.id, src);
     if (!can) continue;
 
+    // Phase-4 (2026-05-31): plannode_project_collab_merge_atomic 우선 사용
+    // get_revision + try_acquire_lock + merge + release_lock → 1회 왕복으로 통합
+    // atomic RPC 미지원(구 DB) 시 기존 4-RPC 경로로 fallback
+    // _mergeAtomicUnsupported: 모듈 스코프 — SQL 미적용 환경에서 매 push 404 추가 왕복 방지(Bug-1)
     let lastErr: { message?: string; details?: string; code?: string } | null = null;
     let revisionStaleNotifiedThisPush = false;
-    /** 첫 `revision_stale`의 `details`(서버 revision)로 2차 시도 시 불필요한 400·null 우회를 줄임 */
     let revisionHintFromStale: number | null = null;
+
     for (let attempt = 0; attempt < CLOUD_MERGE_SLICE_MAX_ATTEMPTS; attempt++) {
       if (attempt > 0) {
         const delay =
@@ -677,8 +688,9 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       const proj = fresh.projects.find((x) => x.id === p.id);
       if (!proj) break;
 
+      // structure ops 경로: atomic RPC 진입 전에도 동일하게 처리
       let baseRevision: number | null = revisionHintFromStale;
-      if (baseRevision === null && !revisionStaleNotifiedThisPush) {
+      if (baseRevision === null && !revisionStaleNotifiedThisPush && _mergeAtomicUnsupported) {
         const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
           p_workspace_user_id: src,
           p_project_id: p.id
@@ -691,12 +703,10 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
         }
       }
 
-      const opsFlush = await flushStructureOpsPersistForProject(p.id, src, baseRevision);
+      const opsFlush = await flushStructureOpsPersistForProject(p.id, src, baseRevision ?? undefined);
       structureOpsBatchFlush.set(structureOpsPersistFlushKey(src, p.id), opsFlush);
 
-      if (
-        collabPushCanSkipSliceMergeAfterOpsFlush(p.id, src, structureOpsBatchFlush, opsFlush)
-      ) {
+      if (collabPushCanSkipSliceMergeAfterOpsFlush(p.id, src, structureOpsBatchFlush, opsFlush)) {
         if (import.meta.env.DEV) {
           console.info('[pushProjectSlicesToOwners] structure_ops-only — skip slice merge', p.id);
         }
@@ -711,8 +721,8 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       if (!pushNodes.length) {
         pushNodes = prePushLocal.length ? prePushLocal : (fresh.nodesByProject[p.id] ?? []);
       }
-      /** push: 소유자 슬라이스와 합성. fetch 실패 시 로컬만 LWW add(서버 prune off 마이그레이션 전제). */
-      let ownerSlice = await fetchProjectSliceFromCloud(src, p.id);
+
+      let ownerSlice = getPullPushSliceCache(src, p.id) ?? await fetchProjectSliceFromCloud(src, p.id);
       if (!ownerSlice) {
         await new Promise((r) => setTimeout(r, 280));
         ownerSlice = await fetchProjectSliceFromCloud(src, p.id);
@@ -721,25 +731,104 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       let useDeltaOnly = false;
       if (!ownerSlice) {
         if (import.meta.env.DEV) {
-          console.warn(
-            '[pushProjectSlicesToOwners] owner slice fetch failed — delta-only LWW push',
-            p.id
-          );
+          console.warn('[pushProjectSlicesToOwners] owner slice fetch failed — delta-only LWW push', p.id);
         }
         pushNodes = mergeNodesForCollabPush(pushNodes, [], p.id);
         pushProj = proj;
         useDeltaOnly = true;
       } else {
         pushNodes = mergeNodesForCollabPush(pushNodes, ownerSlice.nodes, p.id);
-        pushProj = collabPushProjectMetaAvoidingServerPrune(
-          proj,
-          ownerSlice.project,
-          pushNodes,
-          ownerSlice.nodes
-        );
+        pushProj = collabPushProjectMetaAvoidingServerPrune(proj, ownerSlice.project, pushNodes, ownerSlice.nodes);
       }
       const { cloud_workspace_source_user_id: _cw, ...meta } = pushProj;
 
+      // ── atomic RPC 경로 (Phase-4) ──────────────────────────────────────────────
+      if (!_mergeAtomicUnsupported) {
+        const { data: atomicData, error: atomicErr } = await supabase.rpc(
+          'plannode_project_collab_merge_atomic',
+          {
+            p_workspace_user_id: src,
+            p_project_id:        p.id,
+            p_project:           meta,
+            p_nodes:             pushNodes,
+            p_base_revision:     baseRevision,
+            p_lock_ttl_seconds:  CLOUD_MERGE_SLICE_LOCK_TTL_SECONDS,
+            p_use_delta:         useDeltaOnly
+          }
+        );
+
+        // DB에 새 RPC가 없으면 구 경로로 fallback (1회만 판단)
+        // Supabase JS 에러 객체 구조: { message, code, details, hint } — HTTP status는 별도 필드 없이
+        // message/details에 "404"·"not found"·"PGRST202"로 노출됨
+        if (import.meta.env.DEV && atomicErr) {
+          console.warn('[pushProjectSlicesToOwners] merge_atomic err dump', JSON.stringify(atomicErr));
+        }
+        const isAtomicMissing = atomicErr != null && isCollabRevisionRpcMissing(atomicErr);
+        if (isAtomicMissing) {
+          _mergeAtomicUnsupported = true;
+          if (import.meta.env.DEV) {
+            console.info('[pushProjectSlicesToOwners] merge_atomic unsupported — fallback to legacy path');
+          }
+          // 아래 legacy 경로 재실행을 위해 attempt 반복
+          attempt--;
+          continue;
+        }
+
+        if (!atomicErr && atomicData && typeof atomicData === 'object') {
+          const res = atomicData as { ok?: boolean; error?: string; revision?: number };
+          if (res.ok) {
+            if (typeof res.revision === 'number') {
+              setCachedCollabRevision(src, p.id, res.revision);
+            }
+            lastErr = null;
+            revisionHintFromStale = null;
+            break;
+          }
+          const errType = String(res.error ?? '');
+          if (errType === 'revision_stale') {
+            const hinted = typeof res.revision === 'number' ? res.revision : null;
+            if (hinted !== null) revisionHintFromStale = hinted;
+            await recoverCollabProjectAfterRevisionStale(p.id);
+            const dedupUntil = modalSavePushStaleToastDedupUntil.get(p.id) ?? 0;
+            if (!revisionStaleNotifiedThisPush && Date.now() >= dedupUntil) {
+              revisionStaleNotifiedThisPush = true;
+              notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
+            }
+            continue;
+          }
+          if (errType === 'merge_locked') {
+            notifyMergeLockBusyToastThrottled(p.id, proj.name);
+            lastErr = { message: 'merge_locked' };
+            continue;
+          }
+          lastErr = { message: errType };
+          continue;
+        }
+
+        if (atomicErr) {
+          lastErr = atomicErr;
+          const msg = String(atomicErr.message ?? '');
+          const det = String((atomicErr as { details?: string }).details ?? '');
+          if (msg.includes('revision_stale') || det.includes('revision_stale')) {
+            const hinted = parseStaleRevisionFromCollabError(atomicErr);
+            if (hinted !== null) revisionHintFromStale = hinted;
+            await recoverCollabProjectAfterRevisionStale(p.id);
+            const dedupUntil = modalSavePushStaleToastDedupUntil.get(p.id) ?? 0;
+            if (!revisionStaleNotifiedThisPush && Date.now() >= dedupUntil) {
+              revisionStaleNotifiedThisPush = true;
+              notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
+            }
+            continue;
+          }
+          if (msg.includes('merge_locked') || det.includes('merge_locked')) {
+            notifyMergeLockBusyToastThrottled(p.id, proj.name);
+            continue;
+          }
+        }
+        continue;
+      }
+
+      // ── legacy 4-RPC 경로 (atomic 미지원 환경 fallback) ──────────────────────
       let lockHeld = false;
       const { data: lockData, error: lockErr } = await supabase.rpc('plannode_project_collab_try_acquire_lock', {
         p_workspace_user_id: src,
@@ -765,20 +854,8 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
           ? 'plannode_workspace_merge_project_slice_deltas'
           : 'plannode_workspace_merge_project_slice';
         const rpcArgs = useDeltaOnly
-          ? {
-              p_workspace_user_id: src,
-              p_project_id: p.id,
-              p_project: meta,
-              p_node_deltas: pushNodes,
-              p_base_revision: baseRevision
-            }
-          : {
-              p_workspace_user_id: src,
-              p_project_id: p.id,
-              p_project: meta,
-              p_nodes: pushNodes,
-              p_base_revision: baseRevision
-            };
+          ? { p_workspace_user_id: src, p_project_id: p.id, p_project: meta, p_node_deltas: pushNodes, p_base_revision: baseRevision }
+          : { p_workspace_user_id: src, p_project_id: p.id, p_project: meta, p_nodes: pushNodes, p_base_revision: baseRevision };
         const { error: mErr } = await supabase.rpc(rpcName, rpcArgs);
         if (!mErr) {
           lastErr = null;
@@ -793,8 +870,7 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
           if (hinted !== null) revisionHintFromStale = hinted;
           await recoverCollabProjectAfterRevisionStale(p.id);
           const dedupUntil = modalSavePushStaleToastDedupUntil.get(p.id) ?? 0;
-          const skipStaleToast = Date.now() < dedupUntil;
-          if (!revisionStaleNotifiedThisPush && !skipStaleToast) {
+          if (!revisionStaleNotifiedThisPush && Date.now() >= dedupUntil) {
             revisionStaleNotifiedThisPush = true;
             notifyRevisionStaleSyncedToastThrottled(p.id, proj.name);
           }
@@ -1158,6 +1234,8 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
 
   const slice = await fetchProjectSliceForCollabAssess(src, localRef.id);
   if (!slice) return false;
+  // pull 직후 push가 재사용할 수 있도록 단기 캐시에 저장
+  setPullPushSliceCache(src, localRef.id, slice);
 
   const parseTs = (iso: string | undefined): number => {
     const t = Date.parse(String(iso ?? ''));
@@ -1349,6 +1427,24 @@ function rememberCollabRemoteHashAtRevision(
 /** E14-4 — modal-save assess·merge 경로 slice fetch ≤2s 결과 재사용 (E4-2 in-flight + completed) */
 const MODAL_SLICE_FETCH_RECENT_TTL_MS = 2_000;
 type ProjectSliceFetchResult = Awaited<ReturnType<typeof fetchProjectSliceFromCloud>>;
+
+/** pull→push 동일 사이클 내 슬라이스 이중 fetch 제거 — 8s TTL (push는 pull 직후 수행) */
+const PULL_PUSH_SLICE_CACHE_TTL_MS = 8_000;
+const pullPushSliceCache = new Map<string, { result: ProjectSliceFetchResult; at: number }>();
+
+function setPullPushSliceCache(workspaceUserId: string, projectId: string, result: ProjectSliceFetchResult): void {
+  pullPushSliceCache.set(`${workspaceUserId}:${projectId}`, { result, at: Date.now() });
+}
+
+function getPullPushSliceCache(workspaceUserId: string, projectId: string): ProjectSliceFetchResult | null {
+  const key = `${workspaceUserId}:${projectId}`;
+  const entry = pullPushSliceCache.get(key);
+  if (!entry || Date.now() - entry.at > PULL_PUSH_SLICE_CACHE_TTL_MS) {
+    pullPushSliceCache.delete(key);
+    return null;
+  }
+  return entry.result;
+}
 
 type RecentModalSliceFetchEntry = {
   promise: Promise<ProjectSliceFetchResult>;

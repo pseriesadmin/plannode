@@ -320,6 +320,10 @@ let onAfterPendingStoreHydrate = null;
 let persistTimer = null;
 /** drag end 등 `render()` 직후 `flushPersistNow` — tail `schedulePersist` 1회 억제(CANVAS-P1-03) */
 let skipSchedulePersistOnce = false;
+// [분석] Phase-2 플래그 제거 (2026-05-31 재검증): 파일럿 내부 nodes=[...nodes]는 Svelte nodesStore를
+// 직접 트리거하지 않음 — nodesStore.subscribe는 projects.ts의 nodes.set() 호출 시만 발동.
+// 실제 post-drag hydrate 차단은 canvasPostDragDeferTimer 방식으로 대체(위 선언).
+let _relayoutInProgress = false; // pilotBridge 노출용으로만 유지 (isRelayoutInProgress())
 
 /** Undo·Redo: 노드 전체 스냅샷 스택. 각 스택 최대 UNDO_MAX개(메모리 한도) — 연속 Undo/Redo는 이 길이를 넘기지 않음 */
 const UNDO_MAX = 40;
@@ -333,19 +337,38 @@ const skipFirstEditSaveUndo = new Set();
 let nodeEditModalNodeId = null;
 /** 이번 모달에서 「저장」으로 확정했으면 닫을 때 지연된(옛) hydrate를 적용하지 않음 */
 let nodeEditModalCommittedSave = false;
+/** showEdit 「저장」 async 구간 — 배경·취소 차단 + pm-proj-list-loading 오버레이 */
+let nodeEditModalSaveInProgress = false;
 /** 모달 열림 중 쌓인 hydrate 요청 — 닫을 때(저장 안 한 경우만) 반영 */
 let pendingHydrateFromStore = null;
 /** CANVAS-P1-04 — pointer drag/pan·wheel burst 중 pull hydrate 보류(스토어 merge는 즉시) */
 let canvasPointerInteractionDepth = 0;
 let canvasWheelBurstTimer = null;
 const CANVAS_WHEEL_BURST_MS = 120;
+// [수정] post-drag hydrate defer: 드래그 종료 후 async cloud flush가 hydrate→render를 트리거하는 문제 차단
+// 드래그 end → flushPersistNow → cloud flush (async) → nodes.set → bridge → hydrate(unguarded) → render() 전체 재빌드
+// 이 타이머 동안은 cloud pull 기반 hydrate를 defer하여 drag-end 직후 불필요한 render 방지
+let canvasPostDragDeferTimer = null;
+const CANVAS_POST_DRAG_DEFER_MS = 800;
 
 function isCanvasWheelBurstActive() {
   return canvasWheelBurstTimer != null;
 }
 
+function isCanvasPostDragDeferActive() {
+  return canvasPostDragDeferTimer != null;
+}
+
+function armCanvasPostDragDeferHydrate() {
+  if (canvasPostDragDeferTimer != null) clearTimeout(canvasPostDragDeferTimer);
+  canvasPostDragDeferTimer = setTimeout(() => {
+    canvasPostDragDeferTimer = null;
+    maybeFlushPendingStoreHydrateAfterInteraction();
+  }, CANVAS_POST_DRAG_DEFER_MS);
+}
+
 function isCanvasInteractionDeferHydrate() {
-  return canvasPointerInteractionDepth > 0 || isCanvasWheelBurstActive();
+  return canvasPointerInteractionDepth > 0 || isCanvasWheelBurstActive() || isCanvasPostDragDeferActive();
 }
 
 function beginCanvasPointerInteractionDeferHydrate() {
@@ -395,6 +418,55 @@ const NODE_EDIT_SAVE_GUARD_MS = 8000;
 
 function isNodeEditModalDomOpen() {
   return !!(nodeEditModalNodeId && document.querySelector('.mbg .ein'));
+}
+
+/** +page.svelte `pm-proj-list-loading` 레이아웃 + 동일 SVG(프로젝트 목록 불러오기) — spin은 SMIL(파일럿 DOM) */
+const NODE_EDIT_SAVE_SPIN_SVG =
+  '<svg class="pm-proj-list-spin" width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" focusable="false">' +
+  '<g><circle cx="20" cy="20" r="16" fill="none" stroke="#7c6cf0" stroke-width="3" stroke-linecap="round" stroke-dasharray="26 74"/>' +
+  '<animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 20 20" to="360 20 20" dur="0.75s" repeatCount="indefinite"/></g></svg>';
+
+function clearNodeEditModalSavingState() {
+  nodeEditModalSaveInProgress = false;
+  const bg = document.querySelector('.mbg');
+  if (!bg) return;
+  bg.removeAttribute('aria-busy');
+  const mo = bg.querySelector('.mo');
+  mo?.classList.remove('mo-save-busy');
+  mo?.querySelector('.node-edit-save-loading')?.remove();
+  bg.querySelectorAll('#ima button').forEach((btn) => {
+    btn.disabled = false;
+    btn.style.opacity = '';
+    btn.style.pointerEvents = '';
+  });
+  mo?.querySelectorAll('.fi, .bchip').forEach((el) => {
+    el.disabled = false;
+  });
+}
+
+function armNodeEditModalSavingState(label = '저장하는 중') {
+  nodeEditModalSaveInProgress = true;
+  const bg = document.querySelector('.mbg');
+  const mo = bg?.querySelector('.mo');
+  if (!bg || !mo || mo.querySelector('.node-edit-save-loading')) return;
+  bg.setAttribute('aria-busy', 'true');
+  mo.classList.add('mo-save-busy');
+  const layer = document.createElement('div');
+  layer.className = 'pm-proj-list-loading node-edit-save-loading';
+  layer.setAttribute('role', 'status');
+  layer.setAttribute('aria-live', 'polite');
+  layer.setAttribute('aria-busy', 'true');
+  layer.setAttribute('aria-label', label);
+  layer.innerHTML = NODE_EDIT_SAVE_SPIN_SVG;
+  mo.appendChild(layer);
+  bg.querySelectorAll('#ima button').forEach((btn) => {
+    btn.disabled = true;
+    btn.style.opacity = '0.55';
+    btn.style.pointerEvents = 'none';
+  });
+  mo.querySelectorAll('.fi, .bchip').forEach((el) => {
+    el.disabled = true;
+  });
 }
 
 /** addChild 직후 상세 모달「취소」·배경 닫기 — 스켈레톤 노드 제거(생성 취소) */
@@ -498,8 +570,8 @@ function mergeProtectedNodeIntoHydrateList(list, protectId) {
     description: keepModalDesc ? ta.value : (live.description ?? remote?.description ?? ''),
     badges: live.badges?.length ? live.badges : remote?.badges || [],
     parent_id: live.parent_id ?? remote?.parent_id ?? null,
-    mx: remote?.mx ?? live.mx ?? null,
-    my: remote?.my ?? live.my ?? null
+    mx: mergePilotCoordFromStore(remote?.mx, live.mx),
+    my: mergePilotCoordFromStore(remote?.my, live.my)
   };
   return mergeNodeSnapIntoHydrateList(list, merged);
 }
@@ -597,24 +669,50 @@ function applyRemoteAddNodeFromStructureOp(payload) {
   if (!payload || payload.type !== 'add_node' || !payload.node?.id) return;
   const { node } = payload;
   if (find(node.id)) return;
-  nodes = [
-    ...nodes,
-    {
-      id: node.id,
-      parent_id: node.parent_id,
-      name: node.name ?? '',
-      description: node.description ?? '',
-      node_type: node.node_type ?? 'detail',
-      num: node.num ?? '',
-      badges: [],
-      metadata: { badges: { dev: [], ux: [], prj: [] } },
-      mx: node.mx ?? null,
-      my: node.my ?? null
-    }
-  ];
+  const newNode = {
+    id: node.id,
+    parent_id: node.parent_id,
+    name: node.name ?? '',
+    description: node.description ?? '',
+    node_type: node.node_type ?? 'detail',
+    num: node.num ?? '',
+    badges: [],
+    metadata: { badges: { dev: [], ux: [], prj: [] } },
+    mx: null,
+    my: null
+  };
+  insertFlatAfterLastSibling(newNode);
+  if (node.parent_id) clearSiblingManualLayout(node.parent_id);
+  reconcileMixedSiblingAutoLayout();
   syncNcFromNodes();
   if (curP?.id) registerRecentlyAddedNodeIdsForCloudMerge(curP.id, [node.id]);
   render();
+}
+
+/** 형제 append — flat 배열에서 마지막 형제 subtree 뒤에 삽입(원격 add 순서·레이아웃 정합) */
+function insertFlatAfterLastSibling(newNode) {
+  const pid = newNode.parent_id;
+  if (!pid) {
+    nodes = [...nodes, newNode];
+    return;
+  }
+  const siblings = nodes.filter((n) => n.parent_id === pid);
+  if (!siblings.length) {
+    nodes = [...nodes, newNode];
+    return;
+  }
+  let insertAt = 0;
+  for (const sib of siblings) {
+    const start = nodes.findIndex((n) => n.id === sib.id);
+    if (start < 0) continue;
+    const sub = new Set(collectNodeSubtreeIds(sib.id));
+    let end = start;
+    for (let j = start; j < nodes.length; j++) {
+      if (sub.has(nodes[j].id)) end = j;
+    }
+    insertAt = Math.max(insertAt, end + 1);
+  }
+  nodes = [...nodes.slice(0, insertAt), newNode, ...nodes.slice(insertAt)];
 }
 
 function applyRemoteMoveNodeFromStructureOp(payload) {
@@ -751,7 +849,6 @@ function sendAddNodeStructureOp(nn) {
   if (!curP?.id || !nn?.id) return;
   const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
   if (!collabUid) return;
-  const pos = gp(nn);
   sendProjectStructureOp(
     curP.id,
     {
@@ -763,8 +860,7 @@ function sendAddNodeStructureOp(nn) {
         description: nn.description ?? '',
         node_type: nn.node_type ?? 'detail',
         num: nn.num ?? '',
-        mx: nn.mx != null ? nn.mx : pos.x,
-        my: nn.my != null ? nn.my : pos.y
+        layout_auto: true
       }
     },
     collabPersistOpts()
@@ -861,6 +957,13 @@ function armTextOpsDescEditor(projectId, nodeId, userId) {
   };
 }
 
+/** 스토어·pull 병합 — `null`은 자동배치 의도(`??`로 local 픽셀 복원 금지, FIX-11) */
+function mergePilotCoordFromStore(storeVal, pilotVal) {
+  if (storeVal === null) return null;
+  if (storeVal != null) return storeVal;
+  return pilotVal ?? null;
+}
+
 function mergeStoreNodesIntoPilotBeforePersist(protectId) {
   if (typeof getStoreNodesForCollabMerge !== 'function') return;
   let storePilot;
@@ -896,8 +999,8 @@ function mergeStoreNodesIntoPilotBeforePersist(protectId) {
       ...sn,
       badges: sn.badges || prev.badges || [],
       parent_id: sn.parent_id ?? prev.parent_id ?? null,
-      mx: sn.mx ?? prev.mx ?? null,
-      my: sn.my ?? prev.my ?? null
+      mx: mergePilotCoordFromStore(sn.mx, prev.mx),
+      my: mergePilotCoordFromStore(sn.my, prev.my)
     });
   }
   nodes = [...byId.values()];
@@ -921,6 +1024,7 @@ function runHydrateFromStoreCore(project, pilotNodes) {
       }));
       if (protectId) mapped = mergeProtectedNodeIntoHydrateList(mapped, protectId);
       mapped = applyNodeEditSaveGuardToHydrateList(mapped);
+      reconcileMixedSiblingAutoLayout();
       nodes = mapped;
     } else {
       nodes = [
@@ -2029,6 +2133,23 @@ function defaultNumForNode(node) {
   return pfx + ord;
 }
 
+/** 같은 부모 형제 중 mx/my null·수동 혼재 시 전 subtree 자동배치로 통일(FIX-11 · `__pnLayoutAudit`.mixedParentGroups) */
+function reconcileMixedSiblingAutoLayout() {
+  const byParent = new Map();
+  for (const n of nodes) {
+    if (n.parent_id == null) continue;
+    const pid = n.parent_id;
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(n);
+  }
+  for (const [pid, sibs] of byParent) {
+    if (sibs.length < 2) continue;
+    const hasManual = sibs.some((n) => n.mx != null && n.my != null);
+    const hasAuto = sibs.some((n) => n.mx == null || n.my == null);
+    if (hasManual && hasAuto) clearSiblingManualLayout(pid);
+  }
+}
+
 /** 형제 그룹의 수동 좌표 제거 → bld/ap 자동 열 배치만 사용 */
 function clearSiblingManualLayout(parentId) {
   // [수정] P0-1 (2026-05-31): 직계 형제만 → 각 형제의 shown-subtree 전체 null 처리
@@ -2913,40 +3034,82 @@ function estimateNodeCardHeightPx(n) {
   return Math.max(NODE_H, h);
 }
 
-/** 우측분포 bld — (추정 높이 + TOPDOWN_SIBLING_COL_GAP) / 행 피치, 최소 1행 */
+/** 우측분포 전용 — DOM `.nd` 실측 우선(배지 clamp·설명 wrap). pre-DOM은 estimate(1pass) */
+function nodeHeightForRightLayout(n) {
+  if (!n) return NODE_H;
+  const el = typeof document !== 'undefined' ? document.getElementById('nd-' + n.id) : null;
+  if (el && el.offsetHeight > 28) return el.offsetHeight;
+  return estimateNodeCardHeightPx(n);
+}
+
+/** 우측분포 bld — 형제 세로 적층: (실측/추정 높이 + 36px gap) / pitch · 하위분포 col+gap과 대칭 개념 */
+function rightLayoutRowAdvanceForNode(n) {
+  const pitch = layoutRowH();
+  if (pitch <= 0) return 1;
+  return (nodeHeightForRightLayout(n) + TOPDOWN_SIBLING_COL_GAP) / pitch;
+}
+
+/** @deprecated FIX-12 — 정수 ceil rowSpan 대신 `rightLayoutRowAdvanceForNode` 사용 */
 function rightLayoutRowSpanForNode(n) {
-  const pitch = ROW_H * RIGHT_ROW_GAP_MULT;
-  return Math.max(1, (estimateNodeCardHeightPx(n) + TOPDOWN_SIBLING_COL_GAP) / pitch);
+  return Math.max(1, Math.ceil(rightLayoutRowAdvanceForNode(n)));
+}
+
+/** bld/ap 형제 정렬 — num 우선 · 빈 num은 flat append 순 · 원격 add 맨 앞 버그(#9) 방지 */
+function compareSiblingNodesForLayout(a, b) {
+  const na = String(a.num ?? '').trim();
+  const nb = String(b.num ?? '').trim();
+  if (na && nb) {
+    const numCmp = na.localeCompare(nb, undefined, { numeric: true });
+    if (numCmp !== 0) return numCmp;
+  } else if (na && !nb) return -1;
+  else if (!na && nb) return 1;
+  const idxA = nodes.findIndex((n) => n.id === a.id);
+  const idxB = nodes.findIndex((n) => n.id === b.id);
+  if (idxA >= 0 && idxB >= 0 && idxA !== idxB) return idxA - idxB;
+  return String(a.id).localeCompare(String(b.id));
 }
 
 function bld(nid, col, r) {
   const kids = collapsedNodeIds.has(nid)
     ? []
-    : nodes
-        .filter((n) => n.parent_id === nid)
-        .sort(
-          (a, b) =>
-            String(a.num ?? '').localeCompare(String(b.num ?? ''), undefined, { numeric: true }) ||
-            String(a.id).localeCompare(String(b.id))
-        );
+    : nodes.filter((n) => n.parent_id === nid).sort(compareSiblingNodesForLayout);
   if (!kids.length) {
-    // 리프 노드: col, row 바로 저장
     lm[nid] = { col, row: r };
     const node = find(nid);
-    const rowSpan =
-      nodeMapLayoutMode === 'right' && node ? rightLayoutRowSpanForNode(node) : 1;
-    return r + rowSpan;
+    return r + (node ? rightLayoutRowAdvanceForNode(node) : 1);
   }
-  // 부모 노드: 자식들을 col+1에 배치 (더 오른쪽)
   let row = r;
   const startRow = r;
   for (const k of kids) {
-    // 각 자식은 col+1에서 시작 (명시적으로 col 증가)
     row = bld(k.id, col + 1, row);
   }
-  // 부모는 col에서, row는 자식들의 중간값
-  lm[nid] = { col, row: (startRow + row - 1) / 2 };
+  /** 부모 Y — 자식 구간 [startRow, row) 중앙( fractional row · FIX-12) */
+  lm[nid] = { col, row: (startRow + row) / 2 };
   return row;
+}
+
+/** 우측분포 2pass — DOM 실측 후 lm·`.nw` 재배치(형제 세로 겹침·gap 불균형 방지 · FIX-12R) */
+function applyLayoutMapPositionsToDom() {
+  nodes.forEach((n) => {
+    if (!isTreeNodeShown(n)) return;
+    const w = document.getElementById('nw-' + n.id);
+    if (!w) return;
+    const pos = ap(n.id);
+    w.style.left = `${pos.x}px`;
+    w.style.top = `${pos.y}px`;
+  });
+}
+
+function reflowRightLayoutAfterDomMeasure() {
+  if (nodeMapLayoutMode !== 'right') return;
+  lm = {};
+  let globalRow = 0;
+  nodes
+    .filter((n) => !n.parent_id && isTreeNodeShown(n))
+    .forEach((root) => {
+      globalRow = bld(root.id, 0, globalRow);
+    });
+  applyLayoutMapPositionsToDom();
 }
 
 function readLayoutMap() {
@@ -3046,13 +3209,7 @@ function applyNodeMapLayout(mode) {
 function bldTopDown(nid, depth, colCursor) {
   const kids = collapsedNodeIds.has(nid)
     ? []
-    : nodes
-        .filter((n) => n.parent_id === nid)
-        .sort(
-          (a, b) =>
-            String(a.num ?? '').localeCompare(String(b.num ?? ''), undefined, { numeric: true }) ||
-            String(a.id).localeCompare(String(b.id))
-        );
+    : nodes.filter((n) => n.parent_id === nid).sort(compareSiblingNodesForLayout);
   if (!kids.length) {
     lm[nid] = { col: colCursor + 0.5, row: depth };
     return colCursor + 1;
@@ -3099,20 +3256,27 @@ function materializeDisplayCoordsForNodes(nodeIds) {
         continue;
       }
     }
-    const pos = gp(node);
-    node.mx = pos.x;
-    node.my = pos.y;
-    touched = true;
+    // [수정] Overlap Fix (2026-05-31): DOM 요소 없으면 materialize 건너뜀
+    // 이전: gp() fallback → lm 기반 좌표 → 두 노드가 같은 lm row이면 동일 좌표 할당 → 겹침 버그
+    // 이제: DOM 실제 위치가 없는 노드(신규·콜라보 스켈레톤)는 mx/my=null 유지 → 자동 배치 유지
+    // 영향: 드래그 종료 시 DOM에 실제로 렌더링된 노드만 좌표 고정 → 겹침 원천 차단
   }
-  if (touched) nodes = [...nodes];
+  if (touched) {
+    _relayoutInProgress = true;
+    try {
+      nodes = [...nodes];
+    } finally {
+      _relayoutInProgress = false;
+    }
+  }
 }
 
-/** 연결선·SVG 앵커 Y — ·nd 실제 세로 중앙(`.nw`의 `top:50%` + 버튼과 동일). 고정 44px은 가변 카드 높이에서 +와 어긋남 */
+/** 연결선·SVG 앵커 Y — `.nd` 실측 높이 우선(render 직후 drawEdges), 없으면 추정 */
 function nodeCenterY(n) {
   const top = gp(n).y;
-  const el = document.getElementById('nd-' + n.id);
-  if (el && el.offsetHeight > 0) return top + el.offsetHeight / 2;
-  return top + 44;
+  const el = typeof document !== 'undefined' ? document.getElementById('nd-' + n.id) : null;
+  const h = el && el.offsetHeight > 28 ? el.offsetHeight : estimateNodeCardHeightPx(n);
+  return top + h / 2;
 }
 
 function nodeCardWidth(n) {
@@ -3131,9 +3295,10 @@ function nodeTopY(n) {
 }
 function nodeBottomY(n) {
   const top = gp(n).y;
-  const el = document.getElementById('nd-' + n.id);
-  if (el && el.offsetHeight > 0) return top + el.offsetHeight;
-  return top + 88;
+  if (nodeMapLayoutMode === 'right') {
+    return top + nodeHeightForRightLayout(n);
+  }
+  return top + estimateNodeCardHeightPx(n);
 }
 /** 하위분포: 펼침(자식 있음) 또는 +(자식 없음) 버튼 중심 Y — 간선 출발 */
 function nodeTopdownBranchAnchorY(n) {
@@ -3224,8 +3389,7 @@ function render() {
     nodes
       .filter((n) => !n.parent_id)
       .forEach((n) => {
-        bld(n.id, 0, globalRow);
-        globalRow = Object.keys(lm).length;
+        globalRow = bld(n.id, 0, globalRow);
       });
   } else {
     let gc = 0;
@@ -3543,6 +3707,9 @@ function render() {
     }
     CV.appendChild(w);
   });
+  if (nodeMapLayoutMode === 'right') {
+    reflowRightLayoutAfterDomMeasure();
+  }
   drawEdges();
   applyTx();
   
@@ -3849,6 +4016,8 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     sendMoveNodeStructureOps(persistIds);
     if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
     endCanvasPointerInteractionDeferHydrate();
+    // [수정] post-drag defer: flushPersistNow 이후 async cloud flush → nodes.set → unguarded hydrate → render() 차단
+    armCanvasPostDragDeferHydrate();
   };
   document.addEventListener('pointermove', mv);
   document.addEventListener('pointerup', up);
@@ -3962,12 +4131,14 @@ function showEdit(n) {
         '저장',
         V,
         async () => {
+          armNodeEditModalSavingState('노드를 저장하는 중');
           if (import.meta.env.DEV) {
             console.info('[collab-diag] modal-save-click', { nodeId: n.id, t: Date.now() });
           }
           // hydrateFromStore(스토어 동기) 후 이전 노드 참조 n은 nodes 배열에 없을 수 있음 — id로 최신 객체를 잡는다
           const target = find(n.id);
           if (!target) {
+            clearNodeEditModalSavingState();
             toast('동기화 직후 노드를 찾지 못했어요. 잠시 뒤 다시 저장해줘');
             return false;
           }
@@ -4006,6 +4177,7 @@ function showEdit(n) {
             try {
               const pre = await onBeforeModalPersist();
               if (pre && pre.ok === false) {
+                clearNodeEditModalSavingState();
                 toast('동기화를 맞추는 중이에요. 잠시 후 다시 저장해 주세요.');
                 return false;
               }
@@ -4086,6 +4258,7 @@ function showEdit(n) {
       });
     },
     (how) => {
+      clearNodeEditModalSavingState();
       teardownTextOpsDescEditor();
       if (nodeEditModalNodeId === n.id) nodeEditModalNodeId = null;
       if (how === 'ok') {
@@ -4146,6 +4319,10 @@ function showIM(html, btns, extra, onClose) {
     pointerDownOnBackdrop = e.target === bg;
   }
   function onBgClick(e) {
+    if (nodeEditModalSaveInProgress) {
+      pointerDownOnBackdrop = false;
+      return;
+    }
     if (e.target === bg && pointerDownOnBackdrop) finish('backdrop');
     pointerDownOnBackdrop = false;
   }
@@ -4174,14 +4351,20 @@ function showIM(html, btns, extra, onClose) {
         if (out != null && typeof out.then === 'function') {
           void out
             .then((v) => {
-              if (v === false) return;
+              if (v === false) {
+                clearNodeEditModalSavingState();
+                return;
+              }
               finish('ok');
             })
-            .catch(() => {});
+            .catch(() => {
+              clearNodeEditModalSavingState();
+            });
         } else {
           finish('ok');
         }
       } else {
+        if (nodeEditModalSaveInProgress) return;
         finish('dismiss');
       }
     });
@@ -4378,6 +4561,20 @@ function graphFromMiniMapClient(clientX, clientY) {
 let mmDebounceTimer = null;
 /** CANVAS-P1-05 — wheel·pan 연속 시 updMM 100ms 디바운스 */
 const MM_UPDMM_DEBOUNCE_MS = 100;
+// [수정] ForcedReflow Fix: MMC 캔버스 크기 캐시 — 리사이즈 시만 갱신
+let _mmcSizeCache = null;
+function getMmcSize() {
+  if (_mmcSizeCache) return _mmcSizeCache;
+  const mc = document.getElementById('MMC');
+  if (!mc) return { mw: 120, mh: 72 };
+  // offsetWidth/offsetHeight는 최초 1회만 읽음
+  _mmcSizeCache = { mw: mc.offsetWidth || 120, mh: mc.offsetHeight || 72 };
+  return _mmcSizeCache;
+}
+// 윈도우 리사이즈 시 캐시 무효화
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', () => { _mmcSizeCache = null; });
+}
 
 function scheduleUpdMM() {
   if (mmDebounceTimer != null) clearTimeout(mmDebounceTimer);
@@ -4398,8 +4595,7 @@ function updMM() {
   const mc = document.getElementById('MMC');
   const vp = document.getElementById('MMV');
   if (!mc || !CW) return;
-  const mw = mc.offsetWidth || 120,
-    mh = mc.offsetHeight || 72;
+  const { mw, mh } = getMmcSize();
   const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
   mc.width = Math.round(mw * dpr);
   mc.height = Math.round(mh * dpr);
@@ -4420,7 +4616,10 @@ function updMM() {
     if (!isTreeNodeShown(n)) continue;
     const p = gp(n),
       w = nodeCardWidth(n),
-      h = nodeCardHeightPx(n);
+      // [수정] ForcedReflow Fix (2026-05-31): nodeCardHeightPx → estimateNodeCardHeightPx
+      // 이유: nodeCardHeightPx가 el.offsetHeight 읽어 O(n) 강제 동기 레이아웃 42ms 발생
+      // 미니맵 바운딩 박스는 근사값으로 충분
+      h = estimateNodeCardHeightPx(n);
     mnX = Math.min(mnX, p.x);
     mnY = Math.min(mnY, p.y);
     mxX = Math.max(mxX, p.x + w);
@@ -4460,7 +4659,7 @@ function updMM() {
     c.lineWidth = isSelected ? 1.5 : 0.5;
     const { px: rx, py: ry } = mmXY(p.x, p.y);
     const rw = nodeCardWidth(n) * mmScale,
-      rh = nodeCardHeightPx(n) * mmScale;
+      rh = estimateNodeCardHeightPx(n) * mmScale;
     c.beginPath();
     if (typeof c.roundRect === 'function') {
       c.roundRect(rx, ry, rw, rh, 3);
@@ -4476,7 +4675,7 @@ function updMM() {
     if (sn) {
       const p = gp(sn),
         w = nodeCardWidth(sn),
-        h = nodeCardHeightPx(sn);
+        h = estimateNodeCardHeightPx(sn);
       const { px: rx, py: ry } = mmXY(p.x, p.y);
       const rw = w * mmScale,
         rh = h * mmScale;
@@ -4736,9 +4935,34 @@ export function initPlannode(opts = {}) {
   document.addEventListener('click', onDocClickCtx);
   disposers.push(() => document.removeEventListener('click', onDocClickCtx));
 
+  // [수정] ForcedReflow Fix (2026-05-31): Presence 업데이트 시 전체 render() → 아바타만 경량 갱신
+  // 이전: onPresencePeersCanvasUpdate → render() → DOM 294개 재빌드 → drawEdges → 6533ms 리플로우
+  // 이제: 기존 .np-avatar만 제거 후 재삽입 — 노드카드 DOM 건드리지 않음
+  function updatePresenceAvatarsOnly() {
+    if (curView !== 'tree' || !CV) return;
+    // 기존 아바타 전부 제거
+    CV.querySelectorAll('.np-avatar').forEach((el) => el.remove());
+    const peersPresence = getPresencePeersForPilot();
+    if (!peersPresence.length) return;
+    const pilotNodeIdSet = new Set(nodes.map((n) => n.id));
+    for (const pr of peersPresence) {
+      const psid = normalizePresenceSelectedNodeIdForTree(pr?.selected_node_id, pilotNodeIdSet);
+      if (!psid) continue;
+      const nd = document.getElementById('nd-' + psid);
+      if (!nd) continue;
+      const av = document.createElement('div');
+      av.className = 'np-avatar';
+      av.setAttribute('aria-hidden', 'true');
+      const em = pr.email ? String(pr.email).trim() : '';
+      av.title = em ? `⚠ ${em} 편집 중` : '⚠ 다른 사용자 편집 중';
+      av.textContent = presenceAvatarLetter(em);
+      av.style.cssText =
+        'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;width:28px;height:28px;border-radius:50%;background:rgba(99,102,241,0.92);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.25);border:2px solid rgba(255,255,255,.85)';
+      nd.appendChild(av);
+    }
+  }
   const onPresencePeersCanvasUpdate = () => {
-    // Presence 업데이트: 트리 뷰일 때 무조건 render — 아바타 추가/제거 모두 처리
-    if (curView === 'tree') render();
+    updatePresenceAvatarsOnly();
   };
   window.addEventListener('plannode-presence-update', onPresencePeersCanvasUpdate);
   disposers.push(() => window.removeEventListener('plannode-presence-update', onPresencePeersCanvasUpdate));
@@ -5085,6 +5309,9 @@ export function initPlannode(opts = {}) {
     endCanvasPointerInteractionDeferHydrate();
     CW.style.cursor = 'default';
   };
+  // [수정] Phase-1 (2026-05-31): onWheel RAF throttle
+  // 이유: 트랙패드 초당 60~120회 wheel 이벤트마다 applyTx() DOM 조작 → RAF 1프레임 1회로 감소
+  let _wheelRafPending = false;
   const onWheel = (e) => {
     armCanvasWheelBurstDeferHydrate();
     if (e.ctrlKey) {
@@ -5099,12 +5326,17 @@ export function initPlannode(opts = {}) {
       panX = mx - (mx - panX) * z;
       panY = my - (my - panY) * z;
       scale = next;
-      applyTx();
     } else {
       e.preventDefault();
       panX -= e.deltaX;
       panY -= e.deltaY;
-      applyTx();
+    }
+    if (!_wheelRafPending) {
+      _wheelRafPending = true;
+      requestAnimationFrame(() => {
+        applyTx();
+        _wheelRafPending = false;
+      });
     }
   };
 
@@ -5240,11 +5472,16 @@ export function initPlannode(opts = {}) {
       clearUndoStack();
       nodeEditModalNodeId = null;
       nodeEditModalCommittedSave = false;
+      nodeEditModalSaveInProgress = false;
       pendingHydrateFromStore = null;
       nodeEditSaveGuard = null;
       if (canvasWheelBurstTimer != null) {
         clearTimeout(canvasWheelBurstTimer);
         canvasWheelBurstTimer = null;
+      }
+      if (canvasPostDragDeferTimer != null) {
+        clearTimeout(canvasPostDragDeferTimer);
+        canvasPostDragDeferTimer = null;
       }
       canvasPointerInteractionDepth = 0;
       if (typeof window !== 'undefined' && window.__pnLayoutAudit === pnLayoutAudit) {
@@ -5322,6 +5559,8 @@ export function initPlannode(opts = {}) {
     setNodeMapLayout(mode) {
       applyNodeMapLayout(mode);
     },
+    /** relayout·materialize 중 pilotBridge hydrate 재진입 차단용 (Phase-2) */
+    isRelayoutInProgress() { return _relayoutInProgress; },
     layoutAudit: pnLayoutAudit,
     /** PRD 탭에서 스토어·메타 동기 후 본문 재생성 (PILOT §9) */
     refreshPrdView() {

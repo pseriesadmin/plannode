@@ -7106,6 +7106,24 @@
     overflow-y: auto;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.2);
     flex-shrink: 0;
+    position: relative;
+  }
+
+  /* 노드 상세(showEdit) 저장 중 — 프로젝트 관리 `pm-proj-list-loading` 토큰 재사용 */
+  :global(.mo .pm-proj-list-loading) {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 0;
+    padding: 12px;
+    box-sizing: border-box;
+    background: rgba(250, 249, 247, 0.94);
+    border-radius: 10px;
   }
 
   :global(.mo.mo-wide) {

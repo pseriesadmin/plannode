@@ -235,6 +235,16 @@ describe('mergeNodeListsForCloud', () => {
     expect(out[0].my).toBe(340);
   });
 
+  it('remote explicit mx/my null clears local manual coords (FIX-11 layout_auto)', () => {
+    const tOld = '2026-01-01T00:00:00.000Z';
+    const tNew = '2026-01-02T00:00:00.000Z';
+    const local = [{ ...N('shared', tOld), mx: 120, my: 340 }];
+    const remote = [{ ...N('shared', tNew), mx: null, my: null }];
+    const out = mergeNodeListsForCloud(local, remote, false, null);
+    expect(out[0].mx).toBeNull();
+    expect(out[0].my).toBeNull();
+  });
+
   it('remoteProjectMetaNewer=true: preserves local mx/my when remote wins without coords (CSP)', () => {
     const tOld = '2026-01-01T00:00:00.000Z';
     const tNew = '2026-01-02T00:00:00.000Z';

@@ -36,6 +36,29 @@ describe('parseStructureOp', () => {
     }
   });
 
+  it('parses add_node layout_auto without mx/my', () => {
+    const op = parseStructureOp({
+      v: 1,
+      project_id: 'p1',
+      client_id: 'c1',
+      seq: 1,
+      op: {
+        type: 'add_node',
+        node: {
+          id: 'n2',
+          parent_id: 'root',
+          name: 'New',
+          layout_auto: true
+        }
+      }
+    });
+    expect(op?.op.type).toBe('add_node');
+    if (op?.op.type === 'add_node') {
+      expect(op.op.node.layout_auto).toBe(true);
+      expect(op.op.node.mx).toBeUndefined();
+    }
+  });
+
   it('parses delete_node and move_node', () => {
     const del = parseStructureOp({
       v: 1,
