@@ -734,6 +734,8 @@ export async function ensureOwnerAclRowForMyProject(projectId: string): Promise<
     if (attempt > 0) await new Promise((r) => setTimeout(r, 350 * attempt));
     const r = await ensureOwnerAclForNewProject(projectId, email);
     if (r.ok) {
+      invalidateAclInviteCache();
+      invalidateCountAclCache(projectId);
       updateProjectMeta(projectId, { owner_user_id: uid });
       return { ok: true };
     }
@@ -1140,6 +1142,8 @@ export async function deleteAllAclRowsForProjectIfOwner(
     }
     return { ok: false, message: userFacingAclErrorFromSupabase(error) };
   }
+  invalidateAclInviteCache();
+  invalidateCountAclCache(project.id);
   if (import.meta.env.DEV) {
     console.info('[deleteAllAclRowsForProjectIfOwner] 프로젝트 ACL 행 모두 삭제 완료:', project.id);
   }

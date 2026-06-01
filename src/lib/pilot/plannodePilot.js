@@ -488,6 +488,8 @@ function abortAddChildOnEditDismiss(nodeId) {
     if (!top.nodes.some((x) => x.id === nodeId)) undoStack.pop();
   }
   render();
+  // [Fix-GHOST-B] 취소 시 op log에 delete_node 전송 — skeleton add_node만 남아 피어가 빈 노드를 재삽입하는 문제 방지.
+  sendDeleteNodeStructureOp(nodeId);
   flushPersistNow({ force: true });
   emitAutoCloudSync('node-edit');
   return true;
@@ -1024,8 +1026,18 @@ function runHydrateFromStoreCore(project, pilotNodes) {
       }));
       if (protectId) mapped = mergeProtectedNodeIntoHydrateList(mapped, protectId);
       mapped = applyNodeEditSaveGuardToHydrateList(mapped);
-      reconcileMixedSiblingAutoLayout();
+      // [수정] Bug-1 (2026-06-01): nodes = mapped 먼저 → reconcile이 새 데이터에 적용
+      // 이전: reconcile이 구 nodes 배열을 정리 후 mapped로 덮어쓰여 효과 없음
       nodes = mapped;
+      reconcileMixedSiblingAutoLayout();
+      // [수정] FIX-HYDRATE-CLEAR (2026-06-01): 우측분포 모드 hydrate 시 stale mx/my 제거 → 파편화 flash 방지
+      // 이유: reflow(ap())가 항상 전체 재배치하므로 mx/my은 재배치 후 ap()값이어야 함.
+      //       클라우드 sync로 구 mx/my(old position)가 복원되면 첫 render pass에서 잘못된 위치로
+      //       순간 이동(flash)했다가 reflow가 ap()로 되돌림 → 파편화처럼 보임.
+      //       drag 후 materialize는 항상 ap()값으로 mx/my를 갱신하므로 유효한 drag 상태 손실 없음.
+      if (nodeMapLayoutMode === 'right') {
+        for (const n of nodes) { n.mx = undefined; n.my = undefined; }
+      }
     } else {
       nodes = [
         {
@@ -1985,6 +1997,8 @@ function applyRelinkDrop(newParentId) {
     render();
     return;
   }
+  // [Fix-RELINK-MOVE] 이동된 노드 id를 블록 내에서 수집
+  let relinkMovedIds = [];
   if (relinkArm.mode === 'single') {
     const toMove = relinkArm.nodeIds
       .filter((nid) => {
@@ -2019,6 +2033,7 @@ function applyRelinkDrop(newParentId) {
     clearSiblingManualLayout(newParentId);
     applyHierarchyNumsFromTreeOrder();
     nodes = [...nodes];
+    relinkMovedIds = toMove;
   } else {
     const anchorId = relinkArm.anchorId;
     const kids = nodes.filter((x) => x.parent_id === anchorId);
@@ -2035,12 +2050,15 @@ function applyRelinkDrop(newParentId) {
     clearSiblingManualLayout(anchorId);
     applyHierarchyNumsFromTreeOrder();
     nodes = [...nodes];
+    relinkMovedIds = kids.map((k) => k.id);
   }
   const movedCount =
     relinkArm?.mode === 'single' ? relinkArm.nodeIds.length : 0;
   clearRelinkArm();
   render();
   flushPersistNow();
+  // [Fix-RELINK-MOVE] move_node structure op 전송 — Broadcast + DB persist로 A계정 실시간 반영
+  sendMoveNodeStructureOps(relinkMovedIds);
   emitAutoCloudSync('node-relink');
   toast(
     movedCount > 1
@@ -2853,11 +2871,6 @@ function resetAllManualLayout() {
     toast('노드가 없어');
     return;
   }
-  const hasManual = nodes.some((n) => n.mx != null && n.my != null);
-  if (!hasManual) {
-    toast('수동으로 옮긴 노드가 없어. 이미 자동 배치만 쓰고 있어.');
-    return;
-  }
   if (
     !confirm(
       '드래그로 옮긴 수동 위치를 모두 지울까?\n취소하면 그대로 두고, 확인하면 트리 자동 열(col/row) 배치로 돌아가.'
@@ -3084,7 +3097,18 @@ function bld(nid, col, r) {
     row = bld(k.id, col + 1, row);
   }
   /** 부모 Y — 자식 구간 [startRow, row) 중앙( fractional row · FIX-12) */
-  lm[nid] = { col, row: (startRow + row) / 2 };
+  const parentCenterRow = (startRow + row) / 2;
+  lm[nid] = { col, row: parentCenterRow };
+  // [수정] FIX-OVERLAP (2026-06-01): 부모 자체 높이가 자식 범위 끝을 초과하면 보정
+  // 문제: 부모를 children center에 배치할 때 부모 height가 커서 다음 형제를 침범함
+  //       예) parent center=668px, height=138px → bottom=806px가 next sibling(762px)을 덮음
+  // 해결: 부모 bottom row > 자식 끝 row이면 subtree end를 부모 bottom으로 확장
+  const node = find(nid);
+  if (node) {
+    const pitch = layoutRowH();
+    const parentBottomRow = parentCenterRow + (nodeHeightForRightLayout(node) + TOPDOWN_SIBLING_COL_GAP) / pitch;
+    if (parentBottomRow > row) return parentBottomRow;
+  }
   return row;
 }
 

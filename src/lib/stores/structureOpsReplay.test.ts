@@ -100,4 +100,21 @@ describe('replayStructureOpsOnNodes', () => {
     list = replayStructureOpsOnNodes(list, [{ type: 'delete_node', node_id: 'n1' }], projectId);
     expect(list.some((n) => n.id === 'n1' || n.id === 'n2')).toBe(false);
   });
+
+  it('[Fix-ORPHAN] add_node with unknown parent_id is skipped (no orphan)', () => {
+    const list = replayStructureOpsOnNodes(baseNodes(), [
+      { type: 'add_node', node: { id: 'n-ghost', parent_id: 'nonexistent-parent', name: 'ghost', layout_auto: true } }
+    ], projectId);
+    expect(list.find((n) => n.id === 'n-ghost')).toBeUndefined();
+  });
+
+  it('[Fix-ORPHAN] add_node parent added in same batch resolves on 2nd pass', () => {
+    // n-parent 추가 후 n-child 추가 순서지만, n-child가 n-parent보다 먼저 처리됨
+    const list = replayStructureOpsOnNodes(baseNodes(), [
+      { type: 'add_node', node: { id: 'n-child', parent_id: 'n-parent', name: 'child', layout_auto: true } },
+      { type: 'add_node', node: { id: 'n-parent', parent_id: rootId, name: 'parent', layout_auto: true } }
+    ], projectId);
+    expect(list.find((n) => n.id === 'n-parent')).toBeDefined();
+    expect(list.find((n) => n.id === 'n-child')).toBeDefined();
+  });
 });
