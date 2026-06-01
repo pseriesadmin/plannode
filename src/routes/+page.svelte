@@ -35,7 +35,9 @@
     clearPersistSnapshotDebounceTimers,
     buildNodeSnapshotCaptureMeta,
     selectProject,
-    reconcileProjectNodeBadgesAfterPoolSave
+    reconcileProjectNodeBadgesAfterPoolSave,
+    setLayoutResetPending,
+    clearLayoutResetPending
   } from '$lib/stores/projects';
   import type { LogoutSessionSnapshotV1 } from '$lib/stores/projects';
   import {
@@ -52,6 +54,12 @@
     subscribeProjectWorkspaceHistoryRealtime,
     projectWorkspaceHistoryRealtimeTick
   } from '$lib/supabase/projectWorkspaceHistory';
+  import {
+    listNodeChangeLog,
+    nodeChangeLogAuthor,
+    type NodeChangeLogEntry
+  } from '$lib/stores/nodeChangeLog';
+  import { fetchNodeChangeLogFromDb } from '$lib/supabase/nodeChangeLogDb';
   import {
     parsePlannodeTreeV1ImportText,
     type ParsePlannodeTreeV1Result,
@@ -259,9 +267,10 @@
   /** #BJI 실패 시 프로젝트 모달 안 인라인 안내(GATE B IMPORT UX) */
   let projectImportError = '';
 
-  /** 로컬 노드 스냅샷 히스토리(협업 경량 · PRD M3 F3-3) */
+  /** 노드 히스토리 모달 */
   let showSnapshotHistoryModal = false;
   let snapshotListVersion = 0;
+  let changeLogRows: NodeChangeLogEntry[] = [];
   /** NOW-HIST-APP-05: `plannode_project_workspace_history` Realtime 구독 해제 */
   let pwhRealtimeUnsub: (() => void) | null = null;
   let pwhRealtimeBoundPid: string | null = null;
@@ -345,15 +354,19 @@
   }
 
   $: if (showSnapshotHistoryModal && $currentProject?.id) {
-    const key = `${$currentProject.id}`;
-    if (lastServerPwhModalFetchKey !== key) {
-      lastServerPwhModalFetchKey = key;
-      void refreshServerWorkspaceHistorySnapshots($currentProject.id);
-    }
+    void refreshNodeChangeLogRows($currentProject.id);
   } else if (!showSnapshotHistoryModal) {
-    lastServerPwhModalFetchKey = null;
-    serverPwhSnapshots = [];
-    serverPwhProjectId = null;
+    changeLogRows = [];
+  }
+
+  /** DB 우선, 미설정 환경은 localStorage 폴백 */
+  async function refreshNodeChangeLogRows(projectId: string): Promise<void> {
+    const dbRows = await fetchNodeChangeLogFromDb(projectId);
+    if (dbRows.length > 0) {
+      changeLogRows = dbRows; // DB query는 이미 최신순 정렬
+    } else {
+      changeLogRows = listNodeChangeLog(projectId).reverse();
+    }
   }
 
   $: snapshotRows = (() => {
@@ -522,28 +535,18 @@
     const currentProjId = get(currentProject)?.id;
     if (!currentProjId) return;
     idleSnapshotTimer = setTimeout(() => {
-      const proj = get(currentProject);
-      if (proj && proj.id === currentProjId) {
-        const curNodes = get(nodes);
-        const latest = getLatestNodeSnapshot(proj.id);
-        if (
-          latest &&
-          projectWorkspaceNodesJsonSnapshot(latest.nodes) === projectWorkspaceNodesJsonSnapshot(curNodes)
-        ) {
-          idleSnapshotTimer = null;
-          return;
-        }
-        if (
-          captureNodeSnapshot(
-            proj.id,
-            curNodes,
-            'idle_10min',
-            buildNodeSnapshotCaptureMeta('idle_10min', proj, curNodes)
-          )
-        ) {
-          refreshSnapshotList();
-        }
-      }
+      // 스냅샷 백업 일시 중지 — 과부하 완화. 재활성화 시 아래 주석 해제
+      // const proj = get(currentProject);
+      // if (proj && proj.id === currentProjId) {
+      //   const curNodes = get(nodes);
+      //   const latest = getLatestNodeSnapshot(proj.id);
+      //   if (latest && projectWorkspaceNodesJsonSnapshot(latest.nodes) === projectWorkspaceNodesJsonSnapshot(curNodes)) {
+      //     idleSnapshotTimer = null; return;
+      //   }
+      //   if (captureNodeSnapshot(proj.id, curNodes, 'idle_10min', buildNodeSnapshotCaptureMeta('idle_10min', proj, curNodes))) {
+      //     refreshSnapshotList();
+      //   }
+      // }
       idleSnapshotTimer = null;
     }, 600_000); // 10분
   }
@@ -1046,6 +1049,7 @@
   }
 
   $: accountEmailDisplay = String($authUser?.email ?? '').trim() || '—';
+  $: nodeChangeLogAuthor.set($authUser?.email ?? undefined);
 
   $: accountAvatarLetter = (() => {
     const e = accountEmailDisplay;
@@ -2568,6 +2572,11 @@
     const onExportSync = (ev: Event) => {
       const reason = (ev as CustomEvent<{ reason?: string }>).detail?.reason ?? 'export-output';
       const delayMs = reason === 'node-edit' ? 220 : 380;
+      // [Bug-3 (2026-06-01)] BAR 실행 후 pull race 방지: grace period 플래그 설정
+      if (reason === 'reset-layout') {
+        const cp = get(currentProject);
+        if (cp?.id) setLayoutResetPending(cp.id);
+      }
       scheduleCloudFlush(reason, delayMs);
     };
     window.addEventListener('plannode-auto-cloud-sync', onExportSync);
@@ -2577,14 +2586,15 @@
       if (!get(snapshotHistoryModalOpenForPwh)) return;
       const cp = get(currentProject);
       if (!cp?.id) return;
-      void refreshServerWorkspaceHistorySnapshots(cp.id);
+      // 협업자 node_op INSERT 수신 시 모달 목록 즉시 갱신
+      void refreshNodeChangeLogRows(cp.id);
     });
 
     const onPwhAfterCloudAppend = (ev: Event) => {
       const d = (ev as CustomEvent<{ projectId?: string }>).detail;
       if (!d?.projectId || !get(snapshotHistoryModalOpenForPwh)) return;
       if (get(currentProject)?.id !== d.projectId) return;
-      void refreshServerWorkspaceHistorySnapshots(d.projectId);
+      void refreshNodeChangeLogRows(d.projectId);
     };
     window.addEventListener('plannode-pwh-after-cloud-append', onPwhAfterCloudAppend);
 
@@ -3735,53 +3745,31 @@
     {#if showSnapshotHistoryModal && $currentProject}
       <div class="mbg" role="presentation" on:click|self={() => (showSnapshotHistoryModal = false)}>
         <div class="mo mo-wide snap-hist-modal" role="dialog" aria-modal="true" aria-labelledby="snap-hist-title">
-          <div class="pm-proj-head">
-            <h3 id="snap-hist-title" style="margin:0">워크스페이스 히스토리</h3>
-            <button type="button" class="mcl" on:click={() => (showSnapshotHistoryModal = false)}>✕</button>
-          </div>
-          <p class="snap-hist-hint">
-            <strong>이 브라우저</strong>의 로컬 링과 <strong>내 워크스페이스</strong> 클라우드 번들에서 온 기록을 합쳐 보여 줘요. 같은 프로젝트를 공유한 상대와는 <strong>목록이나 순서가 같지 않을 수 있어요</strong>(상대 기기·상대 번들에는 자동으로 붙지 않아요). 클라우드·가져오기 직전에 자동으로 저장된 노드 목록이며, 한 항목을 선택해 <strong>트리 전체를 그 시점으로 복원</strong>할 수
-            있어요. 노드 데이터가 없는 행은 복원할 수 없어요. 상단 「되돌리기」(Ctrl+Z)는 <strong>현재 세션 안에서의 캔버스 편집만</strong> 되돌립니다.
-          </p>
-          <div class="snap-hist-actions">
-            <button type="button" class="bcr" on:click={onManualNodeSnapshot}>지금 상태 스냅샷 남기기</button>
+          <div class="snap-hist-head">
+            <h3 id="snap-hist-title" class="snap-hist-title">노드 히스토리</h3>
+            <button type="button" class="mcl snap-hist-close" on:click={() => (showSnapshotHistoryModal = false)}>✕</button>
           </div>
           <div class="snap-hist-table-wrapper">
             <table class="snap-hist-table">
               <thead>
                 <tr>
-                  <th>시간 (한국)</th>
-                  <th>저자</th>
-                  <th>노드 수</th>
-                  <th>파이프라인</th>
-                  <th>버전</th>
-                  <th>사유</th>
-                  <th>작업</th>
+                  <th class="col-time">시간</th>
+                  <th class="col-author">작성자</th>
+                  <th class="col-name">노드 카드 제목</th>
+                  <th class="col-result">결과</th>
                 </tr>
               </thead>
               <tbody>
-                {#each snapshotRows as s (s.id)}
+                {#each changeLogRows as row (row.id)}
                   <tr class="snap-hist-row">
-                    <td>{formatHistoryTimestamp(s.at)}</td>
-                    <td>{s.author ?? '-'}</td>
-                    <td>{s.nodeCount ?? '-'}</td>
-                    <td>{s.pipelineLabel ?? '-'}</td>
-                    <td>{s.version ?? '-'}</td>
-                    <td>{formatSnapshotReason(s.reason)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        class="bcr snap-hist-restore-btn"
-                        disabled={!Array.isArray(s.nodes) || s.nodes.length === 0}
-                        on:click={() => void restoreSnapshotToWorkspace(s)}
-                      >
-                        복원
-                      </button>
-                    </td>
+                    <td class="col-time">{formatHistoryTimestamp(row.at)}</td>
+                    <td class="col-author">{row.author ?? '-'}</td>
+                    <td class="col-name">{row.nodeName}</td>
+                    <td class="col-result chg-action chg-{row.action}">{row.action === 'create' ? '생성' : row.action === 'edit' ? '수정' : '삭제'}</td>
                   </tr>
                 {:else}
-                  <tr>
-                    <td colspan="7" class="snap-hist-empty">아직 스냅샷이 없어. 다른 편집자 접속·클라우드 병합·파일 덮어쓰기 등이 일어나거나 위 버튼으로 남길 수 있어.</td>
+                  <tr class="snap-hist-empty-row">
+                    <td colspan="4" class="snap-hist-empty">아직 기록이 없어요. 노드 추가·수정·삭제 후 여기에 나타나요.</td>
                   </tr>
                 {/each}
               </tbody>
@@ -3789,6 +3777,13 @@
           </div>
         </div>
       </div>
+    {/if}
+
+    {#if false}
+    <!-- 워크스페이스 스냅샷 백업 UI — 과부하 완화로 일시 비활성화. 재활성화 시 위 블록 제거·아래 주석 해제 -->
+    <!-- {#if showSnapshotHistoryModal && $currentProject}
+      <div class="mbg" ...>기존 스냅샷 복원 테이블</div>
+    {/if} -->
     {/if}
 
     {#if showDeletedProjectWarning}
@@ -6247,46 +6242,43 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .snap-hist-modal .snap-hist-hint {
-    font-size: 12px;
-    line-height: 1.45;
-    color: #555;
-    margin: 0 0 10px;
+  /* ── 노드 히스토리 모달 스코프 CSS ── */
+  .snap-hist-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 0 18px;
+    border-bottom: 1px solid #edeae5;
+    margin-bottom: 0;
   }
-  .snap-hist-actions {
-    margin-bottom: 12px;
-  }
-  .snap-hist-list {
-    list-style: none;
+  .snap-hist-title {
     margin: 0;
-    padding: 0;
-    max-height: min(52vh, 420px);
-    overflow: auto;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: #1a1a1a;
   }
-  .snap-hist-item {
-    padding: 10px 0;
-    border-bottom: 1px solid #ece8e2;
-  }
-  .snap-hist-row-top {
-    font-size: 12px;
-    font-weight: 600;
-    color: #333;
-  }
-  .snap-hist-row-sub {
-    font-size: 11px;
-    color: #666;
-    margin-top: 4px;
-  }
-  .snap-hist-restore-btn {
-    margin-top: 8px;
-    font-size: 12px;
-    padding: 6px 10px;
+  .snap-hist-close {
+    flex-shrink: 0;
   }
   .snap-hist-empty {
-    font-size: 12px;
-    color: #888;
-    padding: 8px 0;
+    font-size: 13px;
+    color: #9a9490;
+    padding: 32px 16px;
+    text-align: center;
+    line-height: 1.6;
   }
+  /* 결과 뱃지 */
+  .chg-action {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .chg-create { color: #1d6f3a; }
+  .chg-edit   { color: #1455a4; }
+  .chg-delete { color: #b91c1c; }
   .zb {
     width: 20px;
     height: 20px;
@@ -7130,23 +7122,125 @@
     width: min(520px, calc(100vw - 32px));
   }
 
-  /* NOW-HIST-MODAL-UI-01: 동일 파일 내 :global(.mo.mo-wide)보다 뒤에 두어 520px 한도만 히스토리 모달에서 완화 */
+  /* ── 노드 히스토리 모달 :global ── */
   :global(.mo.mo-wide.snap-hist-modal) {
-    width: min(920px, calc(100vw - 24px));
-    max-width: calc(100vw - 16px);
+    width: min(760px, calc(100vw - 32px));
+    max-width: calc(100vw - 32px);
+    max-height: min(82vh, 680px);
+    padding: 28px 28px 24px;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   :global(.snap-hist-table-wrapper) {
+    flex: 1 1 auto;
+    overflow-y: auto;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    max-width: 100%;
+    margin-top: 4px;
+    /* 스크롤바 얇게 */
+    scrollbar-width: thin;
+    scrollbar-color: #d4cfc8 transparent;
+  }
+  :global(.snap-hist-table-wrapper::-webkit-scrollbar) {
+    width: 5px;
+    height: 5px;
+  }
+  :global(.snap-hist-table-wrapper::-webkit-scrollbar-thumb) {
+    background: #d4cfc8;
+    border-radius: 99px;
   }
 
   :global(.snap-hist-table) {
-    min-width: 760px;
-    width: max-content;
+    width: 100%;
+    min-width: 420px;
     border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  /* 헤더 */
+  :global(.snap-hist-table thead tr) {
+    background: #f7f5f2;
+  }
+  :global(.snap-hist-table th) {
+    padding: 10px 16px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #7a756e;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid #edeae5;
+  }
+
+  /* 열 너비 */
+  :global(.snap-hist-table .col-time)   { width: 112px; }
+  :global(.snap-hist-table .col-author) { width: 160px; }
+  :global(.snap-hist-table .col-name)   { width: auto; }
+  :global(.snap-hist-table .col-result) { width: 56px; text-align: center; }
+
+  /* 데이터 행 */
+  :global(.snap-hist-table td) {
+    padding: 11px 16px;
+    font-size: 13px;
+    color: #2a2723;
+    line-height: 1.45;
+    border-bottom: 1px solid #f0ece7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 짝수 행 아주 옅은 배경 */
+  :global(.snap-hist-table tbody .snap-hist-row:nth-child(even) td) {
+    background: #faf9f7;
+  }
+  :global(.snap-hist-table tbody .snap-hist-row:hover td) {
+    background: #f3f0ec;
+    transition: background 0.1s;
+  }
+
+  /* 빈 상태 행 */
+  :global(.snap-hist-table .snap-hist-empty-row td) {
+    border-bottom: none;
+  }
+
+  /* 시간·작성자 컬럼 서브 톤 */
+  :global(.snap-hist-table td.col-time),
+  :global(.snap-hist-table td.col-author) {
+    color: #7a756e;
+    font-size: 12px;
+  }
+
+  /* 노드 이름 컬럼 — 약간 굵게 */
+  :global(.snap-hist-table td.col-name) {
+    color: #1a1814;
+    font-weight: 500;
+  }
+
+  /* 결과 뱃지 셀 중앙 정렬 */
+  :global(.snap-hist-table td.col-result) {
+    text-align: center;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  /* 모바일 반응형 */
+  @media (max-width: 560px) {
+    :global(.mo.mo-wide.snap-hist-modal) {
+      width: calc(100vw - 16px);
+      max-width: calc(100vw - 16px);
+      padding: 20px 16px 16px;
+      max-height: 88vh;
+    }
+    :global(.snap-hist-table .col-author) { display: none; }
+    :global(.snap-hist-table th.col-author) { display: none; }
+    :global(.snap-hist-table .col-time) { width: 88px; }
+    :global(.snap-hist-table td) { padding: 10px 10px; font-size: 12px; }
+    :global(.snap-hist-table th) { padding: 8px 10px; }
   }
 
   /* 프로젝트 관리 모달: 패딩 + 헤더 고정(쉘은 flex·본문만 스크롤) */

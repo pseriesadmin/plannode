@@ -1,4 +1,7 @@
 import { writable, get } from 'svelte/store';
+
+/** 스냅샷 백업 스케줄링 일시 중지 — 과부하 완화. 재활성화 시 false로 변경 */
+const NODE_SNAPSHOT_SCHEDULING_DISABLED = true;
 import type { Project, Node, HistoryEntry } from '$lib/supabase/client';
 import { getAuthEmail } from '$lib/stores/authSession';
 import {
@@ -23,6 +26,13 @@ import {
   type NodeSnapshotCaptureMeta,
   type NodeSnapshotReason
 } from '$lib/stores/nodeSnapshotHistory';
+import {
+  appendNodeChangeLog,
+  recordNodeDiffToChangeLog,
+  nodeChangeLogAuthor,
+  type NodeChangeLogEntry
+} from '$lib/stores/nodeChangeLog';
+import { scheduleNodeChangeLogDbWrite } from '$lib/supabase/nodeChangeLogDb';
 import type { StructureOpPayload } from '$lib/supabase/projectStructureOps';
 
 // 프로젝트 상태
@@ -301,6 +311,33 @@ function schedulePersistNodeSnapshotAfterPilot(projectId: string): void {
       );
     }, PERSIST_SNAPSHOT_DEBOUNCE_MS)
   );
+}
+
+// [Bug-3 (2026-06-01)] BAR 실행 후 클라우드 pull이 구 mx/my를 복원하는 race 방지
+// resetAllManualLayout → setLayoutResetPending → mergeNodeListsForCloud에서 mx/my 강제 null
+const _layoutResetPendingMs = 10_000; // 10초 grace period
+const _layoutResetPendingAt = new Map<string, number>();
+
+/** BAR(자동정렬) 실행 후 호출 — 이후 pull merge 시 mx/my 강제 null (10초 grace) */
+export function setLayoutResetPending(projectId: string): void {
+  if (!projectId) return;
+  _layoutResetPendingAt.set(projectId, Date.now());
+}
+
+/** 클라우드 push 완료 후 호출해 grace period 해제 */
+export function clearLayoutResetPending(projectId: string): void {
+  _layoutResetPendingAt.delete(projectId);
+}
+
+function isLayoutResetPending(projectId: string | null | undefined): boolean {
+  if (!projectId) return false;
+  const t = _layoutResetPendingAt.get(projectId);
+  if (!t) return false;
+  if (Date.now() - t > _layoutResetPendingMs) {
+    _layoutResetPendingAt.delete(projectId);
+    return false;
+  }
+  return true;
 }
 
 /** 파일럿 삭제·`persistNodesFromPilot` 등에서 호출 — 병합 시 해당 id를 잠시 원격에서 되살리지 않음(메모리 + localStorage) */
@@ -1213,7 +1250,34 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
       ? 'structure-only'
       : 'full';
   touchProjectUpdatedAt(projectId, touchIso, { cloudPersist });
-  schedulePersistNodeSnapshotAfterPilot(projectId);
+  if (!NODE_SNAPSHOT_SCHEDULING_DISABLED) schedulePersistNodeSnapshotAfterPilot(projectId);
+
+  // 노드 카드 변경 로그 추적
+  if (prevSameProject && (added.length || removed.length || list.length)) {
+    const author = get(nodeChangeLogAuthor);
+    const now = new Date().toISOString();
+    const changeEntries: NodeChangeLogEntry[] = [];
+    for (const id of added) {
+      const n = list.find((x) => x.id === id);
+      if (n) changeEntries.push({ id: `chg_${Date.now()}_${Math.random().toString(36).slice(2,7)}`, at: now, author, nodeId: id, nodeName: n.name || '(제목 없음)', action: 'create' });
+    }
+    for (const id of removed) {
+      const n = prevSnap.find((x) => x.id === id);
+      changeEntries.push({ id: `chg_${Date.now()}_${Math.random().toString(36).slice(2,7)}`, at: now, author, nodeId: id, nodeName: n?.name || '(삭제된 노드)', action: 'delete' });
+    }
+    for (const n of list) {
+      if (!prevIds.has(n.id)) continue;
+      const prev = prevSnap.find((x) => x.id === n.id);
+      if (prev && (prev.name !== n.name || prev.description !== n.description)) {
+        changeEntries.push({ id: `chg_${Date.now()}_${Math.random().toString(36).slice(2,7)}`, at: now, author, nodeId: n.id, nodeName: n.name || '(제목 없음)', action: 'edit' });
+      }
+    }
+    if (changeEntries.length) {
+      appendNodeChangeLog(projectId, changeEntries);
+      // 자신의 변경만 DB에 기록 — 협업자가 DB에서 조회 시 함께 표시됨
+      scheduleNodeChangeLogDbWrite(projectId, changeEntries);
+    }
+  }
 }
 
 function collectSubtreeNodeIds(nodes: Node[], rootId: string): string[] {
@@ -1243,28 +1307,55 @@ export function replayStructureOpsOnNodes(
   let list = base.map((n) => ({ ...n, project_id: n.project_id ?? projectId }));
   const now = new Date().toISOString();
 
+  // [Fix-ORPHAN] parent_id 없는 add_node/move_node는 1차 패스에서 보류 → 2차 패스 재시도
+  const orphanOps: StructureOpPayload[] = [];
+
+  function applyAddNodeOp(op: Extract<StructureOpPayload, { type: 'add_node' }>): void {
+    const { node } = op;
+    const existing = list.find((n) => n.id === node.id);
+    const replayTs = existing?.updated_at ?? new Date(0).toISOString();
+    const row: Node = {
+      id: node.id,
+      project_id: projectId,
+      parent_id: node.parent_id,
+      name: node.name ?? '',
+      description: node.description ?? '',
+      node_type: node.node_type ?? 'detail',
+      num: node.num ?? '',
+      mx: undefined,
+      my: undefined,
+      depth: existing?.depth ?? 0,
+      created_at: existing?.created_at ?? now,
+      updated_at: replayTs
+    };
+    if (existing) {
+      // [Fix-GHOST-A] skeleton op(name='')으로 기존 content를 덮지 않음
+      const mergedRow: Node = {
+        ...row,
+        name: !row.name && existing.name ? existing.name : row.name,
+        description: !row.description && existing.description ? existing.description : row.description,
+        updated_at:
+          parseTs(existing.updated_at) > parseTs(row.updated_at)
+            ? existing.updated_at
+            : row.updated_at,
+        created_at: existing.created_at
+      };
+      list = list.map((n) => (n.id === node.id ? { ...n, ...mergedRow } : n));
+    } else {
+      list = [...list, row];
+    }
+  }
+
   for (const op of ops) {
     if (op.type === 'add_node') {
       const { node } = op;
-      const existing = list.find((n) => n.id === node.id);
-      const row: Node = {
-        id: node.id,
-        project_id: projectId,
-        parent_id: node.parent_id,
-        name: node.name ?? '',
-        description: node.description ?? '',
-        node_type: node.node_type ?? 'detail',
-        num: node.num ?? '',
-        mx: null,
-        my: null,
-        created_at: existing?.created_at ?? now,
-        updated_at: now
-      };
-      if (existing) {
-        list = list.map((n) => (n.id === node.id ? { ...n, ...row } : n));
-      } else {
-        list = [...list, row];
+      // parent_id가 아직 없으면 보류 (같은 배치에서 부모가 추가될 수 있음)
+      if (node.parent_id && !list.find((n) => n.id === node.parent_id)) {
+        orphanOps.push(op);
+        continue;
       }
+      // [Fix-GHOST-C] Fix-GHOST-A Fix-GHOST-B는 applyAddNodeOp 내부에 통합
+      applyAddNodeOp(op);
       continue;
     }
     if (op.type === 'update_node') {
@@ -1285,6 +1376,11 @@ export function replayStructureOpsOnNodes(
     if (op.type === 'move_node') {
       const existing = list.find((n) => n.id === op.node_id);
       if (!existing) continue;
+      // [Fix-ORPHAN] move 대상 parent가 없으면 보류
+      if (op.parent_id && !list.find((n) => n.id === op.parent_id)) {
+        orphanOps.push(op);
+        continue;
+      }
       list = list.map((n) =>
         n.id === op.node_id
           ? {
@@ -1305,6 +1401,28 @@ export function replayStructureOpsOnNodes(
       continue;
     }
   }
+
+  // [Fix-ORPHAN] 2차 패스: 1차에서 보류된 orphan ops — 부모가 추가된 경우 적용
+  for (const op of orphanOps) {
+    if (op.type === 'add_node') {
+      if (!op.node.parent_id || list.find((n) => n.id === op.node.parent_id)) {
+        applyAddNodeOp(op);
+      } else if (import.meta.env.DEV) {
+        console.warn('[replayStructureOps] orphan add_node skip — parent not found', op.node.id, op.node.parent_id);
+      }
+    } else if (op.type === 'move_node') {
+      if (!op.parent_id || list.find((n) => n.id === op.parent_id)) {
+        list = list.map((n) =>
+          n.id === op.node_id
+            ? { ...n, parent_id: op.parent_id, mx: op.mx, my: op.my, ...(op.num != null ? { num: op.num } : {}), updated_at: now }
+            : n
+        );
+      } else if (import.meta.env.DEV) {
+        console.warn('[replayStructureOps] orphan move_node skip — parent not found', op.node_id, op.parent_id);
+      }
+    }
+  }
+
   return list;
 }
 
@@ -1356,6 +1474,10 @@ export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[
     nodes.set(normalized);
   } finally {
     nodesSetFromPilotPersist = false;
+  }
+  // 협업자 실시간 변경 로그 — prevSameProject 시만, author 없음(클라이언트 id→email 매핑 불가)
+  if (prevSameProject) {
+    recordNodeDiffToChangeLog(projectId, prevSnap, normalized);
   }
 }
 
@@ -1994,14 +2116,17 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
  */
 function preserveManualCoordsOnCloudMergeWinner(remote: Node, local: Node | undefined): Node {
   if (!local) return remote;
-  /** layout_auto·원격 add: 명시 null이면 local 픽셀 보존 금지 — 교차 보기모드(우측↔하위) 형제 쏠림(FIX-11) */
-  if (remote.mx === null && remote.my === null) {
-    return { ...remote, mx: null, my: null };
-  }
-  const mx = remote.mx != null ? remote.mx : local.mx;
-  const my = remote.my != null ? remote.my : local.my;
-  if (mx === remote.mx && my === remote.my) return remote;
-  return { ...remote, mx, my };
+  // [수정] Bug-2 (2026-06-01): 축별 독립 null 처리
+  // 이전: mx AND my 둘 다 null일 때만 자동배치로 확정 → 부분 null(mx=null, my=200 등)은
+  //       guard를 통과하지 못해 local.mx가 복원되고 비대칭 좌표 → 겹침·쏠림 발생.
+  // 수정: 각 축이 명시 null이면 자동배치(undefined), non-null이면 remote 우선, undefined면 local 보존.
+  // TS 타입은 number|undefined지만 런타임에서 null 사용 → 캐스트 처리
+  const rnx = remote.mx as number | null | undefined;
+  const rny = remote.my as number | null | undefined;
+  const resMx: number | undefined = rnx != null ? rnx : rnx === null ? undefined : local.mx;
+  const resMy: number | undefined = rny != null ? rny : rny === null ? undefined : local.my;
+  if (resMx === remote.mx && resMy === remote.my) return remote;
+  return { ...remote, mx: resMx, my: resMy };
 }
 
 export function mergeNodeListsForCloud(
@@ -2052,6 +2177,10 @@ export function mergeNodeListsForCloud(
         }
       }
     }
+    // [Bug-3 (2026-06-01)] BAR 후 pull race: grace period 내 원격 mx/my 강제 자동배치
+    if (isLayoutResetPending(suppressRecentDeletesProjectId)) {
+      return ordered.map((n) => ({ ...n, mx: undefined, my: undefined }));
+    }
     return ordered;
   } else {
     const suppress = recentDeleteIdsForCloudMerge(suppressRecentDeletesProjectId ?? null);
@@ -2080,6 +2209,10 @@ export function mergeNodeListsForCloud(
     }
     for (const [id, v] of byId) {
       if (!remoteIdOrder.has(id)) ordered.push(v);
+    }
+    // [Bug-3 (2026-06-01)] BAR 후 pull race: grace period 내 원격 mx/my 강제 자동배치
+    if (isLayoutResetPending(suppressRecentDeletesProjectId)) {
+      return ordered.map((n) => ({ ...n, mx: undefined, my: undefined }));
     }
     return ordered;
   }

@@ -17,7 +17,7 @@ import {
   clearCollabStructureOpsPending,
   hasAnyCloudSyncPending
 } from '$lib/stores/workspaceDirty';
-import { dedupeProjectsStoreByLatestUpdatedAt, currentProject, projects } from '$lib/stores/projects';
+import { dedupeProjectsStoreByLatestUpdatedAt, currentProject, projects, clearLayoutResetPending } from '$lib/stores/projects';
 import { authUser } from '$lib/stores/authSession';
 import { cancelStructureOpsPersistDebounce, flushStructureOpsPersistForProject } from '$lib/supabase/projectStructureOps';
 
@@ -94,6 +94,8 @@ async function flushCollabStructureOpsPendingOnly(reason: string): Promise<boole
       if (import.meta.env.DEV) {
         console.warn('[flushCollabStructureOpsPendingOnly]', reason, projectId);
       }
+      // [Fix-4] 재시도: ops는 pendingPersistOps에 유지되므로 다음 flush에서 재전송
+      scheduleCloudFlush('structure-ops-retry');
     }
   }
   if (allOk && !get(workspaceIsDirty)) {
@@ -220,6 +222,9 @@ export async function flushCloudWorkspaceNow(reason: string): Promise<boolean> {
     if (hasCollabStructureOpsPending() && !get(workspaceIsDirty)) {
       await flushCollabStructureOpsPendingOnly(`${reason}:post-upload-ops`);
     }
+    // [Bug-3 (2026-06-01)] push 성공 → BAR grace period 해제 (currentProject 기준)
+    const cp = get(currentProject);
+    if (cp?.id) clearLayoutResetPending(cp.id);
     bumpModalProjectListSync(reason);
     return true;
   }

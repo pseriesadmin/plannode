@@ -27,6 +27,7 @@ import {
   replayStructureOpsOnNodes,
   type WorkspaceBundle
 } from '$lib/stores/projects';
+import { recordNodeDiffToChangeLog } from '$lib/stores/nodeChangeLog';
 import {
   flushStructureOpsPersistForProject,
   flushAllPendingStructureOpsPersist,
@@ -118,6 +119,8 @@ export async function pullStructureOpsForProject(project: Project): Promise<Stru
     bundle.ops.map((row) => row.op),
     project.id
   );
+  // 클라우드 pull 변경 로그 — upsert 전에 op 기반 diff 기록(과부하 없음: Map O(n), localStorage 소량)
+  recordNodeDiffToChangeLog(project.id, local, replayed);
   const ref = get(projects).find((p) => p.id === project.id) ?? project;
   upsertImportedPlannodeTreeV1(ref, replayed, { openAfter: false, markDirty: false });
   if (get(currentProject)?.id === project.id) {
@@ -241,8 +244,11 @@ async function collabSliceOutOfSyncAfterPull(
   return collabRemoteSliceHashDiffers(workspaceUserId, projectId);
 }
 
-/** COLLAB-PERF P0-02 — revision 동일·hash 불일치 poll 연속 N회 시 pull 생략 */
-const COLLAB_HASH_MISMATCH_MAX_POLL_STREAK = 3;
+/** COLLAB-PERF P0-02 — revision 동일·hash 불일치 poll 연속 N회 시 pull 생략
+ * [Fix-6] 3→5: concurrent push 경쟁 조건에서 일시적 불일치 허용 범위 확대 */
+const COLLAB_HASH_MISMATCH_MAX_POLL_STREAK = 5;
+/** [Fix-6] 이 streak에 도달하면 자동 복구 pull 1회 시도 */
+const COLLAB_HASH_MISMATCH_AUTO_RECOVER_AT = 3;
 const collabHashMismatchPollStreak = new Map<string, number>();
 const collabPollPausedToastAt = new Map<string, number>();
 
@@ -2013,6 +2019,23 @@ export async function pollCollabRevisionFallback(project: Project): Promise<bool
 
       const nextStreak = streak + 1;
       collabHashMismatchPollStreak.set(streakKey, nextStreak);
+      // [Fix-6] 중간 임계값에서 자동 복구 pull 시도 — 경쟁 조건 해소
+      if (nextStreak === COLLAB_HASH_MISMATCH_AUTO_RECOVER_AT) {
+        if (import.meta.env.DEV) {
+          console.info('[pollCollabRevisionFallback] hash mismatch auto-recover pull', {
+            projectId: project.id,
+            streak: nextStreak
+          });
+        }
+        const ref = get(projects).find((p) => p.id === project.id) ?? project;
+        const recovered = await pullCollabSliceForProject(ref, 'hash-mismatch-recovery', {
+          knownRemoteRevision: remoteRev
+        });
+        if (recovered) {
+          resetCollabHashMismatchPollStreak(workspaceUserId, project.id);
+          return true;
+        }
+      }
       if (nextStreak >= COLLAB_HASH_MISMATCH_MAX_POLL_STREAK) {
         notifyCollabPollPausedManualSyncToast(project.id, project.name);
         if (import.meta.env.DEV) {
@@ -2088,9 +2111,27 @@ function revisionFromCollabRow(row: Record<string, unknown> | null | undefined):
   return rpcBigintToNumber(row.revision);
 }
 
+/** [Fix-NONCUR] 비현재 프로젝트의 Realtime revision 신호를 임시 저장 — 다음 bidirectional pull에서 우선 처리 */
+const pendingNonCurrentRevisionHints = new Map<string, number>();
+
+export function flushPendingNonCurrentRevisionHints(projectIds: readonly string[]): string[] {
+  const ready: string[] = [];
+  for (const pid of projectIds) {
+    if (pendingNonCurrentRevisionHints.has(pid)) {
+      ready.push(pid);
+      pendingNonCurrentRevisionHints.delete(pid);
+    }
+  }
+  return ready;
+}
+
 function scheduleCollabRevisionPull(projectId: string, reason: string, revisionHint: number | null): void {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-  if (get(currentProject)?.id !== projectId) return;
+  if (get(currentProject)?.id !== projectId) {
+    // [Fix-NONCUR] 비현재 프로젝트 신호 → 캐시 후 다음 bidirectional sync에서 처리
+    if (revisionHint != null) pendingNonCurrentRevisionHints.set(projectId, revisionHint);
+    return;
+  }
 
   const ref = get(projects).find((p) => p.id === projectId);
   if (!ref) return;
@@ -2248,14 +2289,24 @@ export async function pullSharedProjectSlicesForBidirectionalSync(
     n += await pullSharedProjectSlicesIfNewer([curId]);
   }
 
-  if (sharedOtherIds.length && shouldPullAllSharedSlices(reason, opts?.idleMs)) {
-    n += await pullSharedProjectSlicesIfNewer(sharedOtherIds);
+  // [Fix-NONCUR] Realtime 신호를 받은 비현재 프로젝트는 쿨다운 없이 즉시 pull
+  const hintIds = flushPendingNonCurrentRevisionHints(sharedOtherIds);
+  if (hintIds.length) {
+    n += await pullSharedProjectSlicesIfNewer(hintIds);
+    if (import.meta.env.DEV) {
+      console.info('[collab-shared-pull] hint-pull (non-current revision signal)', hintIds);
+    }
+  }
+
+  const remainingIds = sharedOtherIds.filter((id) => !hintIds.includes(id));
+  if (remainingIds.length && shouldPullAllSharedSlices(reason, opts?.idleMs)) {
+    n += await pullSharedProjectSlicesIfNewer(remainingIds);
     recordLastFullSharedPullTs();
     if (import.meta.env.DEV) {
-      console.info('[collab-shared-pull] full-pull', reason, sharedOtherIds.length);
+      console.info('[collab-shared-pull] full-pull', reason, remainingIds.length);
     }
-  } else if (import.meta.env.DEV && sharedOtherIds.length) {
-    console.info('[collab-shared-pull] current-only', reason, curId, `(others=${sharedOtherIds.length})`);
+  } else if (import.meta.env.DEV && remainingIds.length) {
+    console.info('[collab-shared-pull] current-only', reason, curId, `(others=${remainingIds.length})`);
   }
 
   return n;
