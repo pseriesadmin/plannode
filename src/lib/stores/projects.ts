@@ -1396,8 +1396,13 @@ export function replayStructureOpsOnNodes(
       continue;
     }
     if (op.type === 'delete_node') {
+      // Phase 2: 소프트 삭제 — _deleted: true 마킹 (grace period 후 하드 삭제)
       const removeIds = new Set(collectSubtreeNodeIds(list, op.node_id));
-      list = list.filter((n) => !removeIds.has(n.id));
+      list = list.map((n) =>
+        removeIds.has(n.id)
+          ? { ...n, _deleted: true, _deleted_at: now }
+          : n
+      );
       continue;
     }
   }
@@ -1423,7 +1428,8 @@ export function replayStructureOpsOnNodes(
     }
   }
 
-  return list;
+  // Phase 2: _deleted 노드 필터 제거 (렌더링 제외) — add_node가 같은 배치에서 뒤따라오면 부활
+  return list.filter((n) => !(n as unknown as Record<string, unknown>)['_deleted']);
 }
 
 /**

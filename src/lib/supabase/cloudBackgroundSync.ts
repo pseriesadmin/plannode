@@ -5,8 +5,10 @@ import { runBidirectionalCloudSync } from '$lib/supabase/workspacePush';
 import {
   pollCollabRevisionFallback,
   subscribeCollabRevisionRealtime,
-  unsubscribeCollabRevisionRealtime
+  unsubscribeCollabRevisionRealtime,
+  bootstrapAndSubscribeStructureOpsRealtime
 } from '$lib/supabase/sync';
+import { unsubscribeStructureOpsRealtime } from '$lib/supabase/projectStructureOps';
 import { currentProject, type Project } from '$lib/stores/projects';
 import { workspaceIsDirty } from '$lib/stores/workspaceDirty';
 import { authUser } from '$lib/stores/authSession';
@@ -89,6 +91,7 @@ function rearmCloudSyncInterval(): void {
 
 function disarmCollabRevisionWatch(): void {
   unsubscribeCollabRevisionRealtime();
+  unsubscribeStructureOpsRealtime();
   if (collabFallbackPollId != null) {
     clearInterval(collabFallbackPollId);
     collabFallbackPollId = null;
@@ -104,6 +107,8 @@ function armCollabRevisionWatch(proj: Project): void {
 
   collabWatchProjectId = proj.id;
   subscribeCollabRevisionRealtime(proj);
+  // Phase 4: bootstrap op log + structure_ops Realtime 구독
+  void bootstrapAndSubscribeStructureOpsRealtime(proj);
   nudgeCollabPullForCurrentProject('collab-arm');
 
   collabFallbackPollId = window.setInterval(() => {
