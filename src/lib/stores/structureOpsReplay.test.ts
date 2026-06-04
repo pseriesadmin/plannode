@@ -108,6 +108,35 @@ describe('replayStructureOpsOnNodes', () => {
     expect(list.find((n) => n.id === 'n-ghost')).toBeUndefined();
   });
 
+  it('update_node with badges patches badges, no-badge op preserves existing', () => {
+    let list = replayStructureOpsOnNodes(baseNodes(), [
+      {
+        type: 'add_node',
+        node: { id: 'n1', parent_id: rootId, name: 'X', mx: 0, my: 0 }
+      }
+    ], projectId);
+    // badges 포함 op → 패치
+    list = replayStructureOpsOnNodes(list, [
+      {
+        type: 'update_node',
+        node: { id: 'n1', name: 'X', badges: ['BE', 'FE'], updated_at: '2026-06-04T10:00:00.000Z' }
+      }
+    ], projectId);
+    const after = list.find((n) => n.id === 'n1');
+    expect(after?.badges).toEqual(['BE', 'FE']);
+
+    // badges 키 없는 op → 기존 배지 유지
+    list = replayStructureOpsOnNodes(list, [
+      {
+        type: 'update_node',
+        node: { id: 'n1', name: 'X-renamed', updated_at: '2026-06-04T10:01:00.000Z' }
+      }
+    ], projectId);
+    const preserved = list.find((n) => n.id === 'n1');
+    expect(preserved?.name).toBe('X-renamed');
+    expect(preserved?.badges).toEqual(['BE', 'FE']);
+  });
+
   it('[Fix-ORPHAN] add_node parent added in same batch resolves on 2nd pass', () => {
     // n-parent 추가 후 n-child 추가 순서지만, n-child가 n-parent보다 먼저 처리됨
     const list = replayStructureOpsOnNodes(baseNodes(), [

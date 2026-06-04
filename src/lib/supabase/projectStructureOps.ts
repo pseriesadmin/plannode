@@ -66,6 +66,9 @@ export type UpdateNodeOp = {
     mx?: number | null;
     my?: number | null;
     updated_at?: string;
+    /** BADGE_STRUCTURE_OPS: 키가 있을 때만 패치 — 없으면 수신측 배지 유지 */
+    badges?: string[];
+    metadata?: Record<string, unknown>;
   };
 };
 
@@ -224,6 +227,19 @@ function parseUpdateNodeOp(raw: Record<string, unknown>): UpdateNodeOp | null {
   }
   const updated_at = parseNonEmptyString(nodeRaw.updated_at);
   if (updated_at) node.updated_at = updated_at;
+  // BADGE_STRUCTURE_OPS: 키 존재 여부로만 판단 (빈 배열 = 배지 전체 제거 의도)
+  if ('badges' in nodeRaw) {
+    const b = nodeRaw.badges;
+    node.badges = Array.isArray(b)
+      ? (b as unknown[]).filter((x) => typeof x === 'string') as string[]
+      : [];
+  }
+  if ('metadata' in nodeRaw) {
+    const m = nodeRaw.metadata;
+    if (m != null && typeof m === 'object' && !Array.isArray(m)) {
+      node.metadata = m as Record<string, unknown>;
+    }
+  }
   return { type: 'update_node', node };
 }
 
@@ -563,7 +579,9 @@ export function hasPendingStructureOpsPersistForProject(
 }
 
 /** append 성공 + pending 없음 → slice merge RPC 생략 가능.
- *  Phase 4: op_log_complete = true이면 pending 없을 때 flush 여부와 무관하게 skip. */
+ *  Phase 4: op_log_complete = true이면 ops가 실제 flush됐을 때만 skip.
+ *  BADGE-SYNC-FIX: flushed=0이면 non-ops-only slice 변경일 수 있으므로 fallthrough.
+ *  update_node에 badges/metadata 선택 필드(BADGE_STRUCTURE_OPS) — ops 미flush 시 slice 필요. */
 export function collabPushCanSkipSliceMergeAfterOpsFlush(
   projectId: string,
   workspaceUserId: string,
@@ -571,12 +589,13 @@ export function collabPushCanSkipSliceMergeAfterOpsFlush(
   attemptFlush: StructureOpsFlushResult
 ): boolean {
   if (hasPendingStructureOpsPersistForProject(projectId, workspaceUserId)) return false;
-  // Phase 4: op log 완전체 → 이 프로젝트는 항상 ops-only push
-  if (getOpLogComplete(projectId)) return true;
   const key = structureOpsPersistFlushKey(workspaceUserId, projectId);
   const prior = priorBatchFlush.get(key);
   const batchSynced = prior?.ok === true && (prior.flushed ?? 0) > 0;
   const attemptSynced = attemptFlush.ok === true && attemptFlush.flushed > 0;
+  // Phase 4: op log 완전체 + ops 실제 flush → slice merge 생략 안전
+  // flushed=0이면 배지·metadata 변경일 수 있으므로 일반 경로 적용
+  if (getOpLogComplete(projectId) && (attemptSynced || batchSynced)) return true;
   if (attemptFlush.ok === false) return false;
   return batchSynced || attemptSynced;
 }
@@ -590,7 +609,8 @@ export type StructureOpsPullResult = {
 };
 
 /** ops RPC 성공 + (적용됨 또는 revision 동일) → full slice merge 생략 가능.
- *  Phase 4: op_log_complete = true이면 pending 없을 때 항상 skip. */
+ *  Phase 4: op_log_complete = true이면 pending 없을 때 조건부 skip.
+ *  BADGE-SYNC-FIX: revision↑ + applied=0 → slice-only 변경(배지 등) 가능 → merge 필요. */
 export function collabPullCanSkipSliceMergeAfterOpsPull(
   projectId: string,
   workspaceUserId: string,
@@ -598,8 +618,19 @@ export function collabPullCanSkipSliceMergeAfterOpsPull(
   opts: { revisionUnchanged: boolean }
 ): boolean {
   if (hasPendingStructureOpsPersistForProject(projectId, workspaceUserId)) return false;
-  // Phase 4: op log 완전체 → 이 프로젝트는 항상 ops-only pull
-  if (getOpLogComplete(projectId) && pullResult.ok) return true;
+  // Phase 4: op log 완전체 → drift 없을 때만 ops-only pull (COLLAB_META_DRIFT)
+  if (getOpLogComplete(projectId) && pullResult.ok) {
+    const ack = getStructureOpsPersistAckSeq(projectId);
+    const lastApplied = pullResult.lastAppliedSeq ?? 0;
+    if (ack <= lastApplied) {
+      // revision도 안 바뀌었거나 ops로 이미 반영 → skip 안전
+      // revision이 변경됐는데 ops 적용 0 → 배지·metadata 변경 → slice 필요
+      if (opts.revisionUnchanged || pullResult.applied > 0) return true;
+      return false; // BADGE-SYNC-FIX: revision changed, no ops → need slice
+    }
+    if (pullResult.applied > 0) return true;  // 이미 반영됨: skip 안전
+    return false;                             // COLLAB_META_DRIFT: slice merge 필요
+  }
   if (!pullResult.ok) return false;
   if (pullResult.applied > 0) return true;
   return opts.revisionUnchanged;

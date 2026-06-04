@@ -16,7 +16,7 @@
 --   docs/supabase/20260604_cleanup_deleted_project_ops.sql
 --
 -- 아키텍처: .cursor/rules/plannode-architecture.mdc §10.11
--- 개요: docs/plannode_workspace_sync_overview.md §4.6
+-- 개요: .cursor/rules/plannode-architecture.mdc §10.11.3
 
 -- ── plannode_project_acl: security definer가 SELECT 할 수 있도록 ──
 alter table public.plannode_project_acl no force row level security;

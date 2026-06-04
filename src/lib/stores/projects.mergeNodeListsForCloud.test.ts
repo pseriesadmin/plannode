@@ -268,6 +268,24 @@ describe('mergeNodeListsForCloud', () => {
     expect(out[0].my).toBe(400);
   });
 
+  it('NOW-3: LWW 동률 — remote badges 상이 시 remote 채택, coords는 local 보존', () => {
+    const ts = '2026-06-04T10:00:00.000Z';
+    const local = [{ ...N('n1', ts), badges: ['FE'], mx: 50, my: 100 }];
+    const remote = [{ ...N('n1', ts), badges: ['BE', 'UX'] }];
+    const out = mergeNodeListsForCloud(local, remote, false, null);
+    expect(out[0].badges).toEqual(['BE', 'UX']); // remote badges 채택
+    expect(out[0].mx).toBe(50);                  // local coords 보존
+    expect(out[0].my).toBe(100);
+  });
+
+  it('NOW-3: LWW 동률 — badges 동일하면 local 유지', () => {
+    const ts = '2026-06-04T10:00:00.000Z';
+    const local = [{ ...N('n1', ts), badges: ['BE'], name: 'local-name' }];
+    const remote = [{ ...N('n1', ts), badges: ['BE'], name: 'remote-name' }];
+    const out = mergeNodeListsForCloud(local, remote, false, null);
+    expect(out[0].name).toBe('local-name'); // badges 동일 → local 유지
+  });
+
   it('suppressRecentDeletesProjectId skips re-adding suppressed remote id when missing locally', () => {
     if (typeof window === 'undefined') return;
     registerRecentlyDeletedNodeIdsForCloudMerge(PID, ['ghost']);
