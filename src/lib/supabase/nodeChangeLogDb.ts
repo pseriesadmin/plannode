@@ -53,7 +53,20 @@ async function flushToDb(): Promise<void> {
       nodeName: entry.nodeName,
       action: entry.action
     } as Record<string, unknown>
-  }));
+  })).filter((row) => {
+    const action = (row.payload as { action?: string }).action;
+    return action === 'create' || action === 'edit' || action === 'delete';
+  });
+
+  if (!rows.length) {
+    if (pendingBatch.length) {
+      flushTimer = window.setTimeout(() => {
+        flushTimer = null;
+        void flushToDb();
+      }, FLUSH_DEBOUNCE_MS);
+    }
+    return;
+  }
 
   const { error } = await supabase.from('plannode_project_workspace_history').insert(rows);
   if (error && import.meta.env.DEV) {
@@ -103,13 +116,109 @@ export async function fetchNodeChangeLogFromDb(
     .map((row): NodeChangeLogEntry | null => {
       const p = row.payload;
       if (!p || typeof p.nodeId !== 'string' || typeof p.action !== 'string') return null;
+      const action = p.action as NodeChangeAction;
+      if (action !== 'create' && action !== 'edit' && action !== 'delete') return null;
       return {
         id: `db_${row.id}`,
         at: typeof p.at === 'string' && p.at ? p.at : row.occurred_at,
         author: typeof row.actor_email === 'string' ? row.actor_email : undefined,
         nodeId: p.nodeId,
         nodeName: typeof p.nodeName === 'string' ? p.nodeName : '',
-        action: p.action as NodeChangeAction
+        action
+      };
+    })
+    .filter((x): x is NodeChangeLogEntry => x !== null);
+}
+
+type PwhSummaryRow = {
+  id: string;
+  occurred_at: string;
+  reason: string | null;
+  source: string;
+  actor_email: string | null;
+  payload: Record<string, unknown> | null;
+};
+
+/** +page.svelte formatSnapshotReason과 동일 문자열 (+page import 없이 유지) */
+function formatPwhSummaryReasonLabel(reason: string | null | undefined): string {
+  const r = String(reason ?? '').trim();
+  if (r === 'presence_peer') return '동시 접속';
+  if (r === 'pre_pull') return '클라우드·병합 반영 직전';
+  if (r === 'import') return '파일 가져오기·AI 덮어쓰기 직전';
+  if (r === 'project_close') return '프로젝트 전환 직전';
+  if (r === 'idle_10min') return '10분 무편집 저장';
+  if (r === 'persist') return '캔버스 저장';
+  if (r === 'cloud_upload') return '클라우드 업로드';
+  if (r === 'manual') return '수동 스냅샷';
+  if (r === 'cloud_history') return '클라우드 병합 기록';
+  if (r) return r;
+  return '스냅샷';
+}
+
+function formatSummaryNodeCountLabel(raw: unknown): string {
+  let n: number | undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw)) n = raw;
+  else if (Array.isArray(raw)) n = raw.length;
+  if (n === undefined || !Number.isFinite(n) || n < 0) return '— nodes';
+  const num = n >= 1000 ? String(n) : String(n).padStart(3, '0');
+  return `${num} nodes`;
+}
+
+/** 과거 full snapshot 행 — node_op 제외, 경량 요약(limit 기본 30) */
+export async function fetchProjectHistorySummaryRows(
+  projectId: string,
+  limit = 30
+): Promise<NodeChangeLogEntry[]> {
+  if (!isSupabaseCloudConfigured() || typeof window === 'undefined') return [];
+  const pid = projectId.trim();
+  if (!pid) return [];
+
+  const raw = Number(limit);
+  const lim = Math.min(50, Math.max(1, Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30));
+
+  const { data, error } = await supabase
+    .from('plannode_project_workspace_history')
+    .select('id, occurred_at, reason, source, actor_email, payload')
+    .eq('project_id', pid)
+    .neq('reason', REASON_NODE_OP)
+    .order('occurred_at', { ascending: false })
+    .limit(lim);
+
+  if (error) {
+    if (import.meta.env.DEV) console.warn('[nodeChangeLogDb] summary fetch 실패:', error.message);
+    return [];
+  }
+  if (!Array.isArray(data)) return [];
+
+  return (data as PwhSummaryRow[])
+    .map((row): NodeChangeLogEntry | null => {
+      const p = row.payload;
+      const payloadReason =
+        p && typeof p.reason === 'string' ? p.reason : null;
+      const reasonLabel = formatPwhSummaryReasonLabel(payloadReason ?? row.reason);
+      const nodeCountRaw =
+        p && p.nodeCount !== undefined
+          ? p.nodeCount
+          : p && Array.isArray(p.nodes)
+            ? p.nodes.length
+            : undefined;
+      const at =
+        p && typeof p.at === 'string' && p.at
+          ? p.at
+          : row.occurred_at;
+      const author =
+        typeof row.actor_email === 'string' && row.actor_email
+          ? row.actor_email
+          : p && typeof p.author === 'string'
+            ? p.author
+            : undefined;
+      return {
+        id: `pwh_${row.id}`,
+        at,
+        author,
+        nodeId: '',
+        nodeName: `${reasonLabel} · ${formatSummaryNodeCountLabel(nodeCountRaw)}`,
+        action: 'snapshot'
       };
     })
     .filter((x): x is NodeChangeLogEntry => x !== null);

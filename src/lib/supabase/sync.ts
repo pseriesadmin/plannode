@@ -1333,6 +1333,7 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   if (!nodesChanged && !metaChanged && !projectTsChanged) return false;
 
   captureNodeSnapshot(localRef.id, localNodes, 'pre_pull');
+  recordNodeDiffToChangeLog(localRef.id, preMergeLocal, mergedNodes);
   upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
     openAfter: false,
     markDirty: false,
@@ -1402,6 +1403,7 @@ export async function pullProjectSliceBeforeOpen(project: Project): Promise<void
     reconcileProjectRecord({ ...slice.project })
   );
 
+  recordNodeDiffToChangeLog(localRef.id, preMergeLocal, mergedNodes);
   upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
     openAfter: false,
     markDirty: false,

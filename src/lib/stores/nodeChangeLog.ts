@@ -4,7 +4,7 @@
  */
 import { writable } from 'svelte/store';
 
-export type NodeChangeAction = 'create' | 'edit' | 'delete';
+export type NodeChangeAction = 'create' | 'edit' | 'delete' | 'snapshot';
 
 export interface NodeChangeLogEntry {
   id: string;
@@ -107,4 +107,42 @@ export function recordNodeDiffToChangeLog(
   }
 
   if (entries.length) appendNodeChangeLog(projectId, entries);
+}
+
+function changeLogDedupeKey(entry: NodeChangeLogEntry): string {
+  if (entry.action === 'snapshot') return `snap:${entry.id}`;
+  const t = Date.parse(entry.at);
+  const minute = Number.isFinite(t) ? Math.floor(t / 60_000) : 0;
+  return `op:${entry.nodeId}:${entry.action}:${minute}`;
+}
+
+/** db_/pwh_ 행이 chg_ 로컬보다 우선(작성자 email 보존) */
+function changeLogSourceRank(id: string): number {
+  if (id.startsWith('db_') || id.startsWith('pwh_')) return 0;
+  return 1;
+}
+
+/**
+ * 히스토리 모달용 — DB node_op · 스냅샷 요약 · 로컬 변경 로그 병합.
+ * 중복 키는 db_/pwh_ id 우선, 최신순 정렬 후 MAX_ENTRIES(200) cap.
+ */
+export function mergeChangeLogForModal(
+  db: NodeChangeLogEntry[],
+  local: NodeChangeLogEntry[],
+  summaries: NodeChangeLogEntry[] = []
+): NodeChangeLogEntry[] {
+  const byKey = new Map<string, NodeChangeLogEntry>();
+  const upsert = (entry: NodeChangeLogEntry) => {
+    const key = changeLogDedupeKey(entry);
+    const prev = byKey.get(key);
+    if (!prev || changeLogSourceRank(entry.id) < changeLogSourceRank(prev.id)) {
+      byKey.set(key, entry);
+    }
+  };
+  for (const e of db) upsert(e);
+  for (const e of summaries) upsert(e);
+  for (const e of local) upsert(e);
+  return Array.from(byKey.values())
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, MAX_ENTRIES);
 }

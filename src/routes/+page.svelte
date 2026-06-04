@@ -56,10 +56,11 @@
   } from '$lib/supabase/projectWorkspaceHistory';
   import {
     listNodeChangeLog,
+    mergeChangeLogForModal,
     nodeChangeLogAuthor,
     type NodeChangeLogEntry
   } from '$lib/stores/nodeChangeLog';
-  import { fetchNodeChangeLogFromDb } from '$lib/supabase/nodeChangeLogDb';
+  import { fetchNodeChangeLogFromDb, fetchProjectHistorySummaryRows } from '$lib/supabase/nodeChangeLogDb';
   import {
     parsePlannodeTreeV1ImportText,
     type ParsePlannodeTreeV1Result,
@@ -359,14 +360,26 @@
     changeLogRows = [];
   }
 
-  /** DB 우선, 미설정 환경은 localStorage 폴백 */
+  /** DB · 스냅샷 요약 · localStorage 병합 — 모달 열릴 때만 fetch */
   async function refreshNodeChangeLogRows(projectId: string): Promise<void> {
-    const dbRows = await fetchNodeChangeLogFromDb(projectId);
-    if (dbRows.length > 0) {
-      changeLogRows = dbRows; // DB query는 이미 최신순 정렬
-    } else {
-      changeLogRows = listNodeChangeLog(projectId).reverse();
+    const localRows = listNodeChangeLog(projectId);
+    if (!isSupabaseCloudConfigured()) {
+      changeLogRows = mergeChangeLogForModal([], localRows, []);
+      return;
     }
+    const [dbRows, summaryRows] = await Promise.all([
+      fetchNodeChangeLogFromDb(projectId),
+      fetchProjectHistorySummaryRows(projectId, 30)
+    ]);
+    changeLogRows = mergeChangeLogForModal(dbRows, localRows, summaryRows);
+  }
+
+  function formatChangeLogActionLabel(action: NodeChangeLogEntry['action']): string {
+    if (action === 'snapshot') return '스냅샷';
+    if (action === 'create') return '생성';
+    if (action === 'edit') return '수정';
+    if (action === 'delete') return '삭제';
+    return '—';
   }
 
   $: snapshotRows = (() => {
@@ -3765,7 +3778,7 @@
                     <td class="col-time">{formatHistoryTimestamp(row.at)}</td>
                     <td class="col-author">{row.author ?? '-'}</td>
                     <td class="col-name">{row.nodeName}</td>
-                    <td class="col-result chg-action chg-{row.action}">{row.action === 'create' ? '생성' : row.action === 'edit' ? '수정' : '삭제'}</td>
+                    <td class="col-result chg-action chg-{row.action}">{formatChangeLogActionLabel(row.action)}</td>
                   </tr>
                 {:else}
                   <tr class="snap-hist-empty-row">
@@ -6279,6 +6292,7 @@
   .chg-create { color: #1d6f3a; }
   .chg-edit   { color: #1455a4; }
   .chg-delete { color: #b91c1c; }
+  .chg-snapshot { color: #6b7280; opacity: 0.85; }
   .zb {
     width: 20px;
     height: 20px;
