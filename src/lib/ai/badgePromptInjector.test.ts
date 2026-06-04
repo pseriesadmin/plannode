@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   buildBadgeContext,
   shouldForceSonnet,
@@ -11,7 +11,16 @@ import {
   getBadgeSetFromNodeInput,
   sanitizeNodeBadgesForTreeV1,
 } from './badgePromptInjector';
-import { DEFAULT_DEV_KEYS, DEFAULT_PRJ_KEYS, DEFAULT_UX_KEYS } from './badgePoolConfig';
+import {
+  DEFAULT_DEV_KEYS,
+  DEFAULT_PRJ_KEYS,
+  DEFAULT_UX_KEYS,
+  clearBadgePoolRuntimeCache,
+  defaultBadgePool,
+  normalizeBadgePool,
+  registerCurrentProjectIdLookup,
+  registerProjectBadgePoolLookup,
+} from './badgePoolConfig';
 import type { BadgeSet } from './types';
 import type { Node } from '$lib/supabase/client';
 
@@ -277,6 +286,12 @@ describe('badgePromptInjector', () => {
   });
 
   describe('applySanitizeImportedPlannodeNodeV1', () => {
+    afterEach(() => {
+      registerProjectBadgePoolLookup(() => null);
+      registerCurrentProjectIdLookup(() => null);
+      clearBadgePoolRuntimeCache();
+    });
+
     it('strips non-pool flat badges and keeps node identity', () => {
       const n: Node = {
         id: 'n1',
@@ -351,6 +366,45 @@ describe('badgePromptInjector', () => {
       expect(out.metadata?.badges?.dev?.sort()).toEqual(['AUTH', 'TDD']);
       expect(out.metadata?.badges?.ux?.sort()).toEqual(['LIST', 'MODAL']);
       expect(out.badges.sort()).toEqual(['auth', 'list', 'modal', 'tdd']);
+    });
+
+    it('uses node project_id or explicit projectId for badge pool (not current open project)', () => {
+      const targetPool = normalizeBadgePool({
+        dev: ['AUTH'],
+        ux: defaultBadgePool().ux,
+        prj: defaultBadgePool().prj,
+      });
+      const currentPool = normalizeBadgePool({
+        dev: ['TDD'],
+        ux: defaultBadgePool().ux,
+        prj: defaultBadgePool().prj,
+      });
+      registerProjectBadgePoolLookup((id) => {
+        if (id === 'proj_target') return targetPool;
+        if (id === 'proj_cur') return currentPool;
+        return null;
+      });
+      registerCurrentProjectIdLookup(() => 'proj_cur');
+      clearBadgePoolRuntimeCache();
+
+      const n: Node = {
+        id: 'n-pull',
+        project_id: 'proj_target',
+        name: 'Shared',
+        depth: 0,
+        created_at: 't',
+        updated_at: 't',
+        badges: ['auth'],
+      };
+      const viaNodeProjectId = applySanitizeImportedPlannodeNodeV1(n);
+      expect(viaNodeProjectId.badges).toEqual(['auth']);
+
+      clearBadgePoolRuntimeCache();
+      const viaExplicitId = applySanitizeImportedPlannodeNodeV1(
+        { ...n, project_id: 'proj_cur' },
+        'proj_target'
+      );
+      expect(viaExplicitId.badges).toEqual(['auth']);
     });
   });
 

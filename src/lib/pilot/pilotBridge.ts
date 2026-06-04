@@ -27,7 +27,7 @@ import { ensureCollabSliceFreshBeforePersist, registerFlushPilotNodesBeforeColla
  * | **text ops** (`:text`) | 모달 description만. structure 채널과 **topic 분리**. |
  *
  * @see docs/plannode_ot2_tree_ops_channel_spike.md · plan-output P-12.3
- * @see docs/plannode_workspace_sync_overview.md §7 (OT2-08에서 §7.5)
+ * @see plannode-architecture.mdc §10.10 (모달 hydrate 보류)
  */
 
 function pilotNodeContentChanged(prev: Node | undefined, n: PilotRuntimeNode): boolean {

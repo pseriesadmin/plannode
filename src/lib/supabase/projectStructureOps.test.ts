@@ -4,7 +4,10 @@ import {
   STRUCTURE_OPS_BROADCAST_EVENT,
   sendProjectStructureOp,
   resetStructureOpsStateForTest,
-  getStructureOpsPendingCount
+  getStructureOpsPendingCount,
+  collabPullCanSkipSliceMergeAfterOpsPull,
+  setOpLogComplete,
+  setStructureOpsPersistAckSeq
 } from './projectStructureOps';
 
 vi.mock('$lib/supabase/env', () => ({
@@ -125,6 +128,85 @@ describe('parseStructureOp', () => {
 describe('STRUCTURE_OPS_BROADCAST_EVENT', () => {
   it('matches spike event name', () => {
     expect(STRUCTURE_OPS_BROADCAST_EVENT).toBe('structure-op');
+  });
+});
+
+describe('collabPullCanSkipSliceMergeAfterOpsPull — BADGE-SYNC-FIX', () => {
+  const PID = 'proj-badge-test';
+  const UID = 'user-a';
+
+  // localStorage stub (node 환경에서 window/localStorage 없음)
+  let store: Record<string, string> = {};
+  beforeEach(() => {
+    store = {};
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (k: string) => store[k] ?? null,
+        setItem: (k: string, v: string) => { store[k] = v; },
+        removeItem: (k: string) => { delete store[k]; }
+      }
+    });
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => { store[k] = v; },
+      removeItem: (k: string) => { delete store[k]; }
+    });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('opLogComplete=true + ack<=lastApplied + revisionUnchanged → skip(true)', () => {
+    setOpLogComplete(PID, true);
+    setStructureOpsPersistAckSeq(PID, 5);
+    const result = collabPullCanSkipSliceMergeAfterOpsPull(
+      PID, UID,
+      { ok: true, applied: 0, lastAppliedSeq: 5 },
+      { revisionUnchanged: true }
+    );
+    expect(result).toBe(true);
+  });
+
+  it('BADGE-SYNC-FIX: opLogComplete=true + ack<=lastApplied + revision↑ + applied=0 → slice 필요(false)', () => {
+    // 배지 변경: ops 없이 revision만 올라간 경우 — slice merge 생략하면 배지 누락
+    setOpLogComplete(PID, true);
+    setStructureOpsPersistAckSeq(PID, 5);
+    const result = collabPullCanSkipSliceMergeAfterOpsPull(
+      PID, UID,
+      { ok: true, applied: 0, lastAppliedSeq: 5 },
+      { revisionUnchanged: false }
+    );
+    expect(result).toBe(false);
+  });
+
+  it('BADGE-SYNC-FIX: opLogComplete=true + ack<=lastApplied + revision↑ + applied>0 → ops 반영됨(true)', () => {
+    // 구조 op가 반영됐으면 배지 외 변경 없음 — skip 허용
+    setOpLogComplete(PID, true);
+    setStructureOpsPersistAckSeq(PID, 5);
+    const result = collabPullCanSkipSliceMergeAfterOpsPull(
+      PID, UID,
+      { ok: true, applied: 2, lastAppliedSeq: 7 },
+      { revisionUnchanged: false }
+    );
+    expect(result).toBe(true);
+  });
+
+  it('opLogComplete=false + revisionUnchanged=true → skip(true)', () => {
+    setOpLogComplete(PID, false);
+    const result = collabPullCanSkipSliceMergeAfterOpsPull(
+      PID, UID,
+      { ok: true, applied: 0 },
+      { revisionUnchanged: true }
+    );
+    expect(result).toBe(true);
+  });
+
+  it('opLogComplete=false + revisionUnchanged=false + applied=0 → slice 필요(false)', () => {
+    setOpLogComplete(PID, false);
+    const result = collabPullCanSkipSliceMergeAfterOpsPull(
+      PID, UID,
+      { ok: true, applied: 0 },
+      { revisionUnchanged: false }
+    );
+    expect(result).toBe(false);
   });
 });
 

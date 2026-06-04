@@ -1,7 +1,7 @@
 import { writable, get } from 'svelte/store';
 
-/** 스냅샷 백업 스케줄링 일시 중지 — 과부하 완화. 재활성화 시 false로 변경 */
-const NODE_SNAPSHOT_SCHEDULING_DISABLED = true;
+/** 스냅샷 백업 스케줄링 — 900ms debounce (`schedulePersistNodeSnapshotAfterPilot`) */
+const NODE_SNAPSHOT_SCHEDULING_DISABLED = false;
 import type { Project, Node, HistoryEntry } from '$lib/supabase/client';
 import { getAuthEmail } from '$lib/stores/authSession';
 import {
@@ -75,7 +75,7 @@ export function reconcileProjectNodeBadgesAfterPoolSave(projectId: string): numb
 
   let changed = 0;
   const next = rawList.map((node) => {
-    const san = applySanitizeImportedPlannodeNodeV1(node);
+    const san = applySanitizeImportedPlannodeNodeV1(node, projectId);
     const before = JSON.stringify({
       badges: node.badges ?? [],
       mb: node.metadata?.badges ?? null
@@ -881,7 +881,7 @@ export function selectProject(project: Project | null) {
     if (arr.length > 0) {
       nodes.set(arr);
     } else {
-      const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project));
+      const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project), project.id);
       const nodeList = [rootNode];
       nodes.set(nodeList);
       localStorage.setItem(NODES_KEY_PREFIX + project.id, JSON.stringify(nodeList));
@@ -889,7 +889,7 @@ export function selectProject(project: Project | null) {
     }
   } catch (e) {
     console.error('Failed to load nodes:', e);
-    const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project));
+    const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project), project.id);
     nodes.set([rootNode]);
   }
 
@@ -913,7 +913,7 @@ export function createProject(projectData: Omit<Project, 'id' | 'created_at' | '
     updated_at: new Date().toISOString()
   };
 
-  const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(newProject));
+  const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(newProject), newProject.id);
 
   projects.update((p) => {
     const updated = [...p, newProject];
@@ -1370,6 +1370,11 @@ export function replayStructureOpsOnNodes(
       if (node.num != null) patch.num = node.num;
       if (node.mx !== undefined) patch.mx = node.mx;
       if (node.my !== undefined) patch.my = node.my;
+      // BADGE_STRUCTURE_OPS: 키가 있을 때만 패치 (파싱과 동일 규칙)
+      if ('badges' in node && Array.isArray(node.badges)) patch.badges = node.badges;
+      if ('metadata' in node && node.metadata != null) {
+        patch.metadata = { ...(existing.metadata ?? {}), ...node.metadata } as Node['metadata'];
+      }
       list = list.map((n) => (n.id === node.id ? { ...n, ...patch } : n));
       continue;
     }
@@ -2054,7 +2059,7 @@ export function upsertImportedPlannodeTreeV1(
   }
   projects.set(next);
 
-  const nodesForStore = nodeList.map(applySanitizeImportedPlannodeNodeV1);
+  const nodesForStore = nodeList.map((n) => applySanitizeImportedPlannodeNodeV1(n, merged.id));
   try {
     localStorage.setItem(NODES_KEY_PREFIX + merged.id, JSON.stringify(nodesForStore));
   } catch (e) {
@@ -2199,6 +2204,11 @@ export function mergeNodeListsForCloud(
       }
       if (parseTs(rn.updated_at) > parseTs(cur.updated_at)) {
         byId.set(rn.id, preserveManualCoordsOnCloudMergeWinner(rn, cur));
+      } else if (parseTs(rn.updated_at) === parseTs(cur.updated_at)) {
+        // BADGE_STRUCTURE_OPS NOW-3: 동률 — badges 상이하면 remote 채택(coords는 local 보존)
+        if (JSON.stringify(rn.badges ?? []) !== JSON.stringify(cur.badges ?? [])) {
+          byId.set(rn.id, preserveManualCoordsOnCloudMergeWinner(rn, cur));
+        }
       }
     }
     /**

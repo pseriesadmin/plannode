@@ -335,6 +335,8 @@ let applyingUndo = false;
 const skipFirstEditSaveUndo = new Set();
 /** 노드 상세(showEdit) 모달이 열려 있는 동안 id — 클라우드 hydrate가 작성 중 필드를 덮지 않도록 */
 let nodeEditModalNodeId = null;
+/** NOW-2: 현재 열린 모달의 working BadgeSet 참조 — 원격 배지 sync 시 3트랙 갱신용 */
+let currentModalWorking = null;
 /** 이번 모달에서 「저장」으로 확정했으면 닫을 때 지연된(옛) hydrate를 적용하지 않음 */
 let nodeEditModalCommittedSave = false;
 /** showEdit 「저장」 async 구간 — 배경·취소 차단 + pm-proj-list-loading 오버레이 */
@@ -774,6 +776,26 @@ function syncRemoteUpdateNodeToEditModal(nodeId, patch) {
       const einum = document.querySelector('.mbg .einum');
       if (einum) einum.value = String(patch.num);
     }
+    // BADGE_STRUCTURE_OPS: 원격 배지 변경 → working 3트랙 + 칩 활성 상태 즉시 반영
+    if ('badges' in patch && Array.isArray(patch.badges)) {
+      // working 갱신 — 모달 열려 있으면 저장 시에도 원격 상태 반영
+      if (currentModalWorking) {
+        const mb = patch.metadata?.badges;
+        if (mb && typeof mb === 'object' && !Array.isArray(mb)) {
+          if (Array.isArray(mb.dev)) currentModalWorking.dev = [...mb.dev];
+          if (Array.isArray(mb.ux)) currentModalWorking.ux = [...mb.ux];
+          if (Array.isArray(mb.prj)) currentModalWorking.prj = [...mb.prj];
+        }
+      }
+      // 칩 시각 상태 갱신 (flat badges 기준)
+      const badgeSet = patch.badges;
+      document.querySelectorAll('.mbg .bchip').forEach((btn) => {
+        const key = btn.dataset?.key;
+        if (!key) return;
+        const isOn = badgeSet.includes(key);
+        btn.setAttribute('style', baseChipBtn() + chipStyle(key, isOn));
+      });
+    }
   } finally {
     textOpsApplyingRemote = false;
   }
@@ -792,6 +814,19 @@ function applyRemoteUpdateNodeFromStructureOp(payload) {
   if (patch.mx !== undefined) node.mx = patch.mx;
   if (patch.my !== undefined) node.my = patch.my;
   if (patch.updated_at != null) node.updated_at = patch.updated_at;
+  // BADGE_STRUCTURE_OPS: 키가 있을 때만 패치 — 없으면 기존 배지 유지
+  // metadata 먼저 merge → getBadgeSetFromNodeInput이 최신 상태 읽도록
+  if ('metadata' in patch && patch.metadata != null && typeof patch.metadata === 'object') {
+    node.metadata = { ...(node.metadata || {}), ...patch.metadata };
+  }
+  if ('badges' in patch && Array.isArray(patch.badges)) {
+    // applyBadgeSetToNode로 flat+3트랙 일관성 유지
+    const set = getBadgeSetFromNodeInput(
+      { badges: patch.badges, metadata: node.metadata },
+      { inferHints: false, projectId: curP?.id }
+    );
+    applyBadgeSetToNode(node, set);
+  }
   nodes = [...nodes];
   syncRemoteUpdateNodeToEditModal(patch.id, patch);
   render();
@@ -873,24 +908,21 @@ function sendUpdateNodeStructureOp(node) {
   if (!curP?.id || !node?.id) return;
   const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
   if (!collabUid) return;
-  sendProjectStructureOp(
-    curP.id,
-    {
-      type: 'update_node',
-      node: {
-        id: node.id,
-        parent_id: node.parent_id,
-        name: node.name ?? '',
-        description: node.description ?? '',
-        node_type: node.node_type ?? 'detail',
-        num: node.num ?? '',
-        mx: node.mx,
-        my: node.my,
-        updated_at: node.updated_at ?? new Date().toISOString()
-      }
-    },
-    collabPersistOpts()
-  );
+  const opNode = {
+    id: node.id,
+    parent_id: node.parent_id,
+    name: node.name ?? '',
+    description: node.description ?? '',
+    node_type: node.node_type ?? 'detail',
+    num: node.num ?? '',
+    mx: node.mx,
+    my: node.my,
+    updated_at: node.updated_at ?? new Date().toISOString()
+  };
+  // BADGE_STRUCTURE_OPS: 모달 저장 경로에서만 호출 — badges/metadata 포함 (드래그는 sendMoveNodeStructureOps)
+  if (Array.isArray(node.badges)) opNode.badges = node.badges;
+  if (node.metadata != null && typeof node.metadata === 'object') opNode.metadata = node.metadata;
+  sendProjectStructureOp(curP.id, { type: 'update_node', node: opNode }, collabPersistOpts());
 }
 
 function sendDeleteNodeStructureOp(rootId) {
@@ -2978,7 +3010,7 @@ function buildPlannodeExportV1() {
     if (isGlobalMirror) {
       continue;
     }
-    const s = sanitizeNodeBadgesForTreeV1(n);
+    const s = sanitizeNodeBadgesForTreeV1(n, curP?.id);
     const metaOut =
       s.metadata && Object.keys(s.metadata).length > 0
         ? JSON.parse(JSON.stringify(s.metadata))
@@ -4137,6 +4169,7 @@ function showEdit(n) {
   nodeEditModalCommittedSave = false;
   // 모달 편집 시 명시 저장된 배지만 로드 (추론 배지는 모달에 표시하지 않음)
   const working = cloneBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: false }));
+  currentModalWorking = working; // NOW-2: 원격 배지 sync 진입점
   const pool = getEffectiveBadgePool();
   const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
   const bh = [
@@ -4189,12 +4222,13 @@ function showEdit(n) {
             .slice(0, 20);
           target.num = numIn || defaultNumForNode(target);
           applyBadgeSetToNode(target, working);
+          // NOW-1: curP?.id 전달 — 공유 프로젝트 배지 풀 정합(R1)
           const san = sanitizeNodeBadgesForTreeV1({
             badges: target.badges ?? [],
             metadata: target.metadata,
             name: target.name,
             description: target.description
-          });
+          }, curP?.id);
           target.badges = san.badges;
           target.metadata = san.metadata !== undefined ? san.metadata : {};
           if (typeof onBeforeModalPersist === 'function') {
@@ -4285,6 +4319,7 @@ function showEdit(n) {
       clearNodeEditModalSavingState();
       teardownTextOpsDescEditor();
       if (nodeEditModalNodeId === n.id) nodeEditModalNodeId = null;
+      currentModalWorking = null; // NOW-2: 모달 닫힘 — 참조 해제
       if (how === 'ok') {
         pendingHydrateFromStore = null;
       } else if (abortAddChildOnEditDismiss(n.id)) {
@@ -4468,19 +4503,6 @@ function showCtx(e, n) {
     <div class="cx" style="cursor:default;opacity:0.88;font-size:11px;color:#64748b;padding:6px 10px;line-height:1.55">표시만 — 이름·배지는 JSON 가져오기·보내기로 맞춰줘.</div>
     <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>`;
   } else {
-    const bset = getBadgeSetFromNode(n);
-    const pool = getEffectiveBadgePool();
-    const ctxTrack = (track, title, keys) =>
-      `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">${title}</div>` +
-      keys
-        .map(
-          (k) =>
-            `<div class="cx" data-a="bgt" data-track="${track}" data-key="${k}" data-id="${n.id}">${
-              bset[track].includes(k) ? '✓' : '○'
-            }  ${k}</div>`
-        )
-        .join('');
-    const nPool = pool.dev.length + pool.ux.length + pool.prj.length;
     const rootLayoutCtx = !n.parent_id
       ? `<div class="cxsc" style="padding:4px 8px 2px;font-size:10px;color:#94a3b8;font-weight:600">노드맵 배치</div>
     <div class="cx" data-a="nml" data-mode="right" data-id="${n.id}">${nodeMapLayoutMode === 'right' ? '✓' : '○'}  우측분포</div>
@@ -4491,10 +4513,6 @@ function showCtx(e, n) {
     ${rootLayoutCtx}
     <div class="cx" data-a="edit" data-id="${n.id}">✎  이름·설명 편집</div>
     <div class="cx" data-a="add" data-id="${n.id}">+  하위 노드 추가</div>
-    <div class="cxsp"></div><div class="cxsc">배지 (3트랙 · ${nPool})</div>
-    ${ctxTrack('dev', 'DEV', [...pool.dev])}
-    ${ctxTrack('ux', 'UX', [...pool.ux])}
-    ${ctxTrack('prj', 'PRJ', [...pool.prj])}
     <div class="cxsp"></div>
     <div class="cx" data-a="reset" data-id="${n.id}">↺  위치 초기화</div>
     ${n.parent_id ? `<div class="cxsp"></div><div class="cx dng" data-a="del" data-id="${n.id}">✕  삭제</div>` : ''}`;
@@ -4530,20 +4548,7 @@ function onCtxClick(e) {
     n.my = null;
     render();
     toast('위치 초기화');
-  }   else if (a === 'bgt') {
-    const tr = row.dataset.track;
-    const ky = row.dataset.key;
-    if (!tr || !ky) return;
-    const set = getBadgeSetFromNode(n);
-    const arr = set[tr];
-    const i = arr.indexOf(ky);
-    if (i >= 0) arr.splice(i, 1);
-    else arr.push(ky);
-    applyBadgeSetToNode(n, set);
-    nodes = [...nodes];
-    render();
-    toast('배지 갱신');
-  } else if (a === 'nml') {
+  }   else if (a === 'nml') {
     const mode = row.dataset.mode;
     if (mode === 'right' || mode === 'topdown') applyNodeMapLayout(mode);
   }

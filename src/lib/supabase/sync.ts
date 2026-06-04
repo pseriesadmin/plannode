@@ -198,7 +198,8 @@ type CollabPullLightAssessment = {
   pendingOpsSinceAck?: number;
 };
 
-/** COLLAB-PERF-2 E2 — revision 동일 + since ack 이후 ops 0 + ack ≥ last_applied → pull 불필요 (slice fetch 0) */
+/** COLLAB-PERF-2 E2 — revision 동일 + since ack 이후 ops 0 + ack ≤ last_applied → pull 불필요 (slice fetch 0)
+ *  COLLAB_META_DRIFT: ackSeq > last_applied_seq 이면 meta drift → hash check 경로로 위임 (viaLightweight: false) */
 async function assessCollabPullByRevisionAndOpsAck(
   workspaceUserId: string,
   projectId: string,
@@ -215,30 +216,21 @@ async function assessCollabPullByRevisionAndOpsAck(
     return { pullNeeded: true, viaLightweight: false, ackSeq };
   }
 
-  if (bundle.ops.length > 0) {
-    return {
-      pullNeeded: true,
-      viaLightweight: true,
-      ackSeq,
-      lastAppliedSeq: bundle.last_applied_seq,
-      pendingOpsSinceAck: bundle.ops.length
-    };
-  }
-
-  if (ackSeq >= bundle.last_applied_seq) {
-    return {
-      pullNeeded: false,
-      viaLightweight: true,
-      ackSeq,
-      lastAppliedSeq: bundle.last_applied_seq
-    };
+  if (bundle.ops.length === 0) {
+    // COLLAB_META_DRIFT: ackSeq > last_applied_seq → meta가 뒤처짐 → hash check에 위임
+    const metaDrift = ackSeq > bundle.last_applied_seq;
+    if (!metaDrift) {
+      return { pullNeeded: false, viaLightweight: true, ackSeq, lastAppliedSeq: bundle.last_applied_seq };
+    }
+    return { pullNeeded: true, viaLightweight: false, ackSeq, lastAppliedSeq: bundle.last_applied_seq };
   }
 
   return {
     pullNeeded: true,
     viaLightweight: true,
     ackSeq,
-    lastAppliedSeq: bundle.last_applied_seq
+    lastAppliedSeq: bundle.last_applied_seq,
+    pendingOpsSinceAck: bundle.ops.length
   };
 }
 
@@ -251,7 +243,8 @@ async function collabSliceOutOfSyncAfterPull(
   if (sliceMerged || opsResult.applied > 0) return false;
   if (opsResult.ok && opsResult.lastAppliedSeq !== undefined) {
     const ackSeq = getStructureOpsPersistAckSeq(projectId);
-    if (ackSeq >= opsResult.lastAppliedSeq) return false;
+    // COLLAB_META_DRIFT: ackSeq > lastAppliedSeq 이면 drift → hash check 진행
+    if (ackSeq <= opsResult.lastAppliedSeq) return false;
   }
   return collabRemoteSliceHashDiffers(workspaceUserId, projectId);
 }
@@ -313,7 +306,7 @@ function markCollabRevisionCachedIfSynced(
 /**
  * 동기·공유 슬라이스(NOW-68·EPIC A): `plannode_workspace` **번들 본문**은 Realtime 미구독(pull/RPC).
  * `plannode_project_collab_meta.revision` 만 postgres_changes **신호** → `pullCollabSliceForProject`.
- * OT/CRDT 없음. §3·§7 · `docs/plannode_workspace_sync_overview.md`.
+ * OT/CRDT 없음. `plannode-architecture.mdc` §10.6·§10.7.
  */
 
 const TABLE = 'plannode_workspace';
@@ -1368,8 +1361,9 @@ export async function pullProjectSliceBeforeOpen(project: Project): Promise<void
 
   const src = project.cloud_workspace_source_user_id;
   if (src && src !== uid) {
-    // 멤버 프로젝트: 기존 경로
-    await mergeSharedProjectSliceFromCloudIfApplicable(project);
+    // forceMerge 사용 금지 — forceMerge=true && revisionUnchanged 조합이 skipSliceMerge=true를 유발해
+    // 오픈 경로에서 배지·슬라이스 변경이 반영되지 않음. P0 A/B/C meta drift 수정으로 충분.
+    await pullCollabSliceForProject(project, 'open-pre-select');
     return;
   }
 

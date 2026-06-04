@@ -526,9 +526,9 @@ export function getBadgeSetFromNodeInput(
     name?: string;
     description?: string;
   },
-  opts?: { inferHints?: boolean }
+  opts?: { inferHints?: boolean; projectId?: string | null }
 ): BadgeSet {
-  const pool = getEffectiveBadgePool();
+  const pool = getEffectiveBadgePool(opts?.projectId);
   const mb = n.metadata?.badges;
   const hasTrackShape =
     mb &&
@@ -578,11 +578,26 @@ function uniqUpperStrings(arr: readonly string[]): string[] {
  * 3트랙 배지를 **현재 표준 풀**(기본 DEV/UX/PRJ 풀 + 사용자 설정)만 남기고 중복·대소문자 변형 제거.
  * 외부 JSON·CRAZYSHOT류 임의 토큰은 제거(다른 metadata 키는 건드리지 않음).
  */
-export function filterBadgeSetToCanonicalPool(set: BadgeSet): BadgeSet {
-  const { dev: devS, ux: uxS, prj: prjS } = poolToSets(getEffectiveBadgePool());
-  const dev = uniqUpperStrings(set.dev.map((k) => String(k).trim().toUpperCase()).filter((k) => devS.has(k)));
-  const ux = uniqUpperStrings(set.ux.map((k) => String(k).trim().toUpperCase()).filter((k) => uxS.has(k)));
-  const prj = uniqUpperStrings(set.prj.map((k) => String(k).trim().toUpperCase()).filter((k) => prjS.has(k)));
+export function filterBadgeSetToCanonicalPool(set: BadgeSet, projectId?: string | null): BadgeSet {
+  const pool = getEffectiveBadgePool(projectId);
+  const { dev: devS, ux: uxS, prj: prjS } = poolToSets(pool);
+  const devIn = set.dev.map((k) => String(k).trim().toUpperCase()).filter(Boolean);
+  const uxIn = set.ux.map((k) => String(k).trim().toUpperCase()).filter(Boolean);
+  const prjIn = set.prj.map((k) => String(k).trim().toUpperCase()).filter(Boolean);
+  if (import.meta.env.DEV && projectId) {
+    for (const token of devIn) {
+      if (!devS.has(token)) console.debug('[badge-sanitize] dropped', token, projectId);
+    }
+    for (const token of uxIn) {
+      if (!uxS.has(token)) console.debug('[badge-sanitize] dropped', token, projectId);
+    }
+    for (const token of prjIn) {
+      if (!prjS.has(token)) console.debug('[badge-sanitize] dropped', token, projectId);
+    }
+  }
+  const dev = uniqUpperStrings(devIn.filter((k) => devS.has(k)));
+  const ux = uniqUpperStrings(uxIn.filter((k) => uxS.has(k)));
+  const prj = uniqUpperStrings(prjIn.filter((k) => prjS.has(k)));
   return { dev, ux, prj };
 }
 
@@ -593,12 +608,15 @@ export function filterBadgeSetToCanonicalPool(set: BadgeSet): BadgeSet {
  * **저장 정책**: `getBadgeSetFromNodeInput` 호출 시 반드시 `{ inferHints: false }` 명시.
  * 저장·가져오기 경로에서는 **명시 배지만** 정리하고, 구조 메타/사용자/AI 학습 규칙 추론은 제외한다 (버그 B 차단).
  */
-export function sanitizeNodeBadgesForTreeV1(n: {
-  badges?: string[];
-  metadata?: NodeMetadata | null;
-  name?: string;
-  description?: string;
-}): { badges: string[]; metadata?: NodeMetadata } {
+export function sanitizeNodeBadgesForTreeV1(
+  n: {
+    badges?: string[];
+    metadata?: NodeMetadata | null;
+    name?: string;
+    description?: string;
+  },
+  projectId?: string | null
+): { badges: string[]; metadata?: NodeMetadata } {
   const set = filterBadgeSetToCanonicalPool(
     getBadgeSetFromNodeInput(
       {
@@ -607,8 +625,9 @@ export function sanitizeNodeBadgesForTreeV1(n: {
         name: n.name,
         description: n.description
       },
-      { inferHints: false } // 명시 호출: 저장 경로는 명시 배지만 정리
-    )
+      { inferHints: false, projectId }
+    ),
+    projectId
   );
   const badges = flattenBadgeSet(set);
   const base: NodeMetadata =
@@ -629,13 +648,16 @@ export function sanitizeNodeBadgesForTreeV1(n: {
  * 가져오기·클라우드 슬라이스 등 **저장/파싱 산출물**에 동일 배지 규칙 적용.
  * `sanitizeNodeBadgesForTreeV1` 단일 구현을 쓰며, `plannodeTreeV1`·`upsertImportedPlannodeTreeV1`에서 재사용한다.
  */
-export function applySanitizeImportedPlannodeNodeV1(node: Node): Node {
-  const san = sanitizeNodeBadgesForTreeV1({
-    badges: node.badges ?? [],
-    metadata: node.metadata,
-    name: node.name,
-    description: node.description
-  });
+export function applySanitizeImportedPlannodeNodeV1(node: Node, projectId?: string | null): Node {
+  const san = sanitizeNodeBadgesForTreeV1(
+    {
+      badges: node.badges ?? [],
+      metadata: node.metadata,
+      name: node.name,
+      description: node.description
+    },
+    projectId ?? node.project_id
+  );
   return { ...node, badges: san.badges, metadata: san.metadata };
 }
 

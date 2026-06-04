@@ -515,7 +515,7 @@ export function parsePlannodeTreeV1Json(text: string): ParsePlannodeTreeV1Result
       created_at: now,
       updated_at: now
     };
-    return applySanitizeImportedPlannodeNodeV1(built);
+    return applySanitizeImportedPlannodeNodeV1(built, project.id);
   });
 
   const unknownRootKeys = collectUnknownPlannodeTreeRootKeys(o).filter(
