@@ -10,6 +10,8 @@ import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 export const STRUCTURE_OPS_BROADCAST_EVENT = 'structure-op';
 const STRUCTURE_OPS_CLIENT_ID_KEY = 'plannode.structureOps.clientId.v1';
 const STRUCTURE_OPS_ACK_SEQ_KEY = 'plannode.structureOps.ackSeq.v1';
+const PENDING_PERSIST_OPS_STORAGE_KEY = 'plannode.structureOps.pendingPersist.v1';
+const OP_LOG_COMPLETE_STORAGE_KEY = 'plannode.structureOps.opLogComplete.v1';
 const MAX_PENDING_STRUCTURE_OPS = 12;
 const MAX_PENDING_PERSIST_OPS = 24;
 const PENDING_FLUSH_RETRY_MS = 200;
@@ -94,11 +96,12 @@ type PendingPersistOp = {
 let channel: RealtimeChannel | null = null;
 let subscribedProjectId: string | null = null;
 let broadcastSubscribed = false;
+let structureOpsRealtimeChannel: RealtimeChannel | null = null;
 let myClientId = '';
 let sendSeq = 0;
 let onStructureOp: StructureOpHandler | null = null;
 let pendingStructureOps: PendingStructureOp[] = [];
-let pendingPersistOps: PendingPersistOp[] = [];
+let pendingPersistOps: PendingPersistOp[] = loadPendingPersistOpsFromStorage();
 /** 브라우저 타이머 id (DOM lib: number) */
 let pendingFlushTimer: number | undefined;
 let persistFlushTimer: number | undefined;
@@ -278,7 +281,7 @@ export function isProjectStructureOpsSubscribed(projectId?: string): boolean {
 /** Vitest — 모듈 상태 초기화 */
 export function resetStructureOpsStateForTest(): void {
   clearPendingStructureOps();
-  clearPendingPersistOps();
+  clearPendingPersistOps(); // localStorage도 정리됨
   broadcastSubscribed = false;
   subscribedProjectId = null;
   sendSeq = 0;
@@ -324,8 +327,47 @@ export function setStructureOpsPersistAckSeq(projectId: string, seq: number): vo
   }
 }
 
+function loadPendingPersistOpsFromStorage(): PendingPersistOp[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(PENDING_PERSIST_OPS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const result: PendingPersistOp[] = [];
+    for (const item of parsed) {
+      if (
+        item &&
+        typeof item.projectId === 'string' &&
+        typeof item.workspaceUserId === 'string' &&
+        item.op &&
+        typeof item.op.type === 'string'
+      ) {
+        result.push(item as PendingPersistOp);
+      }
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+function savePendingPersistOpsToStorage(ops: PendingPersistOp[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (ops.length === 0) {
+      localStorage.removeItem(PENDING_PERSIST_OPS_STORAGE_KEY);
+    } else {
+      localStorage.setItem(PENDING_PERSIST_OPS_STORAGE_KEY, JSON.stringify(ops));
+    }
+  } catch {
+    /* ignore — quota exceeded */
+  }
+}
+
 function clearPendingPersistOps(): void {
   pendingPersistOps = [];
+  savePendingPersistOpsToStorage([]);
   if (persistFlushTimer !== undefined && typeof window !== 'undefined') {
     window.clearTimeout(persistFlushTimer);
     persistFlushTimer = undefined;
@@ -359,7 +401,11 @@ export function enqueueStructureOpForCloudPersist(
   if (!pid || !wid) return;
   pendingPersistOps.push({ projectId: pid, workspaceUserId: wid, op });
   if (pendingPersistOps.length > MAX_PENDING_PERSIST_OPS) {
-    pendingPersistOps = pendingPersistOps.slice(-MAX_PENDING_PERSIST_OPS);
+    // silent drop 대신 즉시 flush 시도 — 탭 크래시 전에 서버에 기록
+    console.warn('[structureOps] pending persist queue overflow — flushing early');
+    void flushAllPendingStructureOpsPersist();
+  } else {
+    savePendingPersistOpsToStorage(pendingPersistOps);
   }
   schedulePersistFlush();
 }
@@ -440,6 +486,7 @@ async function flushStructureOpsPersistForProjectInner(
         pendingPersistOps = pendingPersistOps.filter(
           (p) => !(p.projectId === pid && p.workspaceUserId === wid)
         );
+        savePendingPersistOpsToStorage(pendingPersistOps);
         return recovered;
       }
     }
@@ -452,6 +499,7 @@ async function flushStructureOpsPersistForProjectInner(
   pendingPersistOps = pendingPersistOps.filter(
     (p) => !(p.projectId === pid && p.workspaceUserId === wid)
   );
+  savePendingPersistOpsToStorage(pendingPersistOps);
 
   const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
   const lastSeq = Number(result.last_applied_seq);
@@ -514,7 +562,8 @@ export function hasPendingStructureOpsPersistForProject(
   return pendingPersistOps.some((p) => p.projectId === pid && p.workspaceUserId === wid);
 }
 
-/** append 성공 + pending 없음 → slice merge RPC 생략 가능 */
+/** append 성공 + pending 없음 → slice merge RPC 생략 가능.
+ *  Phase 4: op_log_complete = true이면 pending 없을 때 flush 여부와 무관하게 skip. */
 export function collabPushCanSkipSliceMergeAfterOpsFlush(
   projectId: string,
   workspaceUserId: string,
@@ -522,6 +571,8 @@ export function collabPushCanSkipSliceMergeAfterOpsFlush(
   attemptFlush: StructureOpsFlushResult
 ): boolean {
   if (hasPendingStructureOpsPersistForProject(projectId, workspaceUserId)) return false;
+  // Phase 4: op log 완전체 → 이 프로젝트는 항상 ops-only push
+  if (getOpLogComplete(projectId)) return true;
   const key = structureOpsPersistFlushKey(workspaceUserId, projectId);
   const prior = priorBatchFlush.get(key);
   const batchSynced = prior?.ok === true && (prior.flushed ?? 0) > 0;
@@ -538,7 +589,8 @@ export type StructureOpsPullResult = {
   revision?: number;
 };
 
-/** ops RPC 성공 + (적용됨 또는 revision 동일) → full slice merge 생략 가능 */
+/** ops RPC 성공 + (적용됨 또는 revision 동일) → full slice merge 생략 가능.
+ *  Phase 4: op_log_complete = true이면 pending 없을 때 항상 skip. */
 export function collabPullCanSkipSliceMergeAfterOpsPull(
   projectId: string,
   workspaceUserId: string,
@@ -546,6 +598,8 @@ export function collabPullCanSkipSliceMergeAfterOpsPull(
   opts: { revisionUnchanged: boolean }
 ): boolean {
   if (hasPendingStructureOpsPersistForProject(projectId, workspaceUserId)) return false;
+  // Phase 4: op log 완전체 → 이 프로젝트는 항상 ops-only pull
+  if (getOpLogComplete(projectId) && pullResult.ok) return true;
   if (!pullResult.ok) return false;
   if (pullResult.applied > 0) return true;
   return opts.revisionUnchanged;
@@ -571,6 +625,7 @@ export type FetchedStructureOpsBundle = {
   revision: number;
   last_applied_seq: number;
   nodes: unknown[];
+  op_log_complete: boolean;
 };
 
 export async function fetchStructureOpsSince(
@@ -606,11 +661,13 @@ export async function fetchStructureOpsSince(
       client_id: parseNonEmptyString(row.client_id) ?? undefined
     });
   }
+  const opLogComplete = root.op_log_complete === true;
   return {
     ops,
     revision: Number(root.revision) || 0,
     last_applied_seq: Number(root.last_applied_seq) || 0,
-    nodes: Array.isArray(root.nodes) ? root.nodes : []
+    nodes: Array.isArray(root.nodes) ? root.nodes : [],
+    op_log_complete: opLogComplete
   };
 }
 
@@ -740,6 +797,129 @@ export async function subscribeProjectStructureOps(
       broadcastSubscribed = false;
     }
   });
+}
+
+// ── Phase 4: op_log_complete 캐시 ─────────────────────────────────────────────
+
+function opLogCompleteKey(projectId: string): string {
+  return `${OP_LOG_COMPLETE_STORAGE_KEY}.${projectId}`;
+}
+
+export function getOpLogComplete(projectId: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem(opLogCompleteKey(projectId)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setOpLogComplete(projectId: string, value: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (value) {
+      localStorage.setItem(opLogCompleteKey(projectId), '1');
+    } else {
+      localStorage.removeItem(opLogCompleteKey(projectId));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+// ── Phase 4: bootstrap RPC ─────────────────────────────────────────────────
+
+export type BootstrapResult = {
+  ok: boolean;
+  bootstrapped?: boolean;
+  count?: number;
+  reason?: string;
+};
+
+export async function bootstrapStructureOpsFromSnapshot(
+  workspaceUserId: string,
+  projectId: string
+): Promise<BootstrapResult> {
+  if (!isSupabaseCloudConfigured()) return { ok: false };
+  const pid = projectId.trim();
+  const wid = workspaceUserId.trim();
+  if (!pid || !wid) return { ok: false };
+
+  if (getOpLogComplete(pid)) return { ok: true, bootstrapped: false, reason: 'already_complete' };
+
+  const { data, error } = await supabase.rpc('plannode_bootstrap_structure_ops_from_snapshot', {
+    p_workspace_user_id: wid,
+    p_project_id: pid
+  });
+
+  if (error) {
+    if (import.meta.env.DEV) {
+      console.warn('[bootstrapStructureOps]', pid, error.message);
+    }
+    return { ok: false };
+  }
+
+  const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+  const bootstrapped = result.bootstrapped === true;
+  const count = Number(result.count) || 0;
+
+  if (bootstrapped || result.reason === 'already_complete') {
+    setOpLogComplete(pid, true);
+  }
+
+  return { ok: true, bootstrapped, count, reason: result.reason as string | undefined };
+}
+
+// ── Phase 3: structure_ops Realtime 구독 ─────────────────────────────────────
+
+export type StructureOpsRealtimeHandler = (projectId: string) => void;
+
+let _realtimeHandler: StructureOpsRealtimeHandler | null = null;
+
+export function subscribeStructureOpsRealtime(
+  workspaceUserId: string,
+  projectId: string,
+  onInsert: StructureOpsRealtimeHandler
+): void {
+  if (!isSupabaseCloudConfigured() || typeof window === 'undefined') return;
+  if (!workspaceUserId?.trim() || !projectId?.trim()) return;
+
+  unsubscribeStructureOpsRealtime();
+  _realtimeHandler = onInsert;
+
+  const wid = workspaceUserId.trim();
+  const pid = projectId.trim();
+  const channelFilter = `workspace_user_id=eq.${wid}`;
+  const myClientId = getProjectStructureOpsClientId();
+
+  structureOpsRealtimeChannel = supabase
+    .channel(`struct-ops-rt:${wid}:${pid}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'plannode_project_structure_ops',
+        filter: channelFilter
+      },
+      (payload) => {
+        const row = payload.new as Record<string, unknown> | undefined;
+        if (!row) return;
+        if (String(row.project_id ?? '').trim() !== pid) return;
+        // self-insert: 자신의 client_id가 기록된 경우 skip (Broadcast로 이미 처리됨)
+        if (String(row.client_id ?? '') === myClientId) return;
+        _realtimeHandler?.(pid);
+      }
+    )
+    .subscribe();
+}
+
+export function unsubscribeStructureOpsRealtime(): void {
+  _realtimeHandler = null;
+  if (structureOpsRealtimeChannel) {
+    void supabase.removeChannel(structureOpsRealtimeChannel);
+    structureOpsRealtimeChannel = null;
+  }
 }
 
 /**

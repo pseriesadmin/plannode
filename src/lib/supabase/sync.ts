@@ -38,6 +38,10 @@ import {
   collabPullCanSkipSliceMergeAfterOpsPull,
   structureOpsPersistFlushKey,
   hasPendingStructureOpsPersistForProject,
+  setOpLogComplete,
+  bootstrapStructureOpsFromSnapshot,
+  subscribeStructureOpsRealtime,
+  unsubscribeStructureOpsRealtime,
   type StructureOpsPullResult
 } from '$lib/supabase/projectStructureOps';
 import {
@@ -93,7 +97,10 @@ export async function pullStructureOpsForProject(project: Project): Promise<Stru
   const uid = getAuthUserId();
   if (!uid || !project?.id) return none;
   const src = project.cloud_workspace_source_user_id;
-  if (!src || src === uid) return none;
+  // Phase 1B: src === uid guard 제거 — owner도 자신의 workspace에서 op pull 가능
+  if (!src) return none;
+  // ACL 없는 고아 프로젝트: 이미 403이 확인된 경우 fetch 자체 생략
+  if (isCollabProjectForbidden(src, project.id)) return none;
 
   const since = getStructureOpsPersistAckSeq(project.id);
   const bundle = await fetchStructureOpsSince(src, project.id, since);
@@ -101,6 +108,11 @@ export async function pullStructureOpsForProject(project: Project): Promise<Stru
 
   if (bundle.last_applied_seq > since) {
     setStructureOpsPersistAckSeq(project.id, bundle.last_applied_seq);
+  }
+
+  // Phase 4: op_log_complete 서버 응답 → localStorage 캐시 갱신
+  if (bundle.op_log_complete) {
+    setOpLogComplete(project.id, true);
   }
 
   const meta: StructureOpsPullResult = {
@@ -502,6 +514,29 @@ async function canPushMergeSliceForProject(projectId: string, workspaceUserId: s
   return true;
 }
 
+/** ACL 없는 고아 프로젝트 — 세션 단위 403 영구 차단 (키: workspaceUserId:projectId).
+ * DB에 ACL row가 없거나 email 불일치로 revision/ops RPC가 403을 반환하면 등록 →
+ * 이후 폴링에서 제외해 6초마다 반복 에러 방지. */
+const _collabForbiddenProjects = new Set<string>();
+
+function markCollabProjectForbidden(workspaceUserId: string, projectId: string): void {
+  _collabForbiddenProjects.add(`${workspaceUserId}:${projectId}`);
+  if (import.meta.env.DEV) {
+    console.info('[collab] project marked forbidden (no valid ACL) — polling skipped:', projectId);
+  }
+}
+
+function isCollabProjectForbidden(workspaceUserId: string, projectId: string): boolean {
+  return _collabForbiddenProjects.has(`${workspaceUserId}:${projectId}`);
+}
+
+function isCollabRevisionRpcForbidden(err: { message?: string; code?: string; status?: number } | null): boolean {
+  if (!err) return false;
+  const m = String(err.message ?? '').toLowerCase();
+  const status = (err as { status?: number }).status;
+  return status === 403 || m.includes('forbidden') || m.includes('42501');
+}
+
 /** collab_meta.revision — Realtime·폴백 poll 중복 pull 방지 (키: workspaceUserId:projectId) */
 const collabRevisionCache = new Map<string, number>();
 
@@ -518,13 +553,23 @@ export function setCachedCollabRevision(workspaceUserId: string, projectId: stri
   collabRevisionCache.set(collabRevisionCacheKey(workspaceUserId, projectId), revision);
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function fetchCollabRevision(workspaceUserId: string, projectId: string): Promise<number | null> {
+  if (!workspaceUserId || !UUID_REGEX.test(workspaceUserId)) return null;
+  if (isCollabProjectForbidden(workspaceUserId, projectId)) return null;
   const { data, error } = await supabase.rpc('plannode_project_collab_get_revision', {
     p_workspace_user_id: workspaceUserId,
     p_project_id: projectId
   });
   if (error) {
-    if (!isCollabRevisionRpcMissing(error) && import.meta.env.DEV) {
+    if (isCollabRevisionRpcForbidden(error)) {
+      // ACL 없는 고아 프로젝트: 세션 단위 차단 (매 6초 403 폭탄 방지)
+      markCollabProjectForbidden(workspaceUserId, projectId);
+    } else if (error.code === 'PGRST202' || (error as { status?: number }).status === 400) {
+      // 파라미터 타입 불일치(uuid 형식 오류 등): 세션 단위 차단
+      markCollabProjectForbidden(workspaceUserId, projectId);
+    } else if (!isCollabRevisionRpcMissing(error) && import.meta.env.DEV) {
       console.warn('[fetchCollabRevision]', projectId, error.message);
     }
     return null;
@@ -696,7 +741,8 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
 
       // structure ops 경로: atomic RPC 진입 전에도 동일하게 처리
       let baseRevision: number | null = revisionHintFromStale;
-      if (baseRevision === null && !revisionStaleNotifiedThisPush && _mergeAtomicUnsupported) {
+      if (baseRevision === null && !revisionStaleNotifiedThisPush && _mergeAtomicUnsupported
+          && UUID_REGEX.test(src) && !isCollabProjectForbidden(src, p.id)) {
         const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
           p_workspace_user_id: src,
           p_project_id: p.id
@@ -704,8 +750,12 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
         if (!revErr) {
           const rn = rpcBigintToNumber(revData);
           if (rn !== null) baseRevision = rn;
-        } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
-          console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
+        } else {
+          if (isCollabRevisionRpcForbidden(revErr) || (revErr as { status?: number }).status === 400) {
+            markCollabProjectForbidden(src, p.id);
+          } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
+            console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
+          }
         }
       }
 
@@ -1305,6 +1355,68 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   return true;
 }
 
+/**
+ * 프로젝트 오픈 시 클라우드 슬라이스를 강제 fetch → 로컬과 버전 비교 후 앞선 버전 병합.
+ * - 소유자 프로젝트: fetchProjectSliceFromCloud(uid, projectId) → mergeNodeListsForCloudByProjectMeta
+ * - 멤버 프로젝트: mergeSharedProjectSliceFromCloudIfApplicable (기존 경로)
+ * selectProject 호출 직전에 await하여 최신 노드를 localStorage에 반영한다.
+ */
+export async function pullProjectSliceBeforeOpen(project: Project): Promise<void> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return;
+  const uid = getAuthUserId();
+  if (!uid) return;
+
+  const src = project.cloud_workspace_source_user_id;
+  if (src && src !== uid) {
+    // 멤버 프로젝트: 기존 경로
+    await mergeSharedProjectSliceFromCloudIfApplicable(project);
+    return;
+  }
+
+  // 소유자 프로젝트: 자신의 워크스페이스에서 이 프로젝트 슬라이스만 fetch·비교
+  const localRef = get(projects).find((p) => p.id === project.id) ?? project;
+  if (getDeletedProjectTombstoneIds().has(localRef.id)) return;
+
+  maybeFlushPilotBeforeCollabMerge(localRef.id);
+  const slice = await fetchProjectSliceFromCloud(uid, localRef.id);
+  if (!slice) return;
+
+  const parseTs = (iso: string | undefined): number => {
+    const t = Date.parse(String(iso ?? ''));
+    return Number.isFinite(t) ? t : 0;
+  };
+
+  const preMergeLocal = loadLocalNodesForCollabMerge(localRef.id);
+  const remoteHash = projectWorkspaceNodesJsonSnapshot(slice.nodes);
+  const localHash = projectWorkspaceNodesJsonSnapshot(preMergeLocal);
+  if (remoteHash === localHash) return;
+
+  const rTime = parseTs(slice.project.updated_at);
+  const lTime = parseTs(localRef.updated_at);
+  const remoteMetaNewer = rTime > lTime;
+
+  const mergedNodes = mergeNodeListsForCloudByProjectMeta(
+    preMergeLocal,
+    slice.nodes,
+    localRef.updated_at,
+    slice.project.updated_at,
+    localRef.id,
+    false // 소유자 로컬 전용 노드 보존
+  );
+  const mergedProject = mergeProjectMetaForCloudSync(
+    reconcileProjectRecord({ ...localRef }),
+    reconcileProjectRecord({ ...slice.project })
+  );
+
+  upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
+    openAfter: false,
+    markDirty: false,
+    preserveRemoteUpdatedAt: remoteMetaNewer
+  });
+
+  // OWN_WORKSPACE_REMOTE_TS_KEY는 덮어쓰지 않음 — 전체 번들 pull 타이밍과 독립
+}
+
 const ENSURE_SLICE_BUSY_POLL_MS = 500;
 const ENSURE_SLICE_BUSY_POLL_MAX = 4;
 /** modal-save barrier 직후 push `revision_stale` 토스트 중복 억제 (Phase D6) */
@@ -1766,6 +1878,8 @@ export async function ensureCollabSliceFreshBeforePersist(
  * 멤버(`cloud_workspace_source_user_id` ≠ 본인): `mergeSharedProjectSliceFromCloudIfApplicable`
  * 소유자(출처 없음 또는 본인 uid): `pullOwnWorkspaceIfChanged` + 현재 프로젝트면 `selectProject`
  */
+const _pullCollabSliceInFlight = new Map<string, Promise<boolean>>();
+
 export async function pullCollabSliceForProject(
   project: Project,
   reason: string,
@@ -1776,6 +1890,34 @@ export async function pullCollabSliceForProject(
   if (!uid || !project?.id) return false;
 
   const workspaceUserId = project.cloud_workspace_source_user_id ?? uid;
+
+  // 동일 프로젝트 concurrent pull 중복 방지 — revision 변경 시 두 경로 동시 호출 대비
+  // forceMerge는 dedup 제외 (강제 재pull 의도)
+  if (!opts?.forceMerge) {
+    const key = `${workspaceUserId}:${project.id}`;
+    const inflight = _pullCollabSliceInFlight.get(key);
+    if (inflight) return inflight;
+    const run = _pullCollabSliceForProjectInner(project, reason, opts, uid, workspaceUserId);
+    _pullCollabSliceInFlight.set(key, run);
+    try {
+      return await run;
+    } finally {
+      if (_pullCollabSliceInFlight.get(key) === run) _pullCollabSliceInFlight.delete(key);
+    }
+  }
+  return _pullCollabSliceForProjectInner(project, reason, opts, uid, workspaceUserId);
+}
+
+async function _pullCollabSliceForProjectInner(
+  project: Project,
+  reason: string,
+  opts: { knownRemoteRevision?: number | null; forceMerge?: boolean } | undefined,
+  uid: string,
+  workspaceUserId: string
+): Promise<boolean> {
+  // ACL 없는 고아 프로젝트: 이미 세션 내 forbidden 확인 → skip
+  if (isCollabProjectForbidden(workspaceUserId, project.id)) return false;
+
   const remoteRev =
     opts?.knownRemoteRevision != null
       ? opts.knownRemoteRevision
@@ -2237,6 +2379,72 @@ export function unsubscribeCollabRevisionRealtime(): void {
   }
 }
 
+/** Phase 4: 소유자 프로젝트 bootstrap (op_log_complete 설정) + structure_ops Realtime 구독.
+ *  subscribeCollabRevisionRealtime 이후 호출. owner만 bootstrap 가능. */
+export async function bootstrapAndSubscribeStructureOpsRealtime(project: Project): Promise<void> {
+  if (!isSupabaseCloudConfigured() || typeof window === 'undefined') return;
+  const uid = getAuthUserId();
+  if (!uid || !project?.id?.trim()) return;
+
+  const src = project.cloud_workspace_source_user_id;
+  const pid = project.id.trim();
+
+  // Realtime 구독: member side (src가 owner uid)
+  if (src && src !== uid) {
+    subscribeStructureOpsRealtime(src, pid, (changedProjectId) => {
+      const ref = get(projects).find((p) => p.id === changedProjectId) ?? project;
+      void pullStructureOpsForProject(ref);
+    });
+    return;
+  }
+
+  // Owner side: bootstrap 실행 후 Realtime 구독
+  if (!src || src === uid) {
+    // owner의 경우 자신의 workspace_user_id = uid
+    const result = await bootstrapStructureOpsFromSnapshot(uid, pid);
+    if (import.meta.env.DEV) {
+      console.info('[bootstrapStructureOps]', pid, result);
+    }
+    // owner는 member들이 push한 ops를 Realtime으로 수신 → pull & replay
+    subscribeStructureOpsRealtime(uid, pid, (changedProjectId) => {
+      const ref = get(projects).find((p) => p.id === changedProjectId) ?? project;
+      void pullStructureOpsForProjectOwner(changedProjectId, ref);
+    });
+  }
+}
+
+/** Phase 4: owner가 member ops를 pull — src === uid 특수 경로 */
+async function pullStructureOpsForProjectOwner(projectId: string, project: Project): Promise<void> {
+  if (!isSupabaseCloudConfigured() || typeof window === 'undefined') return;
+  const uid = getAuthUserId();
+  if (!uid) return;
+
+  const since = getStructureOpsPersistAckSeq(projectId);
+  const bundle = await fetchStructureOpsSince(uid, projectId, since);
+  if (!bundle || !bundle.ops.length) return;
+
+  if (bundle.last_applied_seq > since) {
+    setStructureOpsPersistAckSeq(projectId, bundle.last_applied_seq);
+  }
+  if (bundle.op_log_complete) {
+    setOpLogComplete(projectId, true);
+  }
+
+  maybeFlushPilotBeforeCollabMerge(projectId);
+  const local = loadLocalNodesForCollabMerge(projectId);
+  const replayed = replayStructureOpsOnNodes(
+    local,
+    bundle.ops.map((row) => row.op),
+    projectId
+  );
+  recordNodeDiffToChangeLog(projectId, local, replayed);
+  upsertImportedPlannodeTreeV1(project, replayed, { openAfter: false, markDirty: false });
+  if (get(currentProject)?.id === projectId) {
+    const latest = get(projects).find((p) => p.id === projectId);
+    if (latest) selectProject(latest);
+  }
+}
+
 /** COLLAB-PERF-2 E5/E5-2 — bidirectional 전체 공유 pull 최소 간격 */
 const SHARED_FULL_PULL_COOLDOWN_MS = 60_000;
 /** interval 틱에서 나머지 공유 pull 허용 최소 idle */
@@ -2312,7 +2520,9 @@ export async function pullSharedProjectSlicesForBidirectionalSync(
   return n;
 }
 
-/** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영 */
+/** 초대(공유) 프로젝트: 소유자 워크스페이스 슬라이스가 더 최신이면 로컬에 반영.
+ * 멤버 프로젝트는 op-first 경로(`pullCollabSliceForProject`)를 우선 시도하여 LWW 스냅샷 병합에 의한
+ * 로컬-only 노드 삭제를 방지한다. op log가 변경을 커버하면 slice fetch 자체를 생략한다. */
 export async function pullSharedProjectSlicesIfNewer(
   onlyProjectIds?: readonly string[]
 ): Promise<number> {
@@ -2327,8 +2537,15 @@ export async function pullSharedProjectSlicesIfNewer(
   let n = 0;
   for (const p of get(projects)) {
     if (filter && !filter.has(p.id)) continue;
-    const changed = await mergeSharedProjectSliceFromCloudIfApplicable(p);
-    if (changed) n++;
+    const src = p.cloud_workspace_source_user_id;
+    // 멤버 프로젝트: op-first 경로로 LWW 병합 전 op replay 우선
+    if (src && src !== uid) {
+      const changed = await pullCollabSliceForProject(p, 'shared-pull-newer');
+      if (changed) n++;
+    } else {
+      const changed = await mergeSharedProjectSliceFromCloudIfApplicable(p);
+      if (changed) n++;
+    }
   }
   return n;
 }

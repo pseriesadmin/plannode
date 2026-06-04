@@ -272,10 +272,18 @@ export async function verifyProjectAccessForOpen(
   return { ok: true };
 }
 
-/** 선택 전 검사 후 selectProject — 레거시 첫 오픈 시 소유자 uid 로컬에 박지 않음(명시적 '소유자 등록'에서만) */
+/** 선택 전 검사 후 클라우드 슬라이스 fetch·병합 → selectProject.
+ * 계정(소유·공유) 무관하게 항상 DB 버전과 로컬 버전을 비교해 앞선 버전을 캔버스에 반영한다. */
 export async function trySelectProject(project: Project): Promise<{ ok: boolean; message?: string }> {
   const v = await verifyProjectAccessForOpen(project);
   if (!v.ok) return v;
+
+  // 클라우드 → 로컬 비교·병합 (소유자·멤버 공통, 클라우드 미설정 시 skip)
+  if (isSupabaseCloudConfigured()) {
+    const { pullProjectSliceBeforeOpen } = await import('$lib/supabase/sync');
+    await pullProjectSliceBeforeOpen(project);
+  }
+
   selectProject(project);
   return { ok: true };
 }

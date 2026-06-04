@@ -1396,8 +1396,13 @@ export function replayStructureOpsOnNodes(
       continue;
     }
     if (op.type === 'delete_node') {
+      // Phase 2: 소프트 삭제 — _deleted: true 마킹 (grace period 후 하드 삭제)
       const removeIds = new Set(collectSubtreeNodeIds(list, op.node_id));
-      list = list.filter((n) => !removeIds.has(n.id));
+      list = list.map((n) =>
+        removeIds.has(n.id)
+          ? { ...n, _deleted: true, _deleted_at: now }
+          : n
+      );
       continue;
     }
   }
@@ -1423,7 +1428,8 @@ export function replayStructureOpsOnNodes(
     }
   }
 
-  return list;
+  // Phase 2: _deleted 노드 필터 제거 (렌더링 제외) — add_node가 같은 배치에서 뒤따라오면 부활
+  return list.filter((n) => !(n as unknown as Record<string, unknown>)['_deleted']);
 }
 
 /**
@@ -2232,14 +2238,17 @@ export function mergeNodeListsForCloudByProjectMeta(
   remoteNodes: Node[],
   localProjectUpdatedAt: string | undefined,
   remoteProjectUpdatedAt: string | undefined,
-  projectId: string
+  projectId: string,
+  /**
+   * true(기본값): lTime >= rTime일 때 로컬 전용 구버전 노드를 remote 부재로 삭제.
+   * false: 소유자가 자신의 워크스페이스 번들을 pull할 때 — 공유계정이 push한 payload에
+   * 소유자의 미동기 로컬 노드가 없어도 삭제하지 않음(Fix-OWNER-PULL).
+   */
+  dropStaleLocalOnlyWhenRemoteNotNewer = true
 ): Node[] {
   const rTime = parseTs(remoteProjectUpdatedAt);
   const lTime = parseTs(localProjectUpdatedAt);
   const remoteIds = new Set(remoteNodes.map((x) => x.id));
-
-  const dropStaleLocalOnlyAbsentOnRemote = (list: Node[]): Node[] =>
-    list.filter((n) => remoteIds.has(n.id) || parseTs(n.updated_at) > rTime);
 
   if (rTime > lTime) {
     const recentAdds = recentAddIdsForCloudMerge(projectId);
@@ -2256,9 +2265,9 @@ export function mergeNodeListsForCloudByProjectMeta(
     );
     return mergeNodeListsForCloud(localNodes, remoteNodes, true, projectId, preserve);
   }
-  return dropStaleLocalOnlyAbsentOnRemote(
-    mergeNodeListsForCloud(localNodes, remoteNodes, false, projectId)
-  );
+  const merged = mergeNodeListsForCloud(localNodes, remoteNodes, false, projectId);
+  if (!dropStaleLocalOnlyWhenRemoteNotNewer) return merged;
+  return merged.filter((n) => remoteIds.has(n.id) || parseTs(n.updated_at) > rTime);
 }
 
 function projectBadgePoolSnapshot(p: Project): string {
@@ -2370,7 +2379,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
       remoteList,
       local?.updated_at,
       project.updated_at,
-      project.id
+      project.id,
+      false // Fix-OWNER-PULL: 소유자 번들 pull — 공유계정 push 누락 노드 보존
     );
     const keepSrc = local?.cloud_workspace_source_user_id ?? project.cloud_workspace_source_user_id;
 
