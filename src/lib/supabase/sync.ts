@@ -553,7 +553,10 @@ export function setCachedCollabRevision(workspaceUserId: string, projectId: stri
   collabRevisionCache.set(collabRevisionCacheKey(workspaceUserId, projectId), revision);
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function fetchCollabRevision(workspaceUserId: string, projectId: string): Promise<number | null> {
+  if (!workspaceUserId || !UUID_REGEX.test(workspaceUserId)) return null;
   if (isCollabProjectForbidden(workspaceUserId, projectId)) return null;
   const { data, error } = await supabase.rpc('plannode_project_collab_get_revision', {
     p_workspace_user_id: workspaceUserId,
@@ -562,6 +565,9 @@ async function fetchCollabRevision(workspaceUserId: string, projectId: string): 
   if (error) {
     if (isCollabRevisionRpcForbidden(error)) {
       // ACL 없는 고아 프로젝트: 세션 단위 차단 (매 6초 403 폭탄 방지)
+      markCollabProjectForbidden(workspaceUserId, projectId);
+    } else if (error.code === 'PGRST202' || (error as { status?: number }).status === 400) {
+      // 파라미터 타입 불일치(uuid 형식 오류 등): 세션 단위 차단
       markCollabProjectForbidden(workspaceUserId, projectId);
     } else if (!isCollabRevisionRpcMissing(error) && import.meta.env.DEV) {
       console.warn('[fetchCollabRevision]', projectId, error.message);
@@ -736,7 +742,7 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
       // structure ops 경로: atomic RPC 진입 전에도 동일하게 처리
       let baseRevision: number | null = revisionHintFromStale;
       if (baseRevision === null && !revisionStaleNotifiedThisPush && _mergeAtomicUnsupported
-          && !isCollabProjectForbidden(src, p.id)) {
+          && UUID_REGEX.test(src) && !isCollabProjectForbidden(src, p.id)) {
         const { data: revData, error: revErr } = await supabase.rpc('plannode_project_collab_get_revision', {
           p_workspace_user_id: src,
           p_project_id: p.id
@@ -745,7 +751,7 @@ async function pushProjectSlicesToOwners(bundle: WorkspaceBundle, userId: string
           const rn = rpcBigintToNumber(revData);
           if (rn !== null) baseRevision = rn;
         } else {
-          if (isCollabRevisionRpcForbidden(revErr)) {
+          if (isCollabRevisionRpcForbidden(revErr) || (revErr as { status?: number }).status === 400) {
             markCollabProjectForbidden(src, p.id);
           } else if (!isCollabRevisionRpcMissing(revErr) && import.meta.env.DEV) {
             console.warn('[pushProjectSlicesToOwners] plannode_project_collab_get_revision', revErr.message);
@@ -1347,6 +1353,68 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
     if (ref) currentProject.set(ref);
   }
   return true;
+}
+
+/**
+ * 프로젝트 오픈 시 클라우드 슬라이스를 강제 fetch → 로컬과 버전 비교 후 앞선 버전 병합.
+ * - 소유자 프로젝트: fetchProjectSliceFromCloud(uid, projectId) → mergeNodeListsForCloudByProjectMeta
+ * - 멤버 프로젝트: mergeSharedProjectSliceFromCloudIfApplicable (기존 경로)
+ * selectProject 호출 직전에 await하여 최신 노드를 localStorage에 반영한다.
+ */
+export async function pullProjectSliceBeforeOpen(project: Project): Promise<void> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return;
+  const uid = getAuthUserId();
+  if (!uid) return;
+
+  const src = project.cloud_workspace_source_user_id;
+  if (src && src !== uid) {
+    // 멤버 프로젝트: 기존 경로
+    await mergeSharedProjectSliceFromCloudIfApplicable(project);
+    return;
+  }
+
+  // 소유자 프로젝트: 자신의 워크스페이스에서 이 프로젝트 슬라이스만 fetch·비교
+  const localRef = get(projects).find((p) => p.id === project.id) ?? project;
+  if (getDeletedProjectTombstoneIds().has(localRef.id)) return;
+
+  maybeFlushPilotBeforeCollabMerge(localRef.id);
+  const slice = await fetchProjectSliceFromCloud(uid, localRef.id);
+  if (!slice) return;
+
+  const parseTs = (iso: string | undefined): number => {
+    const t = Date.parse(String(iso ?? ''));
+    return Number.isFinite(t) ? t : 0;
+  };
+
+  const preMergeLocal = loadLocalNodesForCollabMerge(localRef.id);
+  const remoteHash = projectWorkspaceNodesJsonSnapshot(slice.nodes);
+  const localHash = projectWorkspaceNodesJsonSnapshot(preMergeLocal);
+  if (remoteHash === localHash) return;
+
+  const rTime = parseTs(slice.project.updated_at);
+  const lTime = parseTs(localRef.updated_at);
+  const remoteMetaNewer = rTime > lTime;
+
+  const mergedNodes = mergeNodeListsForCloudByProjectMeta(
+    preMergeLocal,
+    slice.nodes,
+    localRef.updated_at,
+    slice.project.updated_at,
+    localRef.id,
+    false // 소유자 로컬 전용 노드 보존
+  );
+  const mergedProject = mergeProjectMetaForCloudSync(
+    reconcileProjectRecord({ ...localRef }),
+    reconcileProjectRecord({ ...slice.project })
+  );
+
+  upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
+    openAfter: false,
+    markDirty: false,
+    preserveRemoteUpdatedAt: remoteMetaNewer
+  });
+
+  // OWN_WORKSPACE_REMOTE_TS_KEY는 덮어쓰지 않음 — 전체 번들 pull 타이밍과 독립
 }
 
 const ENSURE_SLICE_BUSY_POLL_MS = 500;
