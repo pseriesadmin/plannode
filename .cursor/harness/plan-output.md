@@ -1,19 +1,40 @@
 # plan-output.md — Plannode Harness Flow
 # 경로: `.cursor/harness/plan-output.md`
-# 생성: @promptor Step2 | 2026-05-13 KST
-# GATE A 수정: 2026-05-13 — 캔버스 하단 **update** 시각 표시·히스토리 정합·**프로젝트별 누적 저장** 원칙 명시 · 2026-05-14 — **`update` 표시 타임존 Asia/Seoul(한국 시각)** 확정(NOW-HIST-03)
-# 소스 아젠다: 채팅 — (1) 프로젝트·공유 프로젝트 **히스토리 로그 강화 + 클라우드 동기** (2) **부모 노드카드 하위 자식 수 배지 UI** (목업 스펙) + **(3) 하단 update 라벨**
+# 생성: @promptor Step2 | 2026-05-23 KST
+# 소스 아젠다: `/Users/stevenmac/.cursor/plans/prd_llm_섹션_보강_5387c338.plan.md`
+# 선행 EPIC: P2-B ☑ · P2-B2 ☑ (GATE E 2026-05-22) — `generationPipeline`·L1~L4·`/api/ai/messages`
 # 역할: 코드·커밋 없음 — GATE A 승인 후 Step3(TASK.md) 진행
 
 ---
 
-## 아젠다 요약
+## P-13. EPIC PRD-LLM-SEC — PRD v2.0 섹션별 LLM 보강 (Step2 @promptor)
 
-1. **히스토리 강화:** 기존 **히스토리** 메뉴(로그 목록)에, 저장·동기화 시점마다 항목을 **누적(append)** 한다. **제품 원칙(강조):** 프로젝트마다 히스토리는 **이전 항목을 덮어쓰지 않고**, 각 저장 시점의 **최종(마지막) 저장 정보**가 담긴 **새 항목**이 계속 쌓인다(목록만 보는 사용자는 시간순 전체 기록을 본다). 항목에 포함할 메타(아젠다 문구): **최종 업데이트된 노드 개수**(또는 해당 시점 트리의 변경 요약), **파이프라인 설명**(동기/저장 경로에 대한 사람이 읽을 수 있는 이유·단계 라벨로 해석 권장 — PRD **§10 LLM 4-레이어**와 혼동 금지, 아래 P-4.5), **최후 버전 숫자**, **마지막 작성자**, **저장 시각**. **공유 프로젝트 포함** 동일 프로젝트 단위로 언제든 조회 가능해야 하며, **클라우드에 함께 저장**한다. **하단 `update` 라벨과 동일 시각·동일 의미**가 해당 프로젝트 히스토리 목록의 **해당(최신) 항목**에 **정확히** 반영되어야 한다(단일 소스 또는 동기 검증 — 아래 P-3).
-2. **캔버스 하단 `update` 표시(GATE A 추가):** 프로젝트가 열린 편집 상태에서, 하단 **저장** 알림(동기/저장 배지·토스트 인근 UI) **좌측**에 `update 0000.00.00 / 00:00` 형식으로 **현재 반영된(저장·동기 완료 기준) 날짜·시간**을 노출한다. 표기는 **년.월.일 / 시:분**; **표시 타임존은 Asia/Seoul(한국 시각)** — 스냅의 `at`는 ISO(순간)로 저장하고 화면에서만 변환한다(GATE B 실행 반영, 2026-05-14). 이 값은 **히스토리에 기록된 최신 저장 시각**과 **불일치 없이** 맞춘다.
-3. **자식 노드 수 배지:** 캔버스 **상위 부모 노드카드** 우측 상단에 **직계·전체 하위**(아젠다는 “하위 자식 노드카드 합계” — Step3에서 직계 vs 전체 후손 **택일** GATE B 확정) 개수를 원형 배지로 표시. 시각 스펙(구현 시 **요청된 파일·섹션만** — 전역·무관 컴포넌트·파일럿 DOM **id** 변경 금지, `plannode-core`·`plannode-web` 준수):
-   - `width`/`height` **40px**, `position: absolute`, `right: 20px`, `top: -20px`, 배경 **`#E6E4FF`**
-   - 숫자: `color: var(--gray-100, #333)`, `text-align: center`, **Pretendard**, **16px**, **font-weight 600**, `line-height: 150%`, `letter-spacing: 0.16px`
+**생성:** 2026-05-23 KST  
+**소스 아젠다:** `.cursor/plans/prd_llm_섹션_보강_5387c338.plan.md`  
+**상태:** **GATE A ☑** Stephen 2026-05-23 · **GATE B** 👤 NOW 확정 대기  
+**선행:** EPIC P2-B2 ☑ (`generationPipeline.ts`·`domainDictionary.ts`·GATE E 2026-05-22)  
+**PRD:** M2 **F2-5** · §10 **LAYER1~3** · M4 **F4-2** · Phase **2**
+
+### P-13.0. 한 줄 요약
+
+**목표:** PRD 탭 **s1~s5** 각 섹션에 P2-B2에서 이미 동작하는 **3-stage LLM 파이프**(`runGenerationPipeline` + L1~L4 + `/api/ai/messages`)를 **일반화**한다. UX는 s1과 동일 — **미리보기 → 「반영」** 후 `prd_section_drafts` 저장 → **BPR**(`buildPrdMarkdownMerged`) 다운로드에 즉시 반영. 결정적 초안(`buildPrdMarkdownV20`)·BPR 자동 LLM 대체는 **하지 않음**.
+
+**IA vs LLM (필수):** 본 EPIC은 **F2-5 LLM 기획문서 품질**(§10) 축 — PRD 탭 **마크다운 섹션 문장·누락 보강**이다. **F2-4 IA/와이어 구조 산출**·트리→템플릿 MD와 **혼동 금지**; LLM은 v2.0 **해당 섹션 헤딩·경계를 유지**하고 내용만 보강(PRD §10.4·Part IV 정합).
+
+### P-1. 컨텍스트 로드 (요지)
+
+- **AGENTS.md:** GP-13 트리뷰 보호 · GP-12 경량화·신규 `lib/` 모듈 억제 · GP-7 명시 범위만.
+- **plannode-prd.mdc:** F2-5 · §10 LAYER1~3 · M4 F4-2 PRD 내보내기 · Phase 2.
+- **GSD_LOG.md:** P2-B2 GATE E ☑ 2026-05-22 — `contextSerializer`·`domainDictionary`·`generationPipeline`·`aiGenerations.ts`.
+- **아젠다 정본:** `prd_llm_섹션_보강_5387c338.plan.md`
+- **로드맵 교차:** `.cursor/plans/plannode_llm_phase2.md` Part V — B2-02 `getLatestGeneration` 등 **본 EPIC 제외·BACKLOG**.
+- **코드 확인 (2026-05-23):**
+  - `+page.svelte` — **s1만** `runPrdS1AiEnhance`·헤더 「s1 AI 보강」·`prdS1AiBusy`/`showPrdS1AiModal` 전용 상태.
+  - s1 러너는 `buildPrompt` + 인라인 `[TARGET_SECTION]` — **`buildPrdL1CoreSummaryPrompt`·`injectDomainContext` 경로와 미정합**(Phase 1에서 통합).
+  - `prdStandardV20.ts` — `buildPrdL1CoreSummaryPrompt`(s1 L1+TARGET) · `getPrdAutoSections` · `PrdSectionKey` s1~s5 · **`PRD_SECTION_ENHANCE_META`·`buildPrdSectionEnhanceUserPrompt` 없음**.
+  - `projects.ts` — `updateProjectPrdSectionDraft` · `Project.prd_section_drafts` **섹션 공통** 이미 존재.
+  - `plannodePilot.js` — `#BPR` → `buildPrdMarkdownMerged(drafts)` · 변경 **불필요**.
+  - `insertAiGenerationL5` — AI 탭 PRD만 저장 · **PRD 탭 s1 보강은 미저장**(Phase 4 선택).
 
 ---
 
@@ -21,82 +42,126 @@
 
 **기본모드**
 
-- **복수 목적:** 히스토리 **데이터 모델·클라우드 반영**·**하단 `update` 시각(히스토리 최신 행과 정합)** + 파일럿 **노드카드 DOM/CSS** 동시.
-- **다파일 연쇄 예상:** `nodeSnapshotHistory.ts`(또는 동일 축 스토어), `+page.svelte`(히스토리 UI·**하단 `update` 라벨·저장/동기 배지 행**), `sync.ts` / `workspacePush.ts` / 번들 조립(`gatherWorkspaceBundle` 등), 필요 시 **`docs/supabase/` 신규 마이그레이션**(GP-4: 기존 SQL 수정 금지), **`plannodePilot.js`**(노드카드 렌더·스타일 일부).
-- **DB·RLS 가능성:** 히스토리만 번들 JSON에 넣을지, 별도 테이블·RLS 할지 — **GATE B 전 결정**.
-
-> 단일 파일만으로 끝나지 않음. 경량 단축은 **배지만** 1차 NOW로 분리할 때만 부분 적용(히스토리는 기본모드 유지).
+- §10 **LAYER1~3** 재사용 + `prdStandardV20.ts` 확장 + `+page.svelte` PRD 탭 UI·오케스트레이션 **2~3파일 연쇄**.
+- PRD Phase 2 **F2-5·F4-2** — **경량모드 아님**.
+- Vitest 1파일(`prdStandardV20.test.ts`) 추가 — GP-12 범위 내(아젠다 명시).
 
 ---
 
 ## P-3. 범위 정의
 
-**포함 (이번 사이클에서 설계·구현 후보):**
+**포함 (GATE B 후 NOW만):**
 
-- **히스토리:** 기존 UI 진입점(캔버스 하단·드롭다운 등 **현행 “히스토리” 메뉴**)에 **추가 메타가 담긴 로그 행** 표시; 트리거 후보 — `persistNodesFromPilot`, 클라우드 플러시 성공, 공유 merge 완료, 수동 스냅 등(Step3에서 목록화). **마지막 작성자**는 Supabase Auth 세션 이메일·표시명 등 **기존에 쓰는 식별자**로 제한(GP-9 준수). **누적 정책:** 동일 `projectId`에 대해 **기존 히스토리 행 삭제·치환 없이 append**; merge·LWW로 인한 **원격 덮어쓰기가 히스토리 스트림까지 지우지 않도록** 설계(충돌 시 GATE B에서 “소유자 행 vs 로컬 링” 규칙 명시).
-- **하단 `update` 라벨:** `+page.svelte`(또는 하단 캔버스 툴바를 담당하는 **기존 섹션만**)에서 저장 배지 **좌측**에 고정 또는 갱신 가능한 텍스트; 표시 시각은 **히스토리 최신 항목의 타임스탬프와 동일 필드**에서 파생해 **표시·저장 불일치 버그**를 막는다. **표시는 Asia/Seoul(한국 시각)**; 원본 `at`는 ISO.
-- **클라우드:** 공유·소유 동일 `projectId` 기준으로 **원격에서도 동일 목록을 읽을 수 있게** — 번들(`plannode_workspace` JSON) 확장 vs **프로젝트/워크스페이스 메타 전용 필드** vs 신규 테이블 — **한 축으로 정하되** AGENTS **GP-12·P-6.5**로 최소 스키마.
-- **배지:** 부모 노드 렌더 경로에 자식 수 표시; **레이아웃·z-index**가 간선·미니맵·`.view` 전환을 가리지 않게(GP-13).
+1. **Phase 1 — 섹션 보강 코어** — `src/lib/prdStandardV20.ts` **단일 파일 확장**(신규 `prd*.ts` 5파일 **금지**):
+   - `PRD_SECTION_ENHANCE_META` — s1~s5 제목·LLM 지시·maxTokens 힌트.
+   - `buildPrdSectionEnhanceUserPrompt(section, project, nodes, currentDraft)` — L1 `buildContextFromNodes` → `serializeToPrompt` → `injectDomainContext` + `[TARGET_SECTION]` + draft|auto baseline.
+   - s1은 기존 `buildPrdL1CoreSummaryPrompt` **위임·중복 제거**.
+   - `getPrdSectionAutoBaseline` — `getPrdAutoSections` thin wrapper.
+   - **Vitest** `prdStandardV20.test.ts` — TARGET_SECTION·L1 블록·draft 반영 2~3건.
 
-**제외 (이번 아젠다에 없으면 포함 금지):**
+2. **Phase 2 — PRD 탭 러너 일반화** — `src/routes/+page.svelte`:
+   - `runPrdSectionAiEnhance(sec: PrdSectionKey)` — s1 함수 **대체·통합**.
+   - 상태: `prdSectionAiBusy` · `prdSectionAiModal: { sec, preview } | null`.
+   - `applyPrdSectionAiPreview(sec)` / 취소 — 기존 s1 apply 패턴.
+   - 헤더 「s1 AI 보강」**제거** → 각 `PRD_BLOCKS` 툴바에 「AI 보강」(s1~s5 동일).
+   - 단일 미리보기 모달 — `{sec}` 제목·aria 동적.
 
-- PRD **F2-4(IA/와이어)**·**F2-5·§10 LLM** 파이프라인 본구현·`ai_generations` 테이블 — 히스토리의 “파이프라인 설명”은 **동기/저장 단계 라벨**로 한정(아래 P-4.5).
-- **전역 테마·폰트 로드 방식 전면 변경**, 파일럿 **id·와이어 싱크 버튼 id** 변경.
-- 히스토리 **무제한 성장**으로 번들 폭주 — 상한·링 버퍼·오래된 항목 정리는 **포함하되** 설계 단계에서 정책 명시.
+3. **Phase 3 — L2·파이프 미세 조정 (필요 최소):**
+   - `promptMatrix.ts` — `PRD` system **한 줄** (TARGET_SECTION 헤딩 유지·v2.0 경계 변경 금지). **섹션별 system 분기 없음**(YAGNI).
+   - `generationPipeline.ts` — 장문(s2 등) **maxTokens override 옵션 1개** (기본값 유지).
+
+4. **Phase 4 — (선택·GATE C 후 Stephen 승인)** — `applyPrdSectionAiPreview` 성공 시 `insertAiGenerationL5` · `source: 'prd-tab'` · `planProjectId` UUID 가드.
+
+5. **GATE C** — s1~s5 보강·BPR·노드 초안 복귀·L1 거부·`npm run test`·`npm run build`·트리↔PRD↔AI 뷰 회귀.
+
+**제외 (명시 · GP-7·GP-12):**
+
+| 제외 | 이유 |
+|------|------|
+| CRAZYSHOT v1.6 §0~§15·신규 PRD 템플릿 | 아젠다 비목표 |
+| `buildPrdMarkdownV20` / BPR **자동 LLM 대체** | Track A 결정적 초안 유지 |
+| AI 탭 PRD UX·`triggerAI` 리팩터 | 이미 3-stage 동작 |
+| **`getLatestGeneration` UI** (B2-02) | BACKLOG |
+| LLM 완료 시 draft **자동 저장** | Stephen 선택: preview_manual |
+| **F2-4 IA/와이어** 템플릿·`#V-IA` | P2-A ☑ · 무관 |
+| **`plannodePilot.js` 캔버스** (`#V-TREE`·`render`·드래그) | GP-13 — PRD 뷰만 |
+| **`sync.ts`·협업·Presence** | 무관 |
+| **§11 path·`plan_nodes` 정규화** | H1 BACKLOG |
+| **신규 `src/lib/ai/prd*.ts` 등 래퍼 모듈** | GP-12 — `prdStandardV20.ts` 확장만 |
 
 **트리뷰 보호 (GP-13, 필수):**
 
-- 노드카드 배지 추가가 **선택·드래그·간선 `drawEdges`·`render()` 타이밍**을 깨지 않게; 변경 후 `npm run build` + 트리 기본 시나리오(GATE C).
+- `#V-PRD`·`.view`·PRD 섹션 CSS만 수정 — **`z-index`·`overflow`·전역 CSS**가 `#V-TREE`·`.view.active`를 가리지 않게 GATE C **트리↔PRD↔AI 1회** 명시. `plannodePilot.js` **기본 무수정**.
 
-**참고 파일 (읽기·구현 시, 비한정):**
+**편집·저장 귀속 (P-4.5):**
 
-- `src/lib/stores/nodeSnapshotHistory.ts` — 현행 **로컬 링 스냅샷**, `StoredNodeSnapshot` 필드 확장 vs **별도 “감사 로그”** 분리 검토.
-- `src/routes/+page.svelte` — 히스토리 UI·하단 **저장/동기 배지** 행·**`update` 라벨(저장 알림 좌측)**·토스트·Presence 연동 구간.
-- `src/lib/supabase/sync.ts`, `workspacePush.ts`, `gatherWorkspaceBundle`(스토어/클라이언트) — 번들에 히스토리 포함 시 병합·LWW 영향.
-- `src/lib/pilot/plannodePilot.js` — 노드카드 DOM 생성·클래스; **id 계약 유지**.
-- `.cursor/rules/plannode-ui-identity.mdc` — 배지·레이어·타이포와 충돌 시 조정(Primary 등은 이번 배지 색 `#E6E4FF`가 별도이므로 **로컬 스코프 스타일** 우선).
-- `docs/PILOT_FUNCTIONAL_SPEC.md` §9(갭)·§10(히스토리·협업 후 루트 유지).
+- **트리 SSoT:** `nodes[]` — L1 입력·앵커 노드(`resolveContextAnchorNodeId`).
+- **PRD 섹션 편집·LLM 반영:** `Project.prd_section_drafts` + `updateProjectPrdSectionDraft` — **LLM 결과는 draft에만** 기록(GP-13·아젠다 SSoT). BPR은 `buildPrdMarkdownMerged`가 draft 우선.
+- **§11 `ai_generations`:** Phase 4 선택 시 **스냅샷 영속**만; 트리·draft 자동 덮어쓰기 **없음**.
+
+**참고 파일:**
+
+| 경로 | 이유 |
+|------|------|
+| `src/lib/prdStandardV20.ts` | v2.0 MD·s1 L1·**Phase 1 확장 정본** |
+| `src/routes/+page.svelte` | `PRD_BLOCKS`·draft·s1 러너·모달 |
+| `src/lib/ai/generationPipeline.ts` | 3-stage · `createAnthropicMessagesCaller` |
+| `src/lib/ai/iaExporter.ts` | `buildPrompt` |
+| `src/lib/ai/contextSerializer.ts` | L1 · `isLayer1ContextSufficient` |
+| `src/lib/ai/promptMatrix.ts` | L2 PRD system (Phase 3 선택) |
+| `src/lib/ai/domainDictionary.ts` | L4 `injectDomainContext` |
+| `src/lib/stores/projects.ts` | `updateProjectPrdSectionDraft` |
+| `src/lib/supabase/aiGenerations.ts` | Phase 4 `insertAiGenerationL5` |
+| `src/routes/api/ai/messages/+server.ts` | API 계약 유지 |
+| `src/lib/pilot/plannodePilot.js` | `#BPR`·`buildPrdMarkdownMerged` (회귀만) |
+| `.cursor/plans/plannode_llm_phase2.md` | Part V BACKLOG |
+| `.cursor/rules/plannode-ui-identity.mdc` | PRD 탭·모달 톤·버튼 |
+| `docs/plannode_llm_f25_context.md` | F2-5 vs F2-4 · L1 필수 |
 
 ---
 
 ## P-3.5. v4 보기·출력 정본 동기
 
-**P-3.5 해당 없음** — `OutputIntent`·IA 그리드·내보내기·v4 **§4.0**와 무관.
+- **내부 `OutputIntent`:** PRD 탭 보강은 **`PRD`** 단일 intent — AI 탭 5버튼·`AI_INTENT_BY_TYPE`과 **별 경로**(PRD draft vs AI 뷰 표시).
+- **사용자 라벨:** 섹션 툴바 **「AI 보강」** — v4 §4.0 「AI 분석(LLM)」= F2-5와 정합; **IA 탭 「구조보내기」와 혼동 금지**.
+- **「노드」라벨:** 「노드 초안으로」= `getPrdAutoSections` 결정적 초안 복귀 — LLM 전 상태(§4.0.1 캔버스 「노드」와 무관).
+- **M2 ID:** 본 EPIC은 **PRD 탭 섹션 LLM** — `M2-EXPORT-XLSX`·IA 그리드 **해당 없음**.
 
 ---
 
 ## P-4. 파일럿 갭 연관성 체크
 
-출처: `docs/PILOT_FUNCTIONAL_SPEC.md` §9·§10
+출처: `docs/PILOT_FUNCTIONAL_SPEC.md` §7·§9, §10 갭 표
 
 ```
 관련 갭 항목:
-□ [노드카드·캔버스] — 파일럿: `.nw` 등 노드 래퍼·렌더 | SvelteKit: 파일럿이 단일 트리 UI | 리스크: 배지 `position`·크기가 **클릭 영역·핸들**과 겹치면 편집 UX 저하 → hit-test·pointer-events 검토
-□ [스토어·SSoT] — 히스토리 메타는 **트리 SSoT를 복제하지 않는** 보조 레코드로 유지(nodeSnapshotHistory 주석 방향과 정합)
-□ [§10 체크리스트] — 히스토리 캡처·클라우드 머지 후에도 **루트 1개·트리↔탭 동기** 회귀
-□ [하단 툴바·동기 UI] — `update` 라벨이 저장 배지와 **겹침·가독성·모바일 줄바꿈**을 해치지 않게; 레이아웃만 바꿀 때도 GP-13·`plannode-ui-identity` 와 충돌 검토
+□ [포팅갭-7 PRD/Spec 탭] — 파일럿: render 후 buildPRD 동기 | Svelte: #V-PRD·PRD_BLOCKS·draft | 리스크: 🟡 PRD 뷰 CSS·.view 전환만 — 캔버스 미침범 전제
+□ [PRD/Spec 데이터 동기] — 파일럿: nodes 변경 시 updPRD | Svelte: prdAuto·draft 별도 | 리스크: 🟡 LLM은 draft만 — 트리 nodes 직접 수정 금지(SSoT 유지)
+□ [BPR 다운로드] — 파일럿 #BPR buildPrdMarkdownMerged | 변경 없음 | 리스크: 🟢 회귀 확인만
 
-이번 아젠다는 §9 표의 **transform/SVG 형제** 항목과 직접 무관할 수 있으나, **노드카드 DOM 변경** 시 §9 첫 줄(줌·좌표계) 회귀는 GATE C에 한 줄.
+직접 무관: 포팅갭-1~6 캔버스 transform·addChild·줌 — plannodePilot.js 미수정 전제
 ```
 
 ---
 
 ## P-4.5. PRD 연계 (plannode-prd.mdc)
 
-| 매핑 | 설명 |
-|------|------|
-| **M3 · F3-1** | localStorage — 현행 히스토리 일부가 로컬만; 확장 시 용량·키 정책. |
-| **M3 · F3-2** | Supabase — 히스토리 **클라우드 저장**은 본 아젠다 핵심; RLS·공유자 읽기는 ACL·번들 규칙과 정합. |
-| **M3 · F3-3** | 스냅샷/버전 **Phase 2** — 본 히스토리 강화는 F3-3 방향과 정합; **완전 버전 diff UI**까지는 GATE B에서 범위 확정. |
-| **M1 · F1-1 / F1-2** | 노드 카드·캔버스 — 자식 수 배지. |
-| **M5** | 공유 프로젝트 포함 **동일 프로젝트 단위** 기록·조회. |
-| **§6 로드맵** | F3-3·협업 고도화 구간과 겹침; MVP만 고수한다면 **클라우드 히스토리 최소 스키마**만 편입하고 나머지는 제외에 명시. |
+| PRD | 본 EPIC |
+|-----|---------|
+| **M2 · F2-5** LLM/AI 분석 | ☑ — PRD 탭 섹션별 3-stage 보강 |
+| **§10.2 LAYER1** | ☑ — `serializeToPrompt`·`injectDomainContext` 필수 |
+| **§10.2 LAYER2** | ☑ — `promptMatrix` PRD system (Phase 3 한 줄) |
+| **§10.3 LAYER3** | ☑ — `runGenerationPipeline` skeleton→deepen→validate (**P2-B2 ☑ 재사용**) |
+| **§10.4 IA 보조 LLM** | — — **구조는 v2.0 섹션 고정**, LLM은 문장·누락만 |
+| **§10.5 UX** | ☑ — 미리보기→수동 반영; `getLatestGeneration` **제외** |
+| **M4 · F4-2** PRD MD 내보내기 | ☑ — BPR·draft merge 경로 유지 |
+| **M2 · F2-4** · **M4 F4-3/4-4** | **변경 없음** (P2-A ☑) |
+| **§11** `ai_generations` | ☐ Phase 4 **선택** |
+| **§6 Phase 2** | ☑ — F2-5 LLM 강화 연장(P2-B2 후속 UX) |
 
-**IA vs LLM:** 본 작업은 **F2-4(정보 구조)·F2-5·§10 LLM 출력 품질**과 축이 다름. 히스토리 필드명 **“파이프라인 설명”**은 **저장/동기 파이프 단계**(예: manual, pre_pull, workspace_flush, merge_remote)의 **사람 읽는 라벨**로 정의하고, §10의 Skeleton/Deepen/Validate와 **동일어 사용을 피함**(혼동 방지).
+**Phase:** PRD §6 Phase 2 **F2-5·F4-2** 범위 — MVP·Phase 3+ L4 도메인 사전 **전면·path DB**는 제외.
 
-**편집·저장 귀속:** 트리 SSoT는 기존대로 **파일럿↔스토어↔`nodes`**; 히스토리는 **부가 로그**로만 추가하고, **둘째 진실 소스**가 되지 않게 한다(P-4.5 택일: 로그는 복원용 보조일 뿐, 단일 복원 경로는 Step3에서 명시). **GATE A(수정):** 프로젝트별 히스토리는 **append-only 누적**; 하단 **`update`에 보이는 시각**은 **히스토리 최신 행의 `at`(또는 동일 의미 필드)**와 **항상 같은 값**에서만 파생(이중 계산·별도 타이머 금지 권장).
-
-**충돌·권장:** `nodeSnapshotHistory`가 “로컬 전용”으로 기술되어 있으면, 클라우드 확장 시 **주석·GATE B**에서 “로컬 링 + 서버 병합” 또는 “서버 단일 소스” 중 하나로 문서 정합.
+**충돌 정리:** PRD §10 「`content`만 API 금지」— P2-B/B2로 AI 탭은 복구됨; **PRD 탭 s1은 L1 일부만**(`buildPrompt` 경로) — Phase 1에서 **`buildPrdL1CoreSummaryPrompt`와 동일 L1+L4 계약**으로 정합. P2-A IA 템플릿과 **공존**(PRD draft ≠ IA MD).
 
 ---
 
@@ -104,76 +169,119 @@
 
 | # | 위험 | 수준 | 대응 |
 |---|------|------|------|
-| 1 | 번들 JSON에 히스토리 무한 증가 → 업로드 실패·비용 | 🔴 | 항목 상한·링·오래된 항목 삭제; 필요 시 별도 테이블 |
-| 2 | 공유자·소유자 **히스토리 소스 불일치**(merge LWW) | 🔴 | 프로젝트 단위 단일 스트림인지, per-user인지 GATE B 결정 |
-| 3 | “업데이트 노드 개수” 정의 모호(변경 노드 수 vs 전체 노드 수) | 🟠 | 스펙 1문장 확정 |
-| 4 | 자식 수 계산을 `render`마다 전수 순회 | 🟠 | 부모별 캐시·맵 또는 파일럿 내부 자료구조 1회 갱신 |
-| 5 | 배지 `.nw` 밖 시각으로 **클릭·간선** 간섭 | 🟠 | z-index·pointer-events·GP-13 수동 확인 |
-| 6 | 신규 DB 마이그레이션·RLS 오설정(GP-4) | 🔴 | 스테이징에서 ACL 매트릭스 검증 |
-| 7 | 하단 `update` 표시와 히스토리 최신 행 **타임스탬프 불일치**(저장 실패·비동기 경합) | 🔴 | 단일 필드 파생·저장 성공 콜백 후에만 갱신 등 Step3에서 규칙화 |
+| 1 | s2 장문 → 토큰 초과·잘림 | 🟠 | Phase 3 maxTokens override · validate `[GAP]` 표시(기존) |
+| 2 | LLM이 v2.0 `##`/`###` 헤딩·섹션 경계 파괴 | 🔴 | TARGET_SECTION 지시 + system 한 줄 + **미리보기 필수** |
+| 3 | s1 `buildPrompt` vs `buildPrdL1CoreSummaryPrompt` **L1 불일치** | 🟠 | Phase 1 단일 `buildPrdSectionEnhanceUserPrompt` |
+| 4 | `+page.svelte` 비대·인라인 중복 | 🟠 | prompt 로직 → `prdStandardV20.ts`; UI만 셸 |
+| 5 | 섹션 1회 = API **3회** · s5까지 최대 15회 | 🟡 | UX 힌트·BACKLOG 일괄 보강 |
+| 6 | PRD `.view` CSS가 트리 가림 | 🟠 | `plannode-ui-identity` · GATE C 뷰 전환 |
+| 7 | 로컬 projectId vs plan UUID — insert 실패 | 🟡 | Phase 4 optional · enhance는 로그인+클라우드만 |
 
 ---
 
-## P-6. Step3 지침 (Plan Mode / TASK.md용)
+## P-6. Step3 지침 (Plan Mode용)
 
 ```
-태스크 크기: GP-5 — 히스토리(데이터+sync)·**하단 `update` 라벨(+page 하단 기존 행)**·배지(UI)를 NOW 분리 권장; 각 NOW 30분 근방·파일 수 최소화
-PRD 추적: TASK.md `현재 아젠다` + 각 NOW에 M3 F3-1 F3-2 F3-3 · M1 F1-1 · M5 한 줄씩(해당만)
-주의 영역: plannode_workspace 병합·공유 슬라이스·nodeSnapshotHistory·파일럿 render·GP-4 신규 SQL만
-파일럿 갭: §9 노드카드·§10 히스토리 후 루트/동기 — 회귀 한 줄
-의존 순서: 히스토리 **저장 단위**(로컬 스키마) 합의 → **최신 `at` 단일 소스** → 하단 `update` 라벨 바인딩 → 클라우드 반영 경로 → 히스토리 UI 목록; 배지는 파일럿 자식 수 API 합의 후 DOM
-GATE B 조건: “파이프라인 설명” 용어집 · 직계 vs 전체 하손 개수 · 클라우드 저장 위치(번들 vs 테이블) · **`update` 문자열 형식(구분자·0패딩)·표시 타임존 Asia/Seoul(한국 시각)** · append-only 히스토리가 **번들 merge 시 덮어쓰이지 않는지** 예외 시나리오
+태스크 크기: GSD 30분 이내, 단일 파일 원칙
+PRD 추적: TASK.md 각 NOW에 M2 F2-5 · §10 · M4 F4-2 1줄씩
+의존 순서:
+  NOW-PRD-01 (prdStandardV20 + test) →
+  NOW-PRD-02 (+page runPrdSectionAiEnhance + 모달) →
+  NOW-PRD-03 (+page s2~s5 버튼·힌트·aria) →
+  (선택 GATE C 후) NOW-PRD-04 insertAiGenerationL5 →
+  NOW-PRD-05 GATE C
+
+주의 영역:
+  - L1 거부·클라우드 가드 — AI 탭·s1과 동일 패턴 유지
+  - draft 저장 — updateProjectPrdSectionDraft; nodes persist 경로 **우회 금지**
+  - promptMatrix/generationPipeline 변경은 **최소 diff** (Phase 3)
+파일럿 갭: §7 PRD 탭 — pilot buildPRD 미변경; BPR 회귀만
+PRD v2: P2-B2 파이프 **재사용** — generationPipeline 신규 작성 금지
 ```
 
-**디자인 시스템:** 이번 배지는 **지정 hex·Pretendard** 우선; 전역 토큰과 어긋나면 **해당 노드카드 범위 한정** 스타일로 `plannode-ui-identity.mdc` 와 충돌 여부만 Step3에서 확인.
+**디자인 시스템 (UI):** Step3·@harness-executor에 **`.cursor/rules/plannode-ui-identity.mdc`** 를 PRD 탭·모달·「AI 보강」버튼 **유일 UI 참조**로 명시.
 
 ---
 
-## P-6.5. 오버 엔지니어링·기술부채 지양
+## P-6.5. 오버 엔지니어링·기술부채·YAGNI
 
-- PRD **§10 4-레이어·§11 `ai_generations`** 를 히스토리에 끌어오지 않음 — **명칭 분리**.
-- **범용 감사 프레임워크·새 lib 래퍼** 금지 우선; `nodeSnapshotHistory`·번들 필드 **확장**으로 수용 가능한지 먼저 판단.
-- 프로덕션 잡음 로그·무근거 `any`·승인 없는 npm 패키지 금지.
+- **포함:** 아젠다 Phase 1~3 + GATE C + (선택) Phase 4만.
+- **제외:** 섹션별 system prompt 분기 · 신규 `lib/prd*` 모듈 · CRAZYSHOT 템플릿 · B2-02 재사용 UI.
+- **기술부채:** 프로덕션 `console.log`·무분별 `TODO`·`any` 금지 · s1 레거시 함수명 정리 시 **deprecated 주석**만.
+- **YAGNI:** 일괄 s1→s5 순차 보강(15 API) · 자동 draft 저장 — **BACKLOG**.
 
 ---
 
-## P-7. GATE A 출력 블록
+## P-6.6. Step3 — TASK NOW 초안 (GATE A·B 후 · 30분·1파일)
+
+| NOW | 파일(주) | 내용 | PRD |
+|-----|----------|------|-----|
+| **NOW-PRD-01** | `prdStandardV20.ts` + `prdStandardV20.test.ts` | `PRD_SECTION_ENHANCE_META` · `buildPrdSectionEnhanceUserPrompt` · Vitest | F2-5 · §10.2 |
+| **NOW-PRD-02** | `+page.svelte` | `runPrdSectionAiEnhance` · 상태·모달 일반화 · s1 함수 통합 | F2-5 · §10.3 |
+| **NOW-PRD-03** | `+page.svelte` | `PRD_BLOCKS` 각 「AI 보강」·힌트·aria · 헤더 s1 전용 버튼 제거 | F4-2 · UI |
+| **NOW-PRD-04** | `+page.svelte` + `aiGenerations.ts` **(선택)** | apply 시 `insertAiGenerationL5` · `source: prd-tab` | §11 |
+| **NOW-PRD-05** | GATE C | s1~s5·BPR·L1거부·build/test·트리 회귀 | M2 |
+
+**선택 Phase 3** (필요 시 NOW에 합치거나 소형 NOW):
+- `promptMatrix.ts` PRD system 한 줄
+- `generationPipeline.ts` maxTokens override
+
+**의존:** PRD-01 → PRD-02 → PRD-03 → (PRD-04) → PRD-05.  
+**병행 금지:** EPIC D/E · IA 템플릿 재작업 · path DB.
+
+---
+
+## P-6.7. GATE C (EPIC PRD-LLM-SEC · 초안)
+
+```
+[ ] npm run test · npm run build
+[ ] 로그인·노드 충분 → s1~s5 각 「AI 보강」→ 3단계 토스트 → 미리보기 → 반영 → BPR MD 해당 섹션만 변경
+[ ] 「노드 초안으로」→ LLM 반영 전 결정적 초안 복귀
+[ ] L1 부족 트리 → API skip + 토스트(AI 탭·s1과 동일)
+[ ] AI 탭 PRD 5버튼 — 회귀 없음
+[ ] 트리 ↔ PRD ↔ AI — 캔버스·노드 편집·`.view` 회귀 없음
+[ ] (선택 Phase 4) apply 후 ai_generations 행 · 로컬-only project skip
+```
+
+---
+
+## P-6.8. BACKLOG (본 EPIC 제외)
+
+| 항목 | PRD |
+|------|-----|
+| B2-02 `getLatestGeneration` — 섹션별 최근 보강 불러오기 | §10.5 |
+| 일괄 보강 s1→s5 순차 + 진행 UI | F2-5 |
+| CRAZYSHOT v1.6 템플릿 EPIC | — |
+| B2-04 path DB · B2-06 intent 확장 | §11 |
+
+---
+
+## P-7. GATE A — 출력
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚦 GATE A — 👤 Stephen 계획 승인 대기
+🚦 GATE A (P-13 / EPIC PRD-LLM-SEC) — ☑ Stephen 2026-05-23
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 저장 파일:
-  📄 .cursor/harness/plan-output.md
+  📄 .cursor/harness/plan-output.md (§P-13)
+  📄 .cursor/plans/prd_llm_섹션_보강_5387c338.plan.md (소스)
 
 확인 항목:
-[ ] 분석 결과가 아젠다(히스토리 클라우드 누적 + 하단 `update`·히스토리 시각 정합 + 부모 노드 자식 수 배지) 의도와 일치하는가?
-[ ] 모드 판별(기본모드)이 올바른가?
-[ ] 제외(F2-4/F2-5·§10 LLM 본구현·DOM id 변경·전역 스타일 난동)에 동의하는가?
-[ ] 파일럿 갭 §9·§10 연관(노드카드·SSoT·협업 후 루트)이 식별됐는가?
-[ ] PRD 연계(M3 F3-1 F3-2 F3-3, M1, M5, §6)·**IA/LLM 혼동 방지·“파이프라인 설명” 정의**·**히스토리 누적(append)·`update` 정합**이 채워졌는가?
-[ ] P-6.5·YAGNI가 반영됐는가?
-[ ] P-3.5 해당 없음이 맞는가?
-[ ] 핵심 위험(P-5: 번들 크기·merge·자식 수 비용·배지 hit-test) 대응에 동의하는가?
-[ ] GATE B에서 결정할 항목: 히스토리 저장 위치 · **append-only 누적 vs merge 시 보존** · 업데이트 노드 수 정의 · 직계/전체 하손 · 작성자 표시 필드 · **`update` 표기·표시 타임존(Asia/Seoul)** · 단일 타임스탬프 소스
+[ ] PRD 탭 s1~s5 섹션별 LLM 보강(미리보기→수동 반영) 의도가 맞는가?
+[ ] Phase 1 `prdStandardV20.ts` 단일 확장·신규 lib 모듈 금지에 동의하는가?
+[ ] 제외(BPR 자동 LLM·AI탭 변경·getLatestGeneration·IA/F2-4)에 동의하는가?
+[ ] s1 `buildPrompt` vs `buildPrdL1CoreSummaryPrompt` L1 정합(Phase 1)에 동의하는가?
+[ ] Phase 4 ai_generations **선택** 범위에 동의하는가?
+[ ] PRD 연계(M2 F2-5 · §10 · M4 F4-2 · Phase 2 · IA≠LLM)가 채워졌는가?
+[ ] P-6.5(YAGNI·GP-12) · GP-13 트리 보호가 반영됐는가?
+[ ] NOW-PRD-01~05 분해·GATE C 체크리스트에 동의하는가?
 
-→ 승인: GATE A 승인. Step3(Plan Mode) → TASK.md NOW 분해.
-→ 수정: GATE A 수정 요청 → plan-output 갱신.
-→ 반려: Step2부터 아젠다 재정의.
+→ 승인: ☑ GATE A Stephen 2026-05-23. Step3 TASK.md ☑ → **GATE B** NOW-PRD-01~05 확정.
+→ 수정: GATE A 수정: … plan-output §P-13 갱신해.
+→ 반려: GATE A 반려. Step2부터. 아젠다 재정의: …
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 ---
 
-## 코드 진실(히스토리 보완 · 2026-05-14, 레포 구현 기준)
-
-- **최신 스냅·하단 `update` 라벨:** `getLatestNodeSnapshot(projectId)` — `listNodeSnapshots` 배열의 **마지막 항목**이 가장 최근(`captureNodeSnapshot`가 push). `+page.svelte`의 `latestSnapshotUpdateLabel`이 동일 소스를 사용.
-- **NOW-HIST-03 표시 시각:** 스냅 `at`는 **ISO 순간**으로 저장; 라벨·모달 열 시각은 `formatLatestSnapshotTime` / `formatHistoryTimestamp`에서 **`Intl.DateTimeFormat` + `timeZone: 'Asia/Seoul'`** 로 **한국 시각**만 노출(UTC 표기 아님).
-- **히스토리 모달 행:** `mergeModalSnapshotRows` — 로컬 링 `listNodeSnapshots` **역순(최신 우선)** 과 `plannode_merged_history_entries_v1`를 `listMergedHistorySnapshotsForProject`로 읽어 **id 기준 병합·시간순 정렬**(클라우드 병합 버퍼 C2).
-- **라벨 DOM:** 캔버스 하단 **`.cw-mm-cluster`** 안 동기 배지 **좌측** `cw-snapshot-update-label`(문서 구식의 `.cw-bottom-bar`·`listNodeSnapshots()[0]` 표기는 폐기).
-- **번들 수집:** `gatherWorkspaceBundle` — **`src/lib/stores/projects.ts`** (경로 오기: `supabase/projects.ts` 아님).
-- **persist 히스토리:** `schedulePersistNodeSnapshotAfterPilot` — **`projects.ts`** 내 **900ms 디바운스** 후 `captureNodeSnapshot(..., 'persist', meta)`; 페이지 이탈 시 `clearPersistSnapshotDebounceTimers()`(`+page.svelte` `onDestroy`).
-
----
-
-*@promptor 역할: 코드·커밋 없음 | 본 문서만 갱신 | 소스: 채팅 아젠다 2026-05-13 + GATE A 수정 동일일(하단 `update`·누적 원칙)*
+*promptor Step2 | EPIC PRD-LLM-SEC P-13 | 2026-05-23 | 코드·커밋 없음*

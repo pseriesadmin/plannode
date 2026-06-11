@@ -4,7 +4,7 @@
 **목적:** SvelteKit 등 후속 구현 시 **동일 기능·동일 UX**를 재현하기 위한 단일 참조 문서  
 **소스 기준:** 저장소 내 파일 기준 (실행 URL은 로컬 서빙에 따름)
 
-**문서 위계:** 본 문서는 **파일럿 동작 분해·SvelteKit 포팅 갭(§9~§10)** 전용이다. **제품 범위·로드맵**의 정본은 [`.cursor/rules/plannode-prd.mdc`](../.cursor/rules/plannode-prd.mdc)이고, **현행 구현·클라우드·협업·배지 동기화**(`BADGE_STRUCTURE_OPS` · `BADGE-SYNC-FIX` 등)는 [`.cursor/rules/plannode-architecture.mdc`](../.cursor/rules/plannode-architecture.mdc)(§10, §10.10.1) 및 [`.cursor/rules/plannode-badge-mapping.mdc`](../.cursor/rules/plannode-badge-mapping.mdc)(§6.9)가 정본이다. Cursor alwaysApply·에이전트 진입은 [`.cursor/rules/README.md`](../.cursor/rules/README.md) · [`AGENTS.md`](../AGENTS.md) 표를 따른다. 본 문서와 `.mdc`·PRD·코드가 어긋나면 **`.mdc`/PRD/코드를 우선** 맞춘 뒤 §9~§10·본문을 갱신한다(묵시적 불일치 유지 금지).
+**문서 위계:** 본 문서는 **파일럿 동작 분해·SvelteKit 포팅 갭(§9~§10)** 전용이다. **제품 범위·로드맵**의 정본은 [`.cursor/rules/plannode-prd.mdc`](plannode-prd.mdc)이고, **현행 구현·클라우드·협업·배지 동기화**(`BADGE_STRUCTURE_OPS` · `BADGE-SYNC-FIX` 등)는 [`.cursor/rules/plannode-architecture.mdc`](plannode-architecture.mdc)(§10, §10.10.1) 및 [`.cursor/rules/plannode-badge-mapping.mdc`](plannode-badge-mapping.mdc)(§6.9)가 정본이다. Cursor alwaysApply·에이전트 진입은 [`.cursor/rules/README.md`](README.md) · [`AGENTS.md`](../AGENTS.md) 표를 따른다. 본 문서와 `.mdc`·PRD·코드가 어긋나면 **`.mdc`/PRD/코드를 우선** 맞춘 뒤 §9~§10·본문을 갱신한다(묵시적 불일치 유지 금지).
 
 **트리뷰 보호 (포팅·스타일 공통):** 본 문서의 **DOM 계약**·**캔버스·노드 동작**은 Plannode **핵심 제품 기능**(트리뷰 노드 작성·트리 구조)의 기준이다. SvelteKit·CSS·부가 뷰 작업 시 `AGENTS.md` **GP-13**·**「트리뷰 핵심 보호 헌장」**·`.cursor/rules/plannode-core.mdc`를 따르고, §1.1의 `.view` 전환·`#CV`/`#EG` 관계를 **저해·가림**하지 않는다.
 

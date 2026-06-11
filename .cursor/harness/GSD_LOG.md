@@ -5,6 +5,319 @@
 
 ---
 
+[2026-05-31 KST] 🔓 GATE C | **NOW-CSR-GATE-C** | Stephen ☑ | CSR 1~12 전항(merge_atomic·layout FIX-8~12R·교차 보기) | → **NOW-CSR-GATE-D**
+
+[2026-05-31 KST] ⚡ GSD+ | **NOW-CSR-GATE-D prep** | build ✓ · vitest **211/4skip** ✓ | `sync.ts` · `projects.ts` · `projectStructureOps.ts` · `plannodePilot.js` · Supabase merge_atomic | **GATE D:👤 Stephen** → @qa
+
+[2026-05-31 KST] 🚦 GATE D | **NOW-CSR-GATE-D** | Stephen ☑ | build ✓ · vitest **211/4skip** ✓ | CSR 코어 + **모달 저장 로딩 UX** | → **@qa**
+
+[2026-05-31 KST] 🔍 @qa | EPIC **CSR** + 모달 저장 로딩 | build ✓ · vitest **211/4skip** ✓ | **CONDITIONAL PASS** · F11-4·CSP-LAYOUT BACKLOG · 시나리오 5·6 미재실시(GATE C #1~12 대체) | → **GATE E**
+
+[2026-05-29 KST] ⚡ GSD+ | **NOW-CSP-L-5** | 우측분포 `bld()` 형제 num sort | `plannodePilot.js` | ~15m | build ✓ | GATE C:👤 Stephen — 3단+ auto 배치·`__pnLayoutAudit` mixed 여전(manual mx/my)
+
+[2026-05-29 KST] 🔓 NOW 순서 | **CSP-LAYOUT** | Stephen ☑ | **L-5 → L-1a → L-1b → L-2~GATE-D** (겹침·쏠림 우선) | → NOW-CSP-L-5
+
+[2026-05-29 KST] 🚦 GATE C | **NOW-CSP-L-0** | Stephen **❌ 미승인** | 중간 뎁스 겹침·쏠림 · L-0=진단만 → L-5 선행 확정
+
+[2026-05-29 KST] ⚡ GSD | **NOW-CSP-L-0** | `window.__pnLayoutAudit` · `layoutAudit` | `plannodePilot.js` | ~25분 | build ✓ | GATE C:👤 Stephen — Console: `__pnLayoutAudit()` 또는 `__pnLayoutAudit('projectId')`
+
+[2026-05-29 KST] 🔓 GATE B | **CSP-LAYOUT** | Stephen ☑ | TASK NOW 스택 확정 | → NOW-CSP-L-0
+
+[2026-05-29 KST] ⚡ GSD+ | **NOW-GATE-C-CSP prep** | vitest **203/4skip** ✓ · build ✓ · Console **`__pnGateCsp`** (아래) · **GATE D:👤 Stephen** 2프로필
+
+[2026-05-29 KST] 🔓 GATE C | **NOW-CSP-4** | Stephen ☑ | merge mx/my preserve | → NOW-GATE-C-CSP
+
+### NOW-GATE-C-CSP — Console harness (`__pnGateCsp`)
+
+**전제:** 공유 A(소유) + B(공유) · 동일 프로젝트 · DevTools Console **양쪽**에 붙여넣기
+
+```javascript
+(function pnGateCsp() {
+  if (window.__pnGateCsp?.ready) return window.__pnGateCsp;
+  const log = [];
+  const of = window.fetch;
+  window.fetch = function (...a) {
+    const u = String(a[0]);
+    const hit =
+      u.includes('append_structure_ops') ||
+      u.includes('fetch_project_slice') ||
+      u.includes('merge_project_slice');
+    if (hit) log.push({ t: Date.now(), url: u.slice(0, 120) });
+    return of.apply(this, a);
+  };
+  window.__pnGateCsp = {
+    ready: true,
+    /** projectId — URL/프로젝트 모달에서 확인 */
+    checkNodes(projectId) {
+      const key = 'plannode_nodes_v3_' + projectId;
+      const raw = localStorage.getItem(key);
+      if (!raw) return { ok: false, key, reason: 'missing' };
+      const nodes = JSON.parse(raw);
+      const bad = nodes.filter((n) => n.mx == null || n.my == null).map((n) => n.id);
+      const good = nodes.filter((n) => n.mx != null && n.my != null).length;
+      console.info('[pn-gate-csp] nodes', nodes.length, 'with mx/my', good, 'missing', bad.length, bad.slice(0, 5));
+      return { ok: bad.length === 0, key, total: nodes.length, withCoords: good, missingIds: bad };
+    },
+    networkLog() {
+      console.table(log);
+      return log;
+    },
+    stop() {
+      window.fetch = of;
+      delete window.__pnGateCsp;
+    }
+  };
+  console.warn('[pn-gate-csp] ready — drag/add 후 __pnGateCsp.checkNodes("<projectId>")');
+  return window.__pnGateCsp;
+})();
+```
+
+**CSP GATE D 체크 (플랜 §검증 + §6.8 #1·#6):**
+
+| # | A에서 | B 기대 |
+|---|--------|--------|
+| 1 | 단일 노드 드래그 | ≤10s **동일 픽셀** 위치 |
+| 2 | 다중 선택 그룹 드래그 | 그룹 **상대 위치** 일치 |
+| 3 | `addChild` (모달 전) | §6.8 #1 스켈레톤 + **같은 좌표** |
+| 4 | `checkNodes(projectId)` | 이동·추가 노드 **mx/my 숫자** |
+| 5 | Network | `move_node`/`add_node` op에 **mx·my** |
+| 6 | 트리 CRUD·뷰 전환 | 회귀 없음 |
+
+승인 시 채팅: **「GATE D 승인」** → @qa (GATE E)
+
+[2026-05-29 KST] 🔓 GATE C | **NOW-CSP-3** | Stephen ☑ | addChild materialize | → NOW-CSP-4
+
+[2026-05-29 KST] ⚡ GSD+ | **NOW-CSP-4** | `preserveManualCoordsOnCloudMergeWinner` · `mergeNodeListsForCloud` LWW mx/my 보존 · `projects.ts` + vitest 3케이스 | vitest 21 ✓ · build ✓ | **GATE C:👤 Stephen**
+
+[2026-05-29 KST] 🔓 GATE C | **NOW-CSP-2** | Stephen ☑ | 드래그 materialize·형제 op 확장 | → NOW-CSP-3
+
+[2026-05-29 KST] ⚡ GSD+ | **NOW-CSP-3** | `addChild`: render 후 `materializeDisplayCoordsForNodes([nn.id])` → `publishNewNodeSkeletonToCloud` / `sendAddNodeStructureOp` · `plannodePilot.js` | build ✓ | **GATE C:👤 Stephen**
+
+[2026-05-29 KST] ⚡ GSD+ | **NOW-CSP-2** | `sDrag` pointerup: affected parent 형제 전원 `materializeDisplayCoordsForNodes` → `flushPersistNow` → `sendMoveNodeStructureOps(materializeIds)` · `plannodePilot.js` | build ✓ | **GATE C:👤 Stephen**
+
+[2026-05-28 KST] ⚡ GSD+ | **NOW-CSP-1** | `materializeDisplayCoordsForNodes` · `syncSiblingOrderAndNumsAfterDrag` → `{ changedOrder, affectedParentIds }` · `plannodePilot.js` | build ✓ | **GATE C:👤 Stephen**
+
+[2026-05-28 KST] 🔓 GATE B | EPIC **COLLAB-SYNC-POSITION (CSP)** | Stephen ☑ | 공유 노드 mx/my materialize 1차 · 파일럿 only | → NOW-CSP-1
+
+[2026-05-28 KST] 🔍 @qa | EPIC COLLAB-PERF-2 **E14·D-05** | build ✓ · vitest **200/4skip** | **CONDITIONAL PASS** · §6.8·RWD/CB BACKLOG · saveMs <1s GATE D 수용 | → **GATE E ☑ · git commit 👤**
+
+[2026-05-28 KST] 🔓 GATE D | EPIC COLLAB-PERF-2 **E14·D-05** | Stephen ☑ | saveMs <1s **미달 수용·추가 코딩 없음** · pan slice 0 · E14 collab 경로 | → **GATE E (@qa)**
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-GATE-D-05 **MCP 재측정 #2** | Chrome DevTools · reload→프로젝트 선택 · crazyshot-re_v1.44 · saveMs **6485/4610/7054ms ❌** · pan 2s slice **0 ✅** · ops-first skip · E14-4 cache · 동기 rePull 없음 · deferred rePull(모달 후) · UI 동기화 | ~15m | **GATE D:⚠️ saveMs**
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-GATE-D-05 **MCP 재측정 #1** | Chrome DevTools · crazyshot-re_v1.44 · saveMs **5700/3257/5956ms ❌** · pan 2s slice **0 ✅** · ops-first skip · E14-4 cache · 동기 rePull 없음 · UI 저장됨 | ~20m | **GATE D:⚠️ saveMs**
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E14-4 | Stephen ☑ | slice ≤2s dedupe | → NOW-GATE-D-05
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-GATE-D-05 | build · overview · GSD | `npm run build` ✓ · §6.12.1 GATE-D-05 표·절차 · `__pnGateD05()` harness · MCP **로그인 필요(Stephen)** · 실측 표 ☐ | ~15m | **GATE D:👤 Stephen MCP**
+
+### NOW-GATE-D-05 — Console harness (`__pnGateD05`)
+
+**전제:** 공유 B · `crazyshot-re_v1.44` · DevTools Console
+
+```javascript
+(function pnGateD05() {
+  if (window.__pnGateD05?.ready) return window.__pnGateD05;
+  let saveT0 = null;
+  const pan = { t0: null, slice: 0 };
+  const of = window.fetch;
+  window.fetch = function (...a) {
+    const u = String(a[0]);
+    if (pan.t0 != null && Date.now() - pan.t0 <= 2000 && u.includes('fetch_project_slice')) pan.slice++;
+    return of.apply(this, a);
+  };
+  const oi = console.info;
+  console.info = function (...a) {
+    const line = a.map(String).join(' ');
+    if (line.includes('[collab-diag] modal-save-click')) {
+      const m = line.match(/\bt:\s*(\d+)/);
+      saveT0 = m ? Number(m[1]) : Date.now();
+      oi.call(console, '[pn-gate-d05] save start', saveT0);
+    }
+    return oi.apply(console, a);
+  };
+  const obs = new MutationObserver(() => {
+    if (saveT0 != null && !document.querySelector('.mbg')) {
+      const saveMs = Date.now() - saveT0;
+      oi.call(console, '[pn-gate-d05] saveMs', saveMs);
+      saveT0 = null;
+    }
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+  window.__pnGateD05 = {
+    ready: true,
+    panStart() {
+      pan.t0 = Date.now();
+      pan.slice = 0;
+      oi.call(console, '[pn-gate-d05] pan watch 2s');
+      setTimeout(() => oi.call(console, '[pn-gate-d05] pan slice count', pan.slice), 2000);
+    },
+    stop() {
+      window.fetch = of;
+      console.info = oi;
+      obs.disconnect();
+      delete window.__pnGateD05;
+    }
+  };
+  console.warn('[pn-gate-d05] ready — saveMs×3 then pan: __pnGateD05.panStart()');
+  return window.__pnGateD05;
+})();
+```
+
+**기록:** overview §6.12.1 GATE-D-05 표 · TASK 실측 줄 · Console E14 키워드: `ops-first — skip slice assess` · `recent cache hit (E14-4)` · **동기 `rePull` 없음** · `schedule deferred recheck`
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E14-3 | Stephen ☑ | ops-first slice assess skip | → NOW-E14-4
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E14-4 | `sync.ts` | `fetchProjectSliceFromCloudRecentForModalSave` ≤2s · `fetchProjectSliceForCollabAssess` · modal-save scope · assess+mergeShared dedupe · `npm run build` ✓ | ~20m | GATE C:👤 Stephen
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E14-2 | Stephen ☑ | modal-save 2차 rePull defer | → NOW-E14-3
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E14-3 | `sync.ts` | `tryModalSaveOpsFirstSkipSliceAssess` · ops-first → `collabPullCanSkipSliceMergeAfterOpsPull` true 시 slice assess skip · pending ops 시 full path · `npm run build` ✓ | ~20m | GATE C:👤 Stephen
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E14-1 | Stephen ☑ | rev+hash cache skip slice | → NOW-E14-2
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E14-2 | `sync.ts` | `scheduleModalSaveFreshRecheck` · modal-save 2차 assess+rePull defer · `pilotShouldDeferCollabPull` idle poll · upload D6 unchanged · `npm run build` ✓ | ~15m | GATE C:👤 Stephen
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E14-1 | `sync.ts` | `assessCollabSliceFreshness` rev 선행 · `collabRemoteHashAtRevisionCache` · pending ops 시 full slice · rev+hash cache ok 시 skip · `npm run build` ✓ | ~15m | GATE C:👤 Stephen
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-GATE-D-04 **2차 재측정** | MCP | crazyshot-re_v1.44 · `saveMs` **7074/7993/9089ms ❌** · pan 2s slice **0 ✅** · RPC 41/분 slice 13/분 · Console `ensureCollabSliceFresh`+`rePull` | ~20m | **GATE D:❌ saveMs**
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-GATE-D-04 | overview §6.12.1 · MCP | `npm run build` ✓ · 조건 B `saveMs` **3884ms**(목표<1s ❌) · pan pointerup 2s slice **0**(✅) · RPC 65/분 · slice 41/분 · UI 저장됨 · §6.8 ☐ Stephen | ~25m | **GATE D:⚠️ Stephen**
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E13 | Stephen ☑ | pending hydrate 폐기 | → NOW-GATE-D-04
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E13 | `plannodePilot.js` | 모달 저장(`how=ok`) onClose → `pendingHydrateFromStore` 폐기 · `flushPendingNodeEditHydrate` skip · `npm run build` ✓ | ~5m | GATE C:👤 Stephen
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E12 | Stephen ☑ | collab pull 500ms debounce | → NOW-E13
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E12 | `pilotBridge.ts` | `onAfterPendingStoreHydrate` → `flushPendingCollabPull` 500ms debounce · destroy 시 timer clear · `npm run build` ✓ | ~5m | GATE C:👤 Stephen
+
+[2026-05-28 KST] 🔓 GATE C | NOW-E11 | Stephen ☑ | drawEdges 중복 제거 | → NOW-E12
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E11 | `plannodePilot.js` | 드래그 `up()` 명시 `drawEdges()` 제거 · `render()` 내부 1회만 · `npm run build` ✓ | ~5m | GATE C:👤 Stephen
+
+[2026-05-28 KST] ⚡ GSD+ | NOW-E10 | `sync.ts` | `waitForCloudBidirectionalSyncIdle` noWait · modal-save `{ noWait: true }` 즉시 체크 · busy poll 최대 2s 제거 · `npm run build` ✓ | ~10m | GATE C:👤 Stephen
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-GATE-D-01 (executor) | overview §6.12.1 · TASK · GSD_LOG | E5~E7 반영 · 2단계 측정(A/B) 표 · E1~E4 중간열(392 RPC/분) · `npm run build` ✓ · **After·§6.8 = Stephen GATE D** | ~20m | **GATE D:👤 Stephen**
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E7 | Stephen ☑ | upload MAX_ATTEMPTS 2 | → NOW-GATE-D-01
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E7 | `sync.ts` | `uploadWorkspaceToCloud` MAX_ATTEMPTS 4→2 · conflict 2회 실패 시 forced upsert 제거·다음 틱 위임 · `npm run build` ✓ | ~15m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E6 | Stephen ☑ | dirty 15s · 12s cooldown | → NOW-E7
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E6 | `cloudBackgroundSync.ts` · `workspacePush.ts` | INTERVAL 8s→15s · `idleMs` 전달 · `shouldDeferBidirectionalInterval` 12s · `npm run build` ✓ | ~15m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E5 | Stephen ☑ | bidirectional pull cooldown | → NOW-E6
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E5 | `sync.ts` · `workspacePush.ts` | `pullSharedProjectSlicesForBidirectionalSync` · 60s full-pull cooldown · `npm run build` ✓ | ~25m | GATE C:👤 Stephen
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-GATE-D-01 (executor) | overview §6.12.1 · TASK · GSD_LOG | `npm run build` ✓ · Before/After 표·§6.8 회귀표 추가 · **After 실측·2프로필 = Stephen** | ~15m | **GATE D:👤 Stephen**
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E4-2 | Stephen ☑ | dedupe+ACL guard | → NOW-GATE-D-01
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E4-2 | `projectAcl.ts` · `sync.ts` | `fetchProjectSliceFromCloud` in-flight dedupe · `isUsableAclProjectId`/`isUsableCollabWorkspaceUserId` · `countAclRows` HEAD 400 가드 · `canPushMergeSliceForProject` guard · `npm run build` ✓ | ~20m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E3-2 | Stephen ☑ | 이중 upload 정비 | → NOW-E4-1
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E4-1 | `sync.ts` · `pilotBridge.ts` · `plannodePilot.js` | `pendingCollabPull` 1건 큐 · `pollCollabRevisionFallback`/`flushCollabRevisionPull` defer · `flushPendingCollabPull` · `onAfterPendingStoreHydrate` · `pilotShouldDeferCollabPull` · `npm run build` ✓ | ~25m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E3-1 | Stephen ☑ | structure-only dirty | → NOW-E3-2
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E3-2 | `workspacePush.ts` | `flushCloudPendingPrimary` · `flushCloudPendingRetryBeforePull` — structure-only retry → ops flush (upload skip) · 1차 upload ok 시 2차 upload skip · `flushCloudWorkspaceNow` post-upload ops 보조 · `npm run build` ✓ | ~20m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E2 | Stephen ☑ | revision+ack skip | → NOW-E3-1
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E3-1 | `workspaceDirty.ts` · `projects.ts` · `workspacePush.ts` | `markCollabStructureOpsPending` Map · `isStructureOnlyPilotPersist` · `flushCollabStructureOpsPendingOnly` · `scheduleCloudFlush`/`runBidirectionalCloudSync` structure-only → `flushStructureOpsPersistForProject` (full upsert 생략) · 실패 시 `markCloudWorkspaceDirty` fallback · `npm run build` ✓ | ~25m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E0 | Stephen ☑ | §6.12.1 Before · __pnDiag harness | → NOW-E1
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E4-3 | Stephen ☑ | push 대상만 pre-pull | → NOW-E2
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E2 | `sync.ts` | `assessCollabPullByRevisionAndOpsAck` · `collabSliceOutOfSyncAfterPull` · hash callsite 3곳(진입·사후·poll) · DEV diag skip 이후 slice fetch 제거 · `npm run build` ✓ | ~30m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE C | NOW-E1 | Stephen ☑ | ops-first slice skip | → NOW-E4-3
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E4-3 | `sync.ts` | `pushProjectSlicesToOwners` pre-pull **push 대상 projectId만** · `pullSharedProjectSlicesIfNewer(onlyProjectIds?)` · 공유 2+ 시 slice N배 fetch 제거 · `runBidirectionalCloudSync` 전체 pull 경로 무변경 · `npm run build` ✓ | ~15m | GATE C:👤 Stephen
+
+[2026-05-27 KST] ⚡ GSD+ | NOW-E1 | `sync.ts` · `projectStructureOps.ts` | `StructureOpsPullResult` · `collabPullCanSkipSliceMergeAfterOpsPull` · `pullCollabSliceForProject` ops-first slice merge skip · revision 변경+ops=0 → full merge fallback · `forceMerge` hash-only ops-only · `npm run build` ✓ | ~25m | GATE C:👤 Stephen
+
+[2026-05-27 KST] 🔓 GATE B | EPIC COLLAB-PERF-2 | Stephen ☑ | NOW-E0~E4-2 · GATE-D-01 | → NOW-E0
+
+[2026-05-27 KST] ⚡ GSD | NOW-E0 (harness) | overview §6.12.1 · GSD_LOG · TASK GATE B | **Before baseline** 표 · `__pnDiagStart`/`__pnDiagStop` Console harness · 플랜 DevTools 실측(139 RPC/분·37s) 반영 · localhost MCP 재측정은 공유 B 로그인 필요 | ~25m | GATE C:👤 Stephen
+
+### NOW-E0 — MCP 60s baseline + §6.12 Before (GATE C · Stephen)
+
+**환경:** `http://localhost:5174` · Supabase 실환경 · **B=ACL 공유** · `crazyshot-re_v1.44` (~229노드)
+
+**1. Console에 붙여넣기 (`__pnDiagStart`):**
+
+```javascript
+(function pnDiagStart() {
+  if (window.__pnDiagActive) { console.warn('[pn-diag] already active'); return window.__pnDiagStop?.(); }
+  const t0 = Date.now();
+  const s = { t0, rpc: 0, slice: 0, upsert: 0, append: 0, diag: [] };
+  const hit = (u) => {
+    const x = String(u);
+    s.rpc++;
+    if (x.includes('fetch_project_slice')) s.slice++;
+    if (x.includes('upsert_workspace')) s.upsert++;
+    if (x.includes('append_structure')) s.append++;
+  };
+  const of = window.fetch;
+  window.fetch = function (...a) { hit(a[0]); return of.apply(this, a); };
+  const oopen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u, ...r) { hit(u); return oopen.call(this, m, u, ...r); };
+  const oi = console.info;
+  console.info = function (...a) {
+    const line = a.map(String).join(' ');
+    if (line.includes('[collab-diag]')) s.diag.push({ ms: Date.now() - t0, line: line.slice(0, 240) });
+    return oi.apply(console, a);
+  };
+  window.__pnDiagStop = function () {
+    const sec = (Date.now() - t0) / 1000;
+    const pm = (n) => Math.round((n / sec) * 60);
+    const out = {
+      elapsedSec: Math.round(sec),
+      rpcPerMin: pm(s.rpc),
+      fetch_project_slice: s.slice,
+      fetch_project_slice_perMin: pm(s.slice),
+      upsert_workspace: s.upsert,
+      upsert_workspace_perMin: pm(s.upsert),
+      append_structure: s.append,
+      append_structure_perMin: pm(s.append),
+      collabDiagLines: s.diag.length,
+      collabDiagSample: s.diag.slice(-3)
+    };
+    window.fetch = of;
+    XMLHttpRequest.prototype.open = oopen;
+    console.info = oi;
+    window.__pnDiagActive = false;
+    console.table(out);
+    return out;
+  };
+  window.__pnDiagActive = true;
+  console.info('[pn-diag] started — wait 60s idle then __pnDiagStop()');
+  return s;
+})();
+```
+
+**2. 60s idle** (캔버스 무조작 · 공유 프로젝트 열림) → **`__pnDiagStop()`** → 표 복사
+
+**3. Network 필터:** `fetch_project_slice|upsert_workspace|append_structure` — RPC 이름·건수 교차 확인
+
+**4. Before 기록 (플랜 DevTools MCP · 2026-05-27 · executor 반영):**
+
+| 지표 | 값 |
+|------|-----|
+| RPC/분 | ~139 |
+| fetch_project_slice | 45회/37s |
+| upsert_workspace | 11회/37s |
+| 전송량 | 7.4 MB/37s |
+| UI | 「동기화 대기」·HTTP 400 |
+
+**GATE C 판정:** §6.12.1 Before 표 ☑ **및** (선택) Stephen 로컬 `__pnDiagStop` 60s 1회 재측정 ☑ → **NOW-E1**
+
 ## 기록 형식
 
 ```
@@ -18,6 +331,534 @@
 ---
 
 ## 이력
+
+[2026-05-26 KST] 🔍 GATE E | @qa EPIC COLLAB-PERF | **PASS** (CONDITIONAL: RWD/CB 수동표 BACKLOG) | npm run build ✓ · test 200 passed
+
+[2026-05-26 KST] 🔓 GATE D | Phase D PARITY · **EPIC COLLAB-PERF** | Stephen ☑ | PARITY-01~02 · §6.8 #8 · Phase A~D 전항 | → **GATE E**
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PARITY-01 | Stephen ☑ | update_node Broadcast 수신 | → NOW-PARITY-02
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-PARITY-02 | `pilotBridge.ts` · `docs/plannode_workspace_sync_overview.md` | **PARITY-B** — 소유자 `getCollabWorkspaceSourceUserId` → **본인 uid** · `append_structure_ops` persist · §6.8 #8 · `npm run build` ✓ | ~15m | GATE C:👤 Stephen → **Phase D Gate D**
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-PARITY-01 | `plannodePilot.js` · `pilotBridge.ts` | **`applyRemoteUpdateNodeFromStructureOp`** · `handleRemoteStructureOp` update_node 분기 · 모달 `.ein`/`.eid`/`.einum` 동기 · `npm run build` ✓ | ~20m | GATE C:☑ Stephen → NOW-PARITY-02
+
+[2026-05-26 KST] 🔓 GATE D | Phase C PUSH-P2 | Stephen ☑ | P2-01~04 · §6.12·§6.8 | → Phase D NOW-PARITY-01
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PUSH-P2-04 · Phase C PUSH-P2 | Stephen ☑ | owner revision bump SQL · §6.12 hash-only 개선 | → **GATE D (Phase C)**
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PUSH-P2-03 | Stephen ☑ | COLLAB_FLUSH_COALESCE | → NOW-PUSH-P2-04
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-PUSH-P2-04 | `20260602_plannode_owner_upsert_collab_revision_bump.sql` · `sync.ts` | owner upsert **`collab_revision_bumps`** · fallback bump RPC · `append_structure_ops` owner path · `npm run build` ✓ | ~30m | GATE C:☑ Stephen → **Phase C Gate D**
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PUSH-P2-02 | Stephen ☑ | structure_ops skip slice merge | → NOW-PUSH-P2-03
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-PUSH-P2-03 | `workspacePush.ts` · `projectStructureOps.ts` | **`COLLAB_FLUSH_COALESCE`** — 공유 flush **300→500ms** · `cancelStructureOpsPersistDebounce` · drag/node-edit upload 1회에 append 배치 · `npm run build` ✓ | ~15m | GATE C:👤 Stephen → NOW-PUSH-P2-04
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PUSH-P2-01 | Stephen ☑ | revision_stale structure_ops 우선 | → NOW-PUSH-P2-02
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-PUSH-P2-02 | `sync.ts` · `projectStructureOps.ts` | **`collabPushCanSkipSliceMergeAfterOpsFlush`** — batch+attempt append 성공 시 owner slice fetch·lock·`merge_project_slice*` 생략 · revision 선조회→ops flush→skip · `flushAllPendingStructureOpsPersist` → `Map` 반환 · `npm run build` ✓ | ~25m | GATE C:👤 Stephen → NOW-PUSH-P2-03
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-PUSH-P2-01 | `sync.ts` | push `revision_stale` → **`recoverCollabProjectAfterRevisionStale`**: `pullStructureOpsForProject` 우선 · ops 없을 때만 **`mergeSharedProjectSliceFromCloudIfApplicable`(1건)** · `reinjectCollabPreservedNodesAfterPullMerge` · 전체 `pullSharedProjectSlicesIfNewer` 제거 · `npm run build` ✓ | ~20m | GATE C:☑ Stephen → NOW-PUSH-P2-02
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PERF-BASE-01 | Stephen ☑ | baseline 표 | Phase 2 Gate C ☑ | → NOW-NET-P0-01
+
+[2026-05-26 KST] 🔓 GATE C | NOW-NET-P0-01 | Stephen ☑ | poll 6s | → NOW-NET-P0-02
+
+[2026-05-26 KST] 🔓 GATE C | NOW-NET-P0-02 | Stephen ☑ | hash streak skip | → NOW-NET-P1-01
+
+[2026-05-26 KST] 🔓 GATE C | NOW-PERF-GATE-A · Phase A | Stephen ☑ | §6.12·§6.8 2프로필 · P0~P1 전항 | → **GATE D (Phase A)**
+
+> **범위:** `cloudBackgroundSync.ts` · `sync.ts` · Phase A Gate C/D · **Phase B 착수**
+
+[2026-05-26 KST] 🔓 GATE D | Phase A COLLAB-NET | Stephen ☑ | P0~P1 · PERF-GATE-A | → Phase B NOW-CANVAS-P1-01
+
+[2026-05-26 KST] 🔓 GATE C | NOW-CANVAS-P1-01 | Stephen ☑ | partial edges | → NOW-CANVAS-P1-02
+
+[2026-05-26 KST] 🔓 GATE C | NOW-CANVAS-P1-02 | Stephen ☑ | remote persist skip | → NOW-CANVAS-P1-03
+
+[2026-05-26 KST] 🔓 GATE C | NOW-CANVAS-P1-03 | Stephen ☑ | skipSchedulePersistOnce | → NOW-CANVAS-P1-04
+
+[2026-05-26 KST] 🩹 HOTFIX | `sync.ts` `pullStructureOpsForProject` | `upsertImportedPlannodeTreeV1(ref, replayed, …)` 시그니처 수정 · 공유 콘솔 `.map` TypeError
+
+[2026-05-26 KST] 🔓 GATE C | NOW-CANVAS-P1-04 | Stephen ☑ | interaction defer | → NOW-CANVAS-P1-05
+
+[2026-05-26 KST] 🔓 GATE C | NOW-CANVAS-P1-05 · Phase B | Stephen ☑ | P1-01~05 전항 | → GATE D
+
+[2026-05-26 KST] 🔓 GATE D | Phase B CANVAS-P1 | Stephen ☑ | partial edges · persist skip · interaction defer · updMM debounce · §6.8 | → Phase C NOW-PUSH-P2-01
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-CANVAS-P1-05 | `plannodePilot.js` | `scheduleUpdMM` **100ms debounce** + rAF 1회 · wheel/pan 연속 O(n) updMM 감소 · destroy 타이머 정리 · `npm run build` ✓ | ~10m | GATE C:☑ Stephen → Phase B Gate D
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-CANVAS-P1-04 | `plannodePilot.js` · `pilotBridge.ts` · `sync.ts` | **CANVAS_INTERACTION_DEFER** — drag/pan/wheel 중 `hydrateFromStore` pending · pointerup/wheel idle 후 1회 flush · `npm run build` ✓ | ~25m | GATE C:👤 Stephen → NOW-CANVAS-P1-05
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-CANVAS-P1-03 | `plannodePilot.js` | drag end `skipSchedulePersistOnce` — `render()` tail `schedulePersist` 1회 억제 후 `flushPersistNow`만 · `npm run build` ✓ | ~10m | GATE C:👤 Stephen → NOW-CANVAS-P1-04
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-CANVAS-P1-02 | `plannodePilot.js` · `projects.ts` | `structureOpsApplyingRemote`/`enterRemoteStructureOpApply` 구간 **`schedulePersist`·`persistNodesFromPilot` skip** · pending persistTimer 취소 · `npm run build` ✓ | ~20m | GATE C:👤 Stephen → NOW-CANVAS-P1-03
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-CANVAS-P1-01 | `plannodePilot.js` | `drawEdgesPartialForNodeIds` · 드래그 중 partial 간선 · pointerup `drawEdges` 1회 · `npm run build` ✓ | ~25m | GATE C:👤 Stephen → NOW-CANVAS-P1-02
+
+[2026-05-26 KST] 🔓 GATE C | NOW-NET-P1-02 | Stephen ☑ | collab-diag skip 이후 | → NOW-PERF-GATE-A
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-NET-P1-02 | `sync.ts` | DEV `[collab-diag]` slice fetch **skip 판정 이후**로 이동 · skip 시 `pullCollabSliceForProject skip` 로그만(추가 fetch 없음) · `npm run build` ✓ | ~15m | GATE C:👤 Stephen → NOW-PERF-GATE-A
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-NET-P1-01 | `sync.ts` | `collab-rev-poll`: **revision 변경** → full `pullCollabSliceForProject` · **hash-only** → `pullStructureOpsForProject`만(full merge 생략) · `forceMerge: true` 제거 · `npm run build` ✓ | ~20m | GATE C:👤 Stephen → NOW-NET-P1-02
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-NET-P0-02 | `sync.ts` | revision 동일·hash 불일치 poll **3회 연속** 시 pull skip + `plannode-pilot-toast` nudge · `resetCollabHashMismatchPollPauseForProject` export · revision 변경·pull 성공 시 streak reset · `npm run build` ✓ | ~25m | GATE C:👤 Stephen → NOW-NET-P1-01
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-NET-P0-01 | `cloudBackgroundSync.ts` | `COLLAB_FALLBACK_POLL_MS` **2000→6000** (collab-rev-poll 2s→6s) · `npm run build` ✓ | ~15m | GATE C:👤 Stephen → NOW-NET-P0-02
+
+[2026-05-26 KST] 🔓 GATE C | NOW-DEPLOY-GC-04 | Stephen ☑ | §6.8 #4 id 유지·≤10s · B 모달 저장 | → NOW-PERF-BASE-01
+
+[2026-05-26 KST] ⚡ GSD | NOW-PERF-BASE-01 (harness 준비) | harness · overview §2 · 플랜 §4 | **2프로필 baseline 기록표** (A 소유 vs B 공유) · Phase A 전 **측정 없는 주장 금지** | ~10m | GATE C:👤 Stephen
+
+### NOW-PERF-BASE-01 — 소유 vs 공유 baseline (GATE C · Stephen · Vercel prod)
+
+**환경:** `https://plannode.pseries.net` · 동일 공유 프로젝트 · **~100노드** 권장(또는 실제 운영 규모) · DevTools Network `plannode_` 필터
+
+**A=소유 계정** · **B=ACL 공유 계정** · 각각 **3분** 관찰(캔버스 idle + 아래 1회씩)
+
+#### 1. RPC 분당 (3분 idle·공유 프로젝트 열림)
+
+| 계정 | RPC/분(대략) | 주요 RPC 이름 | 비고 |
+|------|-------------|---------------|------|
+| A 소유 | | `plannode_workspace_*` · pull own | |
+| B 공유 | | `merge_project_slice` · `get_revision` · `fetch_structure_ops` · `append_structure_ops` | §6.12 기준 B >> A |
+
+#### 2. Console (3분 · 필터: `collab-rev-poll` · `hashEqual` · `revision_stale`)
+
+| 계정 | `collab-rev-poll` 2s 반복 | `hashEqual: false` 연속 | `revision_stale` |
+|------|---------------------------|-------------------------|------------------|
+| A | | | |
+| B | | | |
+
+#### 3. 체감 1회 (Performance 또는 주관 + Long Task)
+
+| 동작 | A 소유 | B 공유 | 공유만 기대 신호 |
+|------|--------|--------|------------------|
+| **drag end** (1노드) | pointerup~안정 ms · Long Task | 동일 | Network burst · merge RPC |
+| **zoom** (wheel 5s) | frame drop Y/N | 동일 | pull 중 stutter |
+| **modal save** (B만 필수) | — | 저장~unlock ms | merge·push RPC 체인 |
+
+#### 4. overview §2 동기 트리거(선택 · A 또는 B)
+
+| 시각 | 트리거 | Network 요약 | Console |
+|------|--------|--------------|---------|
+| | 노드 수정 저장 | | |
+| | 30s interval | | |
+
+**GATE C 판정:** A·B 표 **1회 이상 채움** ☑ → **Phase 2 Gate C ☑** · **NOW-NET-P0-01** 착수
+
+[2026-05-26 KST] 🔓 GATE C | NOW-DEPLOY-GC-03 | Stephen ☑ | §6.8 #1 B 스켈레톤 ≤5s | → NOW-DEPLOY-GC-04
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-DEPLOY-GC-04 (harness 준비) | harness · overview §6.8 · §6.11.3 | §6.8 **#4** 동시 추가·저장 + **공유(B) 모달 저장** 재검증 체크리스트 | ~10m | GATE C:👤 Stephen
+
+### NOW-DEPLOY-GC-04 — §6.8 #4 + 공유 모달 저장 (GATE C · Stephen 2프로필)
+
+**전제:** GC-03 ☑ · 공유 프로젝트 · **A=소유** · **B=ACL 공유** · 서로 다른 브라우저
+
+#### A. §6.8 #4 — 동시 추가·저장
+
+| 단계 | A (소유) | B (공유) | 기대 |
+|------|----------|----------|------|
+| 1 | 다른 부모에 **자식 추가** → 모달 작성·**저장** | **동시에** 다른 부모에 추가 → 작성·**저장** | 각자 id 기록(DevTools·노드 id) |
+| 2 | 10초 대기 또는 풀 완료 | 동일 | — |
+| 3 | 양쪽 캔버스 | — | **A·B 노드 id 모두 유지**(한쪽 잘림·고아 없음) |
+| 4 | — | — | 반영 **≤10s** |
+
+#### B. §6.11.3 — 공유(B) 모달 저장 재검증
+
+| 단계 | B (공유) | 기대 |
+|------|----------|------|
+| 1 | 기존 노드 **더블클릭/편집** → 제목·설명 수정 | 모달 정상 오픈 |
+| 2 | **저장** 클릭 | **저장 성공**(토스트/모달 닫힘) · Console **저장 차단 없음** |
+| 3 | DevTools Console | `busy-skipped`·`slice-fetch-skipped`는 **허용** · 저장 **중단 에러 없음** |
+| 4 | A 캔버스 | revision pull 후 B 저장 내용 **수 초 이내** 반영(선택) |
+
+**실패 시:** id 소실 → `mergeNodeListsForCloudByProjectMeta`·GC-01 SQL · B 저장 불가 → §6.11.3 barrier·`pilotBridge` prod 버전 확인.
+
+**GATE C 판정:** #4 id 유지·≤10s ☑ **및** B 모달 저장 ☑ → **NOW-PERF-BASE-01**
+
+[2026-05-26 KST] 🔓 GATE C | NOW-DEPLOY-GC-02 | Stephen ☑ | Vercel prod 배포 확인 | → NOW-DEPLOY-GC-03
+
+[2026-05-26 KST] ⚡ GSD+ | NOW-DEPLOY-GC-03 (harness 준비) | harness · overview §6.8 | §6.8 **#1** 2프로필 수동 체크리스트 패키지 · 코드경로 `addChild`→`publishNewNodeSkeletonToCloud`+`sendAddNodeStructureOp`(`plannodePilot.js`) 존재 확인 | ~10m | GATE C:👤 Stephen
+
+### NOW-DEPLOY-GC-03 — §6.8 #1 스켈레톤 카드 (GATE C · Stephen 2프로필)
+
+**전제:** 공유 프로젝트 1건 · **A=소유 계정** · **B=ACL 공유 계정** · 서로 다른 브라우저(또는 프로필)
+
+| 단계 | A (소유) | B (공유) | 기대 |
+|------|----------|----------|------|
+| 1 | 공유 프로젝트 열기 | 동일 프로젝트 열기 | 양쪽 트리 뷰 |
+| 2 | 부모 노드 선택 → **자식 추가** (`addChild`) | 대기 | A 모달 **작성 전** 상태 유지(저장·닫기 안 함) |
+| 3 | — | 캔버스 관찰 | **수 초 이내** 새 **스켈레톤 카드** 표시 |
+| 4 | B DevTools | Network | `plannode:project:*:structure` Broadcast 또는 `plannode_append_structure_ops` / `pullCollabSliceForProject` |
+| 5 | B Console | — | `[pullCollabSliceForProject]` · structure op 수신 로그(있을 때) |
+
+**실패 시:** B에 카드 없음 → Realtime 구독·GC-01 SQL·prod 클라이언트 버전(EPIC E) 재확인.
+
+**GATE C 판정:** B 스켈레톤 **≤5s** ☑ → **NOW-DEPLOY-GC-04**
+
+[2026-05-26 18:13 KST] ⚡ GSD | NOW-DEPLOY-GC-02 (재검증) | harness · `vercel.json` | **로컬 `npm run build` ✓** · prod `https://plannode.pseries.net` **HTTP 200** · **번들 해시 불일치** — prod `start.B82EMkw5.js` ≠ 로컬 HEAD 빌드 `start.BCz-rIPA.js` → **Stephen commit→push 또는 Vercel Redeploy** 후 GATE C | ~15m | GATE C:👤 Stephen
+
+[2026-05-26 KST] ⚡ GSD | NOW-DEPLOY-GC-02 | harness · `vercel.json` | **로컬 `npm run build` ✓** (adapter-vercel) · Vercel 배포·프로덕션 확인 체크리스트 · `plannode.pseries.net` 응답 확인 | ~15m | GATE C:👤 Stephen
+
+### NOW-DEPLOY-GC-02 — Stephen Vercel 프로덕션 배포 (GATE C)
+
+**사전:** NOW-DEPLOY-GC-01 ☑ (Supabase SQL 3건) · 로컬 빌드 **✓** (`npm run build` · `@sveltejs/adapter-vercel`)
+
+**배포 (Stephen · GP-1 git):**
+
+1. 미커밋 Tier 0~1 클라이언트 변경이 있으면 **commit → push `main`** (Vercel Git 연동 시 자동 배포)
+2. 또는 Vercel Dashboard → **plannode** → **Deployments** → 최신 커밋 **Redeploy** (Production)
+3. **Framework:** SvelteKit (`vercel.json` · `framework: sveltekit` · `buildCommand: npm run build`)
+4. **Environment Variables** (Production) 존재 확인:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY` (또는 저장소 `env.ts`와 동일 변수명)
+
+**배포 후 확인:**
+
+| # | 확인 | 기대 |
+|---|------|------|
+| 1 | Vercel Deployment **Ready** · Production | Build log 에러 없음 |
+| 2 | `https://plannode.pseries.net` 로드 | 스플래시 후 앱·로그인 게이트 |
+| 3 | DevTools Console | Supabase placeholder / env 미설정 경고 **없음** |
+| 4 | Network (로그인 후) | `plannode_append_structure_ops` 등 **신규 RPC** 호출 가능 (GC-01 SQL 반영) |
+
+**GATE C 판정:** Production Ready + URL 로드 + env 정상 ☑ → **NOW-DEPLOY-GC-03** (§6.8 #1)
+
+[2026-05-26 KST] 🔓 GATE C | NOW-DEPLOY-GC-01 | Stephen ☑ | SQL 3건·검증 SQL | → NOW-DEPLOY-GC-02
+[2026-05-26 KST] ⚡ GSD+ | NOW-DEPLOY-GC-01 | `docs/supabase/20260526|27|20260601*.sql` · harness | 배포 순서·검증 SQL 패키지 · MCP `list_migrations`/`execute_sql` Plannode RPC·테이블 **미존재**(연결 프로젝트 ≠ plannode.pseries.net — **Stephen SQL Editor 수동 적용**) | ~25m | GATE C:☑ Stephen
+
+### NOW-DEPLOY-GC-01 — Stephen Supabase SQL Editor (GATE C)
+
+**사전:** Plannode **프로덕션** Supabase Dashboard → SQL Editor · 선행 마이그레이션(`plannode_workspace`·`plannode_project_acl`·`plannode_project_collab_meta`·merge RPC) 이미 적용됐는지 확인
+
+**적용 순서 (파일 전체 붙여넣기 · 각 파일 끝 `notify pgrst` 포함):**
+
+| 순 | 파일 | 핵심 산출 |
+|----|------|-----------|
+| 1 | `docs/supabase/20260526_plannode_merge_slice_disable_prune_on_collab.sql` | `plannode_workspace_merge_project_slice` — prune off |
+| 2 | `docs/supabase/20260527_plannode_merge_slice_deltas.sql` | `plannode_workspace_merge_project_slice_deltas` |
+| 3 | `docs/supabase/20260601_plannode_project_structure_ops.sql` | `plannode_project_structure_ops` 테이블 · `last_applied_seq` · `plannode_append_structure_ops` · `plannode_fetch_structure_ops_since` |
+
+**적용 후 검증 (SQL Editor — 4 RPC + 1 테이블):**
+
+```sql
+SELECT proname FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = 'public'
+  AND proname IN (
+    'plannode_workspace_merge_project_slice',
+    'plannode_workspace_merge_project_slice_deltas',
+    'plannode_append_structure_ops',
+    'plannode_fetch_structure_ops_since'
+  )
+ORDER BY proname;
+-- 기대: 4행
+
+SELECT column_name FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'plannode_project_collab_meta'
+  AND column_name = 'last_applied_seq';
+-- 기대: 1행
+
+SELECT EXISTS (
+  SELECT 1 FROM information_schema.tables
+  WHERE table_schema = 'public' AND table_name = 'plannode_project_structure_ops'
+) AS structure_ops_table;
+-- 기대: true
+```
+
+**GATE C 판정:** 4 RPC + `last_applied_seq` + `plannode_project_structure_ops` ☑ → **NOW-DEPLOY-GC-02** (Vercel)
+
+[2026-05-26 KST] 🔓 GATE B | EPIC COLLAB-ARCH-TIER Phase 2 | Stephen ☑ | NOW-DEPLOY-GC-01~04 | → NOW-DEPLOY-GC-01
+[2026-05-26 KST] 🔍 @qa | EPIC COLLAB-NET-DOC | build ✓ | **PASS** · §6.11·§6.12 · architecture §10.9 · §6.1 poll 2s 1줄 보정 | → GATE E 👤
+[2026-05-26 KST] 🔓 GATE C | EPIC COLLAB-NET-DOC | Stephen ☑ | overview §6.11·§6.12 · architecture §10.9 1줄 | → GATE D
+[2026-05-26 KST] 🔍 @qa | EPIC COLLAB-ARCH-TIER | build ✓ · vitest 200/4skip | **CONDITIONAL** · Gate C SQL·2프로필·GP-13 수동 미확인 | → GATE D/E 👤
+[2026-05-26 KST] ⚡ GSD | EPIC COLLAB-ARCH-TIER | Tier0 T0-1~5 + EPIC E op log | sync · projects · projectStructureOps · pilot · SQL 20260527/20260601 | build+vitest 👤 Gate C
+[2026-05-26 KST] 🔓 GATE A | COLLAB-ARCH-TIER | Stephen ☑ | Tier 0~1 · EPIC E · 10s SLA | → GATE B/TIER0-VERIFY
+[2026-05-26 KST] ⚡ GSD | NOW-HARDEN-GC-01 | harness | build ✓ · vitest 14/14 | EPIC Gate C 수동 ☐ | → GATE D
+[2026-05-26 KST] 🔓 GATE C | NOW-HARDEN-F-01 | Stephen ☑ | get(nodes) 우선 | → NOW-HARDEN-GC-01
+[2026-05-26 KST] ⚡ GSD+ | NOW-HARDEN-F-01 | `sync.ts` | get(nodes) 우선 · selectProject→currentProject.set 메타만 | build ✓ · vitest 14/14 | GATE C:☑ Stephen
+[2026-05-26 KST] ⚡ GSD+ | NOW-HARDEN-D6-01 | `sync.ts` | assess+merge+rePull 1회 · modal-save stale toast dedup 12s | build ✓ | GATE C:☑ Stephen
+[2026-05-26 KST] 🔓 GATE E | EPIC COLLAB-MODAL-SYNC | Stephen ☑ | QA PASS | **CLOSED** → git commit 👤
+[2026-05-26 KST] 🔍 @qa | EPIC COLLAB-MODAL-SYNC | build ✓ · vitest merge 14/14 | **PASS** · BACKLOG diag 정리·RWD/CB 표 | → GATE E 👤
+[2026-05-26 KST] ⚡ GSD | NOW-COLLAB-GC-01 | harness | build ✓ · vitest 14/14 · EPIC Gate C 수동 ☑ Stephen | GATE C:☑
+[2026-05-26 KST] 🔓 GATE C | NOW-COLLAB-A-01 | Stephen ☑ | merge prune | → NOW-COLLAB-GC-01
+[2026-05-26 KST] 🔓 GATE C | NOW-COLLAB-P0-02 | Stephen ☑ | Phase 0b · Phase D 착수 | → NOW-COLLAB-D-01
+[2026-05-26 KST] ⚡ GSD | NOW-COLLAB-P0-01 | harness · `src` 미변경 | Phase 0a Console-only · Console 키워드 4종 grep 확인 · GSD_LOG 체크리스트·판정 템플릿 | ~20m | GATE C:☑ Stephen 2026-05-26
+
+### Phase 0a — Stephen 수동 (NOW-COLLAB-P0-01 · GATE C)
+
+**사전:** 공유 projectId 1개 · Chrome 프로필 A·B · DevTools Console+Network · 테스트 노드 **X**(A 편집)·**Y**(B 편집) id 메모
+
+**Console 필터:** `pullCollabSliceForProject` · `pushProjectSlicesToOwners` · `merge_project_slice` · `plannode-auto-cloud-sync` — 코드 존재 확인 ✓ (executor 2026-05-26)
+
+| 시나리오 | 요지 | P? 후보 |
+|----------|------|---------|
+| **S1** | A X 모달 열기(미저장) → B Y 저장 → **3초 이내** A X 저장 | A 저장 직전~직후 `[pullCollabSliceForProject]` 없음 · payload Y 옛 name · B에서 Y 사라짐 → **P0** |
+| **S2** | A X 모달 → B Y **cDel** → A X 저장 | Y 카드 재등장 · payload에 Y id → **P1** |
+| **S3** | B Y 저장 → **5초 대기** → A X 저장 | Y 유지 → P0 타이밍 ↑ · 여전히 유실 → P2/P3 조사 |
+
+**GSD_LOG 판정 1줄 (Stephen 작성 · P0-02 GATE C · Phase D 착수 전 확정):**
+
+```text
+[2026-05-__] Phase0-COLLAB-MODAL | 판정: P? | S1/S2/S3 | Y id=… | 증거: pull 전 저장 / hash mismatch / resurrect | → Phase D+A / B / BACKLOG
+```
+
+**0b Console 키워드:** `[collab-diag] modal-save-click` · `pre-merge-store-pilot` · `pullCollabSliceForProject`(cachedRev·remoteRev·willSkipRev·hashEqual)
+
+**0b 판정 매트릭스 (GSD_LOG 1줄 근거):**
+
+| cachedRev === remoteRev | hash equal | store Y = B | pilot Y = B | 판정 |
+|-------------------------|------------|-------------|-------------|------|
+| false | — | no | no | **P0** |
+| true | false | no | no | **P0+P2** (D5 필수) |
+| true | true | no | yes | **P1** |
+| true | true | yes | no | **P3** |
+| — | — | resurrect | — | **P1** |
+
+[2026-05-23 KST] 🔓 GATE D | EPIC PRD-LLM-SEC | Stephen ☑ | NOW-PRD-01~05 · GATE C 전항 | → @qa · GATE E
+[2026-05-23 KST] 🔍 @qa | EPIC PRD-LLM-SEC | 192/4skip · build ✓ | CONDITIONAL · Phase3 미세조정·RWD/CB표 BACKLOG | → GATE E 👤
+[2026-05-23 KST] ⚡ GSD | NOW-PRD-05 | harness | test 192/4skip · build ✓ · EPIC GATE C 수동 6항 | GATE C:☑ Stephen
+[2026-05-23 KST] ⚡ GSD | NOW-PRD-04 | `+page.svelte` · `aiGenerations.ts` | apply 시 insertAiGenerationL5(prd-tab) | GATE C:☑ Stephen
+[2026-05-23 KST] ⚡ GSD | NOW-PRD-03 | `+page.svelte` | s1~s5 「AI 보강」툴바·헤더 s1 제거 · build ✓ | GATE C:☑ Stephen
+[2026-05-23 KST] ⚡ GSD | NOW-PRD-02 | `+page.svelte` | runPrdSectionAiEnhance·모달 일반화 · build ✓ | GATE C:☑ Stephen
+[2026-05-22 KST] 🔓 GATE E | EPIC P2-B2 | Stephen ☑ | @qa CONDITIONAL · 구현 50bbd6d | EPIC 마감
+[2026-05-22 KST] 🔍 @qa | EPIC P2-B2 | 188/4skip · build ✓ | CONDITIONAL · 시나리오5~6·RWD/CB표 미작성 · 커밋50bbd6d+하네스미커밋 | → GATE E 👤
+[2026-05-22 KST] 🔓 GATE D | EPIC P2-B2 | Stephen ☑ | NOW-B2-01a~03·02a·03 · GATE C 전항 | → @qa · GATE E
+[2026-05-22 KST] 🔓 GATE C | EPIC P2-B2 | Stephen ☑ | PRD 4-레이어 L1~L4 · vitest 187/4skip · build ✓ | → GATE D · @qa
+[2026-05-22 KST] ⚡ GSD | EPIC P2-B2 마감 | `contextSerializer`·`domainDictionary`·`generationPipeline`·`plannodePilot`·`+page.svelte`·`aiGenerations.ts` | NOW-B2-01a~03·02a·03 ☑ | GATE C:☑ Stephen
+[2026-05-20 KST] 🔍 @qa | EPIC BADGE-ALIGN | 180/4skip · build ✓ | CONDITIONAL · PRD F1-3 CRUD 문구 · 샘플 JSON 삭제·문서 불일치 | → GATE E 👤
+[2026-05-20 KST] 🔓 GATE D | EPIC BADGE-ALIGN | Stephen ☑ | NOW-BADGE-05~08 · GATE C 1~7 전항 | → @qa · GATE E
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-08 문서·회귀·GATE C | plannode-badge-mapping §0.5·§8.2·§4.4 · tree-v1-reference · crazyshotBadgeFullPipeline.test.ts · vitest 180/4skip · build ✓ | ~30m | GATE C:☑ Stephen
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-07 프롬프트·스펙·타입 | badgePromptInjector.ts · agendaPromptAgent.ts · types.ts · badgePromptInjector.test.ts (37/37) | ~30m | GATE C:👤대기
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-06 추론 재정렬 | badgeMetadataInference.ts · badgeMetadataInference.test.ts (25/25) | ~30m | GATE C:☑ Stephen
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-05 풀 슬림·alias | badgePoolConfig.ts · badgeImportAliases.ts · badgeImportAliases.test.ts (9/9) | ~30m | GATE C:☑ Stephen
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-04 회귀·문서 | crazyshotBadgeFullPipeline(inline+skip) · badge-mapping §8.2 · tree-v1-reference · build ✓ · vitest 133+4skip | GATE C:👤통합
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-03 프롬프트·BADGE_SPEC | badgePromptInjector.ts · agendaPromptAgent.ts | GATE C:☑ Stephen badgePromptInjector.ts · agendaPromptAgent.ts · badgePromptInjector.test.ts | ~30m | GATE C:👤대기
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-02 keywordHints | badgeMetadataInference.ts · badgeMetadataInference.test.ts | ~30m | GATE C:☑ Stephen
+[2026-05-20 KST] ⚡ GSD | NOW-BADGE-01 풀·alias | badgePoolConfig.ts · badgeImportAliases.ts · badgeImportAliases.test.ts (+ sanitize 회귀 2건) | ~30m | GATE C:☑ Stephen
+[2026-05-20 KST] 🔓 GATE E | EPIC PROJ-SETTINGS | Stephen ☑ | @qa CONDITIONAL · 통합 커밋 11파일 권장 | → git commit(👤)
+[2026-05-20 KST] 🔍 @qa | EPIC PROJ-SETTINGS | 11파일 · build ✓ · vitest 46/46 | CONDITIONAL(중복 register 정리·수동표 BACKLOG) | → GATE E
+[2026-05-20 KST] 🔓 GATE D | EPIC PROJ-SETTINGS | Stephen ☑ | NOW-PROJ-01~06 + PROJ-FOLLOWUP | → @qa · GATE E
+[2026-05-20 KST] ⚡ GSD | PROJ-FOLLOWUP | `projectAcl.ts`·`sync.ts`·`projects.ts`·`+page.svelte`·`projects.mergeMeta.test.ts` | 공유 badge_pool pull·mergeProjectMetaForCloudSync·툴바 pill/권한·덮어쓰기 모달 | build ✓ | GATE C:👤
+[2026-05-20 KST] 🔓 GATE B | EPIC PROJ-SETTINGS | Stephen ☑ | NOW-PROJ-01→06 확정 | → NOW-PROJ-01 @harness-executor
+[2026-05-20 KST] ⚡ GSD | NOW-PROJ-06 | `.cursor/harness/TASK.md` | EPIC PROJ-SETTINGS GATE C 블록·build·vitest 42/42 | EPIC CLOSED | GATE C 통합:👤 · → GATE D
+[2026-05-20 KST] ⚡ GSD | NOW-PROJ-05 | `+page.svelte`·`plannodeTreeV1.ts` | edit-current 가져오기·mdc·덮어쓰기 모달·프로젝트 id 유지 | build ✓ | GATE C:👤 · → NOW-PROJ-06
+[2026-05-20 KST] ⚡ GSD | NOW-PROJ-04 | `StandardBadgePoolModal.svelte`·`projects.ts`·`pilotBridge.ts`·`+page.svelte` | 프로젝트 load/save·노드 배지 정리·캔버스 rehydrate | build ✓ | GATE C:👤 · → NOW-PROJ-05
+[2026-05-20 KST] ⚡ GSD | NOW-PROJ-03 | `client.ts`·`badgePoolConfig.ts`·`projects.ts`·`badgePoolConfig.project.test.ts` | Project.badge_pool·lookup·LWW 병합·vitest 3/3 | build ✓ | GATE C:👤 · → NOW-PROJ-04
+[2026-05-20 KST] ⚡ GSD | NOW-PROJ-02 | `src/routes/+page.svelte` | edit-current 프리필·변경 저장·배치 토글·제목 분기 | `npm run build` ✓ | GATE C:👤 · → NOW-PROJ-03
+[2026-05-20 KST] ⚡ GSD | NOW-PROJ-01 | `src/routes/+page.svelte` | 툴바 #TB-PROJ-SETTINGS SVG · edit-current 모달 진입 · create-list 분리 | `npm run build` ✓ | GATE C:👤 · → NOW-PROJ-02
+[2026-05-20 KST] 🔓 GATE E | 동기화 보완·EPIC D BACKLOG | Stephen ☑ | QA CONDITIONAL · 커밋 A+B 분리 권장 | → git commit(👤)
+[2026-05-20 KST] 🔍 @qa | EPIC D Step5 | TASK · plan-output P-12 | CONDITIONAL — build+vitest 5/5 · GATE C 수동 6항목 미실시 | → GATE E 👤
+[2026-05-20 KST] 🔓 GATE D | EPIC D | Stephen ☑ | NOW-OT2-01~08 · @qa Step5 | → GATE E · GATE C 수동
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-08 | `plannode_workspace_sync_overview.md` §7.5 · TASK GATE C | EPIC D NOW CLOSED | build+vitest ✓ | → GATE C/D · @qa
+[2026-05-20 KST] 🔓 GATE C | NOW-OT2-07 | Stephen ☑ | pilotBridge 이중 계약 | → NOW-OT2-08
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-07 | `pilotBridge.ts` | EPIC D 이중 계약 주석 · pull/modal 가드 문서화 | build ✓ | GATE C:👤 · → NOW-OT2-08
+[2026-05-20 KST] 🔓 GATE C | NOW-OT2-06 | Stephen ☑ | sDrag move_node | → NOW-OT2-07
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-06 | `plannodePilot.js` | sDrag move_node · 그룹 드래그 | build ✓ | GATE C:👤 · → NOW-OT2-07
+[2026-05-20 KST] 🔓 GATE C | NOW-OT2-05 | Stephen ☑ | cDel delete_node | → NOW-OT2-06
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-05 | `plannodePilot.js` | cDel delete_node · remote subtree · merge registry | build ✓ | GATE C:👤 · → NOW-OT2-06
+[2026-05-20 KST] 🔓 GATE C | NOW-OT2-04 | Stephen ☑ | addChild structure op | → NOW-OT2-05
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-04 | `plannodePilot.js` | addChild add_node · structure subscribe on hydrate | build ✓ | GATE C:👤 · → NOW-OT2-05
+[2026-05-20 KST] 🔓 GATE C | NOW-OT2-03 | Stephen ☑ | projectStructureOps | → NOW-OT2-04
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-03 | `projectStructureOps.ts`·`.test.ts` | subscribe/send/parse · build ✓ · vitest 5/5 | GATE C:👤 · → NOW-OT2-04
+[2026-05-20 KST] 🔓 GATE C | OT2-01~02 | Stephen ☑ | 스파이크 2건 | → NOW-OT2-03
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-02 | `docs/plannode_ot2_tree_structure_poc_spike.md` | op v1·R1 POC · src 미변경 | GATE C:👤 · → NOW-OT2-03
+[2026-05-20 KST] ⚡ GSD | NOW-OT2-01 | `docs/plannode_ot2_tree_ops_channel_spike.md` | structure 채널 스파이크 · src 미변경 | GATE C:👤 · → NOW-OT2-02
+[2026-05-20 KST] 🔓 GATE B | EPIC D | Stephen ☑ | 상위 플랜 `PLANNODE_HARNESS_FLOW_STATE.plan.md` 반영 | NOW-OT2-01~08
+[2026-05-20 KST] 📋 Plan | Harness Flow 상태 | `.cursor/plans/PLANNODE_HARNESS_FLOW_STATE.plan.md` §0~8 | TASK 상단 링크 | → GATE B · NOW-OT2-01
+[2026-05-19 KST] 📋 Step3 | EPIC D Plan | `TASK.md` NOW-OT2-01~08 확정 | GATE A ☑ Stephen | → GATE B (EPIC D):👤 · NOW-OT2-01
+[2026-05-19 KST] 🔓 GATE A | EPIC D P-12 | Stephen 승인 ☑ | structure ops · P2-B2 병행 금지 | → Step3 TASK
+[2026-05-19 KST] 📋 Step2 | EPIC D @promptor | `plan-output.md` §P-12 | 트리 CRDT 2단계 · NOW-OT2-01~08 | `src` 미변경 | → GATE A (P-12):👤 Stephen
+[2026-05-19 KST] 🚀 Step1 | EPIC D | Stephen Step1 승인 ☑ | 트리 구조 ops · P2-B2 병행 금지 | → @promptor P-12
+[2026-05-19 KST] 🔓 GATE E | EPIC P2-B | Stephen 커밋 허가 ☑ | → git commit(👤) · P2-B2 BACKLOG · EPIC P2 Phase2 IA/LLM 마감
+[2026-05-19 KST] 🔍 QA Step5 | EPIC P2-B | **PASS** | build ✓ · vitest 8/8 · F2-5 L1 · GP-12/13 | → GATE E:👤
+[2026-05-19 KST] 🔓 GATE D | EPIC P2-B | Stephen ☑ | NOW-P2B-01~08 · GATE C 전제 | → @qa · GATE E:👤
+[2026-05-19 KST] 🔓 GATE C | EPIC P2-B | Stephen ☑ | F2-5 L1 · plan-output P-11.11 | → GATE D:👤 · @qa
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-08 | `TASK.md` | EPIC P2-B GATE C 블록·구현 NOW CLOSED | — | → GATE C/D:👤 · @qa
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-07 | `aiGenerations.ts`·pilot·runner | AiGenerationContextSnapshot·node_id UUID | build ✓ | → GATE C:👤 · NOW-P2B-08
+[2026-05-19 KST] 🔓 GATE C | NOW-P2B-06 | Stephen ☑ | → NOW-P2B-07
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-06 | `+page.svelte` #V-AI | ai-impl-hint L1·거부 안내 1줄 | build ✓ | → GATE C:👤 · NOW-P2B-07
+[2026-05-19 KST] 🔓 GATE C | NOW-P2B-05 | Stephen ☑ | → NOW-P2B-06
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-05 | `iaExportRunner.ts`·`IAExportMenu.svelte` | 트랙 B L1·selId·context_insufficient | vitest 8/8 · build ✓ | → GATE C:👤 · NOW-P2B-06
+[2026-05-19 KST] 🔓 GATE C | NOW-P2B-04 | Stephen ☑ | → NOW-P2B-05 (ON)
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-04 | `iaExporter.test.ts` | buildPrompt L1·회귀·isLayer1ContextSufficient | vitest 7/7 ✓ | → GATE C:👤 · NOW-P2B-05
+[2026-05-19 KST] 🔓 GATE C | NOW-P2B-03 | Stephen ☑ | → NOW-P2B-04
+[2026-05-19 KST] ⚡ GSD+ | NOW-P2B-03 | `plannodePilot.js` | triggerAI selId·L1 거부·snapshot | `npm run build` ✓ | → GATE C:👤 · NOW-P2B-04
+[2026-05-19 KST] 🔓 GATE C | NOW-P2B-02 | Stephen ☑ | → NOW-P2B-03
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-02 | `iaExporter.ts` | buildPrompt+serializeToPrompt·currentNodeId | `npm run build` ✓ | → GATE C:👤 · NOW-P2B-03
+[2026-05-19 KST] 🔓 GATE C | NOW-P2B-01 | Stephen ☑ | → NOW-P2B-02
+[2026-05-19 KST] ⚡ GSD | NOW-P2B-01 | `docs/plannode_llm_f25_context.md` | F2-5·L1·AI탭 Intent·GATE C §9 | `src` 미변경 | → GATE C:👤 · NOW-P2B-02
+[2026-05-19 KST] 🔓 GATE B | EPIC P2-B | Stephen 승인 ☑ | NOW-P2B-01~08 | → NOW-P2B-01
+[2026-05-19 KST] 📋 Step3 | EPIC P2-B Plan | `TASK.md` NOW-P2B-01~08 | GATE A ☑ Stephen | → GATE B (EPIC P2-B):👤 · @harness-executor
+[2026-05-19 KST] 🔓 GATE A | EPIC P2-B P-11 | Stephen 승인 ☑ | LAYER1·제외 범위 | → Step3 TASK
+[2026-05-19 KST] 📋 Step2 | EPIC P2-B @promptor | `plan-output.md` §P-11 | F2-5 LAYER1 · 파이프 제외 | `src` 미변경 | → GATE A (P-11):👤 Stephen
+[2026-05-19 KST] 🔓 GATE E | EPIC P2-A | Stephen 커밋 허가 ☑ | → git commit(👤) · P2-B BACKLOG
+[2026-05-19 KST] 🔍 QA Step5 | EPIC P2-A | **PASS** | build+vitest ✓ · GP-12/13 · F2-5 제외 | → GATE E:👤
+[2026-05-19 KST] 🔓 GATE D | EPIC P2-A | Stephen 스프린트 마감 ☑ | → @qa · GATE E
+[2026-05-19 KST] 🔓 GATE C | EPIC P2-A | Stephen F2-4·F4-3/4-4 수동 검증 ☑ | → GATE D · @qa · GATE E
+[2026-05-19 KST] ⚡ GSD | NOW-P2-08 | TASK GATE C | EPIC P2-A 구현 CLOSED | → GATE C/D·@qa:👤
+[2026-05-19 KST] ⚡ GSD | NOW-P2-07 | N/A | buildIaGridMatrix=IAGridSheet 열 정합 | — | → NOW-P2-08
+[2026-05-19 KST] 🔓 GATE C | NOW-P2-06 | Stephen ☑
+[2026-05-19 KST] ⚡ GSD | NOW-P2-06 | `+page.svelte`·`iaExportIntent.ts` | 출력→구조보내기 템플릿 | build ✓ | → GATE C:👤 · NOW-P2-07
+[2026-05-19 KST] ⚡ GSD | NOW-P2-05 | `IAExportMenu.svelte` | 트랙 A/B·템플릿 다운로드 | build ✓ | → GATE C:👤 · NOW-P2-06
+[2026-05-19 KST] 🔓 GATE C | NOW-P2-04 | Stephen ☑
+[2026-05-19 KST] ⚡ GSD | NOW-P2-04 | `src/lib/ai/iaExporter.test.ts` | 재현성 3 tests | vitest ✓ | → GATE C:👤 · NOW-P2-05
+[2026-05-19 KST] ⚡ GSD | NOW-P2-03 | `src/lib/ai/iaExporter.ts` | `buildWireframesMarkdownFromTree` F4-4 | `npm run build` ✓ | → GATE C:👤 · NOW-P2-04
+[2026-05-19 KST] ⚡ GSD | NOW-P2-02 | `src/lib/ai/iaExporter.ts` | `buildIaStructureMarkdownFromTree`·`buildIaGridMatrix`·Mermaid | `npm run build` ✓ | → GATE C:👤 · NOW-P2-03
+[2026-05-19 KST] 🔓 GATE C | NOW-P2-01 | Stephen 문서 검증 ☑ | `plannode_ia_wire_export.md` | → NOW-P2-02
+[2026-05-19 KST] ⚡ GSD | NOW-P2-01 | `docs/plannode_ia_wire_export.md` | F2-4 정본·템플릿 vs L5·GATE C §6 | `src` 미변경 | → GATE C:👤 Stephen · NOW-P2-02
+[2026-05-19 KST] 🔓 GATE B | EPIC P2 / P2-A | Stephen GATE B (EPIC P2) 승인 ☑ | NOW-P2-01~08 · F2-5=P2-B | → @harness-executor NOW-P2-01
+[2026-05-19 KST] 🔓 GATE A | EPIC P2 P-10 | Stephen (GATE B 동반) ☑ | plan-output §P-10
+[2026-05-19 KST] 📋 Step2 | EPIC P2 @promptor | `plan-output.md` §P-10 | P2-A F2-4·F4-3/4-4 · P2-B F2-5 분리 | `src` 미변경 | → GATE A (P-10):👤 Stephen
+[2026-05-19 KST] 🚀 착수 선언 | EPIC P2 Phase 2 IA/LLM | Stephen 「별도 GATE B에서 착수」 | EPIC C·RT ☑ 선행 | → @promptor plan-output P-10 · GATE A · GATE B(EPIC P2) · EPIC D 병행 금지
+[2026-05-19 KST] 🔓 GATE E | EPIC C 1단계 OT | Stephen 커밋 허가 ☑ | → git commit(👤) · EPIC D BACKLOG · Phase 2 IA/LLM
+[2026-05-19 KST] 🔍 QA Step5 | EPIC C 1단계 OT | **PASS (CONDITIONAL 2)** — build ✓ · GP-12·보안 · `myUserId` 미사용 경고 · name OT·극단 동시편집 BACKLOG | → GATE E(👤) EPIC C 커밋
+[2026-05-19 KST] 🔓 GATE D | EPIC C 1단계 OT | Stephen GATE D 승인 ☑ | NOW-OT1-01~06 · GATE C 전제 | → @qa · GATE E
+[2026-05-19 KST] 🔓 GATE C | EPIC C 1단계 OT | Stephen EPIC C 승인 ☑ | → GATE D · @qa · GATE E
+
+[2026-05-19 KST] ⚡ GSD | EPIC C NOW-OT1-06 | TASK GATE C · `overview` §7.4 | 1단계 OT POC 문서·체크리스트 | → GATE C:👤 Stephen · GATE D
+
+[2026-05-19 KST] ⚡ GSD+ | EPIC C NOW-OT1-05 | `plannodePilot.js` mergeProtected | hydrate 시 description .eid 유지 | `npm run build` ✓ | → NOW-OT1-06 GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD+ | EPIC C NOW-OT1-04 | `plannodePilot.js`·`pilotBridge.ts` | .eid text ops·composition | `npm run build` ✓ | → NOW-OT1-05 · GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD+ | EPIC C NOW-OT1-03 | `src/lib/supabase/projectTextOps.ts` | subscribe/send/parse TextOp v1 | `npm run build` ✓ | → NOW-OT1-04 pilot .eid
+
+[2026-05-19 KST] ⚡ GSD | EPIC C NOW-OT1-02 | `docs/plannode_ot1_modal_poc_spike.md` | description·R1·OT1-03~06 | `src` 미변경 | → GATE B(구현)·OT1-03
+
+[2026-05-19 KST] ⚡ GSD | EPIC C NOW-OT1-01 | `docs/plannode_ot1_text_ops_channel_spike.md` | ops 채널 스파이크·권장 하이브리드 A | `src` 미변경 | → NOW-OT1-02
+
+[2026-05-19 KST] 🚀 착수 | EPIC C 1단계 OT | Stephen 「1단계 OT 착수」·IA/LLM 비겹침 | → NOW-OT1-01
+
+[2026-05-19 KST] 🔓 GATE B | EPIC B | P-9·EPIC C placeholder ☑ Stephen | 로드맵만·구현 없음 | → Phase 2 IA/LLM · EPIC C는 「1단계 OT 착수」 시
+
+[2026-05-19 KST] 🔓 GATE E | RT-COLLAB·EPIC A | Stephen 커밋 허가 ☑ | → git commit(👤) · EPIC B GATE B(선택) · Phase 2 IA/LLM · EPIC C 보류
+
+[2026-05-19 KST] 🔍 QA | RT-COLLAB·EPIC A | PASS (CONDITIONAL: TASK 8s vs code 4s poll 문서) | build ✓ | → GATE E 👤
+
+[2026-05-19 KST] 🔓 GATE D | EPIC A + RT-COLLAB | Stephen 스프린트 마감 ☑ | → @qa(선택) · GATE E · EPIC B GATE B · EPIC C 보류
+
+[2026-05-19 KST] 🔓 GATE C | RT-COLLAB·EPIC A | Stephen 수동(2브라우저·≤10s·§3·§7·build) | → GATE D(EPIC A·RT) · GATE B(EPIC B) · @qa 선택 · GATE E
+
+[2026-05-19 KST] 🔓 GATE A | P-9 OT/CRDT 로드맵 | Stephen 승인 | → GATE C(👤) · GATE B(EPIC B) · EPIC C 보류
+
+[2026-05-19 KST] ⚡ GSD | EPIC A NOW-EVAL-01~04 + NOW-RT-COLLAB-06 | `.cursor/plans/PLANNODE_SHARED_CANVAS_SYNC_EVALUATION.md` · `docs/plannode_workspace_sync_overview.md` §7·§3 · `plannode-architecture.mdc` §10.7 · `sync.ts` 주석 · `diagnose_merge_function_state.sql` 7단계 | `npm run build` ✓ | → GATE C:👤 (2브라우저·publication)
+
+[2026-05-19 KST] ⚡ GSD | NOW-RT-COLLAB-05 | `docs/plannode_workspace_sync_overview.md` §1 | collab revision Realtime·8s poll 문서 정정 | `src` 미변경 | → GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD+ | NOW-RT-COLLAB-04 | `cloudBackgroundSync.ts`·`sync.ts` | collab watch arm/disarm·COLLAB_FALLBACK_POLL_MS 8000 | `npm run build` ✓ | → GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD+ | NOW-RT-COLLAB-03 | `sync.ts`·`workspacePush.ts` | subscribe/unsubscribeCollabRevisionRealtime·debounce·busy retry | `npm run build` ✓ | → GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD+ | NOW-RT-COLLAB-02 | `src/lib/supabase/sync.ts` | get/setCachedCollabRevision·pullCollabSliceForProject·revision skip | `npm run build` ✓ | → GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD | NOW-RT-COLLAB-01 | `docs/supabase/20260520_plannode_collab_meta_realtime_rls.sql` | collab_meta SELECT RLS·supabase_realtime publication·revision 신호 주석 | `src` 미변경 | → GATE C:👤 Stephen SQL Editor 배포·정책·publication 존재 1줄
+
+[2026-05-19 KST] ✅ GATE D | COLLAB·실시간급·삭제·revision | Stephen「다음 단계 승인」·TASK GATE D·C | → @qa Step5 · GATE E
+[2026-05-19 KST] ⚡ GSD | revision_stale hint·진단 SQL | `sync.ts`·`diagnose_merge_function_state.sql`·overview §3 | details→p_base_revision 2차 시도 | `npm run build` ✓
+[2026-05-19 KST] ⚡ GSD | NOW-COLLAB-P3-MERGE-03 | `plannode_workspace_sync_overview` §4.3·§4.4·`sync.ts` | P-3 #3 false+preserve 미도입 | `npm run build` ✓ | → GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD | NOW-COLLAB-P3-MERGE-02 | `plannode_workspace_sync_overview` §4.3·`projects.mergeNodeListsForCloud.test.ts` | preserve 호출부·계약·Vitest | `vitest --run` ✓ | → GATE C:👤
+
+[2026-05-19 KST] ⚡ GSD | NOW-COLLAB-P3-MERGE-01 | `docs/plannode_workspace_sync_overview.md` §4.4 | P-3 #1 `pushProjectSlicesToOwners` 문서 정본 | `src` 미변경 | → GATE C:👤
+
+[2026-05-19 KST] GATE B ☑ (COLLAB P-3 후속) — Stephen — MERGE-01~03
+
+[2026-05-19 KST] 🔼 GATE 개설 | **GATE B (COLLAB P-3 후속)** — `plan-output` P-3 #1~#3·`TASK.md` NOW `NOW-COLLAB-P3-MERGE-01`~`03`·P-3.1 표 — ☑ 전 구현 금지 | → Stephen: GATE 본문에 포함·제외·순서 확정 후 ☑
+
+[2026-05-19 KST] ⚡ GSD+ | NOW-COLLAB-SYNC-06~09 | `plannodePilot.js`·`projects.mergeNodeListsForCloud.test.ts`·`docs/plannode_workspace_sync_overview.md` §4.5 | hydrate `queueMicrotask`+Presence id 정규화·Vitest·문서 | `npm run build` ✓ · `vitest --run …mergeNodeListsForCloud` ✓ | → GATE C:👤
+
+[2026-05-19 KST] GATE C ☑ — Stephen — NOW-COLLAB-SYNC-05 `hydrateFromStore` selId·Presence 아바타 수동 검증 — → GATE D·`NOW-COLLAB-SYNC-06`~ 별 GATE B
+
+[2026-05-19 KST] ⚡ GSD+ | NOW-COLLAB-SYNC-05 | `plannodePilot.js` `hydrateFromStore` | `selId` 루트(primary) 강제 제거 — 동기 후 null·유효 선택만 유지 | `npm run build` ✓ | → GATE C:👤 Presence·아바타 카드 위치 한 줄
+
+[2026-05-18 KST] GATE C ☑ — Stephen — 실시간급 NOW-RT-SYNC·`plan-output` P-8~P-8.2·`plannode_workspace_sync_overview` §4.2·Phase-A `cloudBackgroundSync`(공유+dirty 12s) — 수동 검증 승인 → GATE D·`NOW-COLLAB-SYNC-03`~ 백로그는 별 GATE B
+
+[2026-05-18 KST] ⚡ GSD+ | Phase-A 체감 동기 | `src/lib/supabase/cloudBackgroundSync.ts` | 공유 멤버(`cloud_workspace_source_user_id`≠uid)+`workspaceIsDirty` 시 배경 틱 12s·그 외 32s·스토어 구독으로 재설정 | `docs/plannode_workspace_sync_overview.md` §1·§5 표 | `npm run build` ✓ | → GATE C:👤 2프로필·더티 시 Network interval 체감 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-RT-SYNC-06 | `.cursor/harness/TASK.md` | 실행 스코프에 GATE C(2프로필·`plannode_workspace_merge_project_slice`·`revision_stale`/`merge_locked`·트리·노드 id 유실) 플랜 §5 반영 | `src` 미변경 | → GATE C:👤 체크리스트 수행 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-RT-SYNC-05 | `.cursor/harness/plan-output.md` §P-8.2 | 플랜 단계 A 후속 구현 키워드(조건부 interval·push 계약·busy·+page·rate·GP-12/13) | `src` 미변경 | → GATE C:👤 백로그 동의 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-RT-SYNC-04 | `docs/plannode_workspace_sync_overview.md` §4.2 | `plannode_workspace_merge_project_slice` 행에 per-node `plannode_merge_nodes_jsonb_lww`·동일 id LWW 한계·§4.3 교차 표기 | `src` 미변경 | → GATE C:👤 §4.2 표 문구 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-RT-SYNC-03 | `GSD_LOG.md`(본 절) | 단축 경로(step2·GATE A 생략)·플랜 `실시간급_공유동기_보완_2efbefa3.plan.md`·§6 결론: 누락 정의 **A·B** 수용 가능·**C**(동시 동일 노드 비손실)는 단계 **D**/OT | `src` 미변경 | → GATE C:👤 하네스 추적 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-RT-SYNC-02 | `.cursor/harness/plan-output.md` §P-8.1 | F5-2 실시간 정의(번들·슬라이스·풀/플러시·Presence 메타 vs OT·본문 Realtime 비포함·§10.7) | `src` 미변경 | → GATE C:👤 P-8.1 문구 동의 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-RT-SYNC-01 | `.cursor/harness/plan-output.md` §P-8 | 실시간급 수용 기준 5줄(≤15s dirty 틱·A/B/C·삭제 비포함·OT 비목표·`cloud_workspace_source_user_id`/`workspace_source_user_id`) | `src` 미변경 | → GATE C:👤 P-8 문구·숫자 상한 동의 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-COLLAB-SYNC-02 | `src/lib/supabase/sync.ts` `pushProjectSlicesToOwners` | `fetchProjectSliceFromCloud` 후 `mergeNodeListsForCloud(local, slice.nodes, false, projectId)`로 `p_nodes` 구성(슬라이스 없으면 기존 로컬만) — push 시 로컬 전용 id 유지·소유자 측 더 새 노드 흡수 | `npm run build` ✓ | → GATE C:👤 공유 2인·merge RPC payload·노드 유실 재현 여부 한 줄
+
+[2026-05-18 KST] ⚡ GSD | NOW-COLLAB-SYNC-01 | `GSD_LOG.md`(본 절) | 재현·측정 절차 정본 — `src` 미변경 | → GATE C:👤 아래 표 시나리오 수동 실행·Network/Console 기록
+
+**GATE B:** NOW-COLLAB-SYNC-01~09 스택 확정(Stephen, 2026-05-18).
+
+### 공유 동시편집 재현·측정 정본 (plan-output · §2 측정 절과 정합)
+
+**관측 포인트:** Network — `plannode_workspace_merge_project_slice`, `plannode_project_collab_get_revision`, `plannode_project_collab_try_acquire_lock`, `plannode_project_collab_release_lock`, pull 묶음. Console — `[pushProjectSlicesToOwners]`, `[runBidirectionalCloudSync]`, `[cloud auto]` 등. 노드 id 집합·`updated_at`은 `captureNodeSnapshot` / `pre_pull` 등이 있으면 직전·직후 비교.
+
+| ID | 시나리오 | 무엇을 보면 경로 A(push 덮어씀)인가 | 무엇을 보면 경로 B(pull 삭제)인가 | 무엇을 보면 selId 폴백·Presence인가 |
+|----|----------|-------------------------------------|-------------------------------------|--------------------------------------|
+| A | 소유자만 노드 추가 | — | — | 동기 후 선택·아바타(기준선) |
+| B | 공유자만 노드 추가 후 **push 전** 소유자 슬라이스가 pull됨 | — | merge 후 공유자 로컬 신규 id가 사라지면 **B** | pull 직후 아바타가 루트로 붙으면 **Presence/selId** |
+| C | 양쪽이 서로 다른 가지에 동시 추가 | merge RPC 직렬·`revision_stale` 토스트·재시도 | — | 동기 직후 카드 위 아바타 위치 |
+| D | 같은 노드를 짧은 간격으로 양쪽이 수정 | `p_nodes` 한 벌 LWW·나중 `updated_at` 승 | `remoteMetaNewer` 분기와 함께 한쪽 필드 소실 | — |
+| E | `revision_stale` 후 pull·재시도 루프 | 재시도 전후 `p_nodes` payload에 상대 신규 id 포함 여부 | pull 후 로컬 id 집합 변화 | 재동기 후 `plannode-node-select`의 `nodeId`가 루트인지 Console 확인 |
+
+**경로 정의(판정용):** **A** = 공유 멤버가 올린 `p_nodes`에 소유자 측 신규 id가 없어 소유자 JSON이 통째 교체되며 사라짐. **B** = `mergeNodeListsForCloud`에서 `remoteProjectMetaNewer===true`일 때 원격 목록에 없는 로컬 id가 삭제됨. **Presence/selId** = 동기 하이드레이트 후 선택이 루트로 잡혀 타인 화면에서 아바타가 첫 카드에 보임 — `plan-output` 아젠다 버그 2.
+
+[2026-05-15 KST] ✅ GATE D:👤Stephen | NOW-TREE-JSON 스프린트 | 전체 구현·범위(plan-output P-3) 확인 승인 | → STEP 5 @qa · GATE E
+
+[2026-05-15 KST] ✅ GATE C:👤Stephen | NOW-TREE-JSON 스프린트 종료 | 01~07 회귀 승인 · 08 조건부 스킵 유지 | → GATE D 전체 구현 확인
+
+[2026-05-15 KST] ⏭ NOW-TREE-JSON-08 **조건부 스킵** | 재현 없음: JSON 보내기 직전 persist·스토어↔파일럿 텍스트 불일치 | 코드 변경 없음 | → 재현 시 별도 NOW·GATE C
+
+[2026-05-15 KST] ⚡ GSD | NOW-TREE-JSON-07 | `docs/plannode-tree-v1-ai-reference.md` | §3.3 global 미러·루트 키·export·캔버스 가드·unknownRootKeys·CLI 병합 교차 — 문서만 | → GATE C:👤 외부 AI 프롬프트 점검 한 줄
+
+[2026-05-15 KST] ⚡ GSD | NOW-TREE-JSON-06 | `scripts/sync_plannode_tree.py` · `scripts/README-plannode-tree-sync.md` | plannode.tree 병합·미러→루트 재주입·prefer 플래그 3종 | smoke ✓ | → GATE C:👤 CLI 한 번
+
+[2026-05-15 KST] ⚡ GSD | NOW-TREE-JSON-05 | `plannodeTreeV1.ts` · `+page.svelte` · `plannodeTreeV1.test.ts` | 루트 미인식 키 `unknownRootKeys` · `#BJI` 완료 토스트 접미사 | vitest 34 ✓ | → GATE C:👤 임의 루트 키 JSON 한 줄
+
+[2026-05-14 KST] ⚡ GSD | NOW-TREE-JSON-04 | `plannodeTreeV1.ts` · `plannodePilot.js` · `plannodeTreeV1.test.ts` | `isPlannodeJsonGlobalMirrorNode` + 캔버스 가드(삭제·편집·+·relink·드롭·드래그·컨텍스트) | vitest plannodeTreeV1 ✓ | → GATE C:👤 글로벌 미러 카드 한 줄
+
+[2026-05-14 KST] ⚡ GSD+ | NOW-TREE-JSON-03 | `plannodePilot.js` · `plannodeTreeV1.test.ts` | `buildPlannodeExportV1` 루트 재호이스트 · 라운드트립 vitest | vitest 28 ✓ | → GATE C:👤 브라우저 JSON 보내기
+
+[2026-05-14 KST] ✅ GATE C:👤Stephen | NOW-TREE-JSON-02 | vitest 글로벌 미러 — 승인 후 NOW-03
+
+[2026-05-14 KST] ⚡ GSD | NOW-TREE-JSON-02 | `src/lib/plannodeTreeV1.test.ts` | 글로벌 미러 6케이스 · v1/v2 `global` 유지 · 중복·`-r` 부재 스킵 | vitest 27 ✓ | → GATE C:👤
+
+[2026-05-14 KST] ✅ GATE C:👤Stephen | NOW-TREE-JSON-01 | 가져오기·합성 `global` — 승인 후 NOW-02 진행
+
+[2026-05-14 KST] ⚡ GSD | NOW-TREE-JSON-01 | `src/lib/plannodeTreeV1.ts` | 루트 `global_*`·`tech_stack`·`schema_notes`·`_import_lock` 합성 `node_type: global` 미러 노드 · `NORMALIZED_NODE_TYPES`+`global` | vitest plannodeTreeV1 21 ✓ | → GATE C:👤 `#BJI` 가져오기·루트 `-r` 존재 시 글로벌 노드 표시 한 줄
+
+[2026-05-14 KST] 🔍 QA Step5 | NOW-HIST 스프린트 마감 | **PASS(시나리오 1~4)** — Stephen **GATE C 전제 통과** 확정 · 규칙·보안·빌드·PWH teardown·#CV/#EG 정적 통과 · 시나리오 5~6·검증 표 BACKLOG 허용 → **GATE E** 커밋
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-APP-07 | `projects.ts` · `plan-output.md` · `TASK.md` | 번들 `historyEntries`(50)·`plannode_project_workspace_history` 이중 축·서버 중심 이행은 별 GATE 문서화 | `npm run build` ✓ | → GATE C:👤한 줄 선택
+
+[2026-05-14 KST] ✅ GATE C:👤Stephen 승인 | NOW-HIST-APP-04~06 확장 | 히스토리 모달 **`cloud_upload`** 행 · 60s/120s append · Realtime·`20260515_*.sql` — 수동 확인 완
+
+[2026-05-14 KST] ⚡ GSD+ | NOW-HIST-APP-04~06 | `sync.ts` · `projectWorkspaceHistory.ts` · `+page.svelte` · `nodeSnapshotHistory` · `20260515_plannode_pwh_realtime_publication.sql` | 업로드 성공→60s PWH append · Realtime INSERT · 모달 재fetch | `npm run build` ✓ | → GATE C:👤Realtime publication PROD 실행·히스토리 모달·트리 한 줄
+
+[2026-05-14 KST] ✅ GATE B:👤Stephen 승인 | 히스토리 서버 **2단계** | `.cursor/harness/TASK.md` | 초안 P1 persist — **실구현은 업로드 성공 트리거로 정정**(Stephen) · P2 60s · P3 postgres_changes · P4 번들 유지
+
+[2026-05-14 KST] 📋 TASK | NOW-HIST-APP-II (04~07) · GATE B 히스토리 서버 2단계 | `.cursor/harness/TASK.md` | **자동 append(`persist` 등)·Realtime·모달 실시간 갱신** 단계·P1~P5 표 기록 | 구현은 **GATE B Stephen 승인** 후 `@harness-executor`
+
+[2026-05-14 KST] ✅ GATE C:👤Stephen 승인 | NOW-HIST-MODAL-* · UI-01 · DOC-01 · COPY-01 · DB-01 · APP-01~03 | 히스토리 모달·문구·서버 히스토리 수동 스냅 경로
+
+[2026-05-14 KST] ⚡ GSD+ | NOW-HIST-APP-01~03 | `projectWorkspaceHistory.ts` · `+page.svelte` | 수동 스냅→RPC·모달 서버 fetch·mergeModal 3원 | `npm run build` ✓ | → GATE C:👤공유 2계정·수동 스냅·모달 행
+
+[2026-05-14 KST] ⚡ GSD+ | NOW-HIST-DB-01 | `docs/supabase/20260514_plannode_project_workspace_history.sql` | plannode_project_workspace_history · RLS · append RPC | 앱 연동 미포함 | → Supabase 적용·GATE C:👤Stephen
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-MODAL-COPY-01 | `src/routes/+page.svelte` | `.snap-hist-hint` — 내 기기·내 번들·공유 시 목록 상이 | — | → GATE C:👤문구 톤·줄바꿈 한 줄 선택
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-MODAL-DOC-01 | `.cursor/harness/plan-output.md` | P-1.5 기대치·공유 타임라인 한계·P-3 교차 우선순위 | 코드 없음 | → GATE C:👤문구 확인 선택
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-MODAL-UI-01 | `src/routes/+page.svelte` | `:global(.mo.mo-wide)` **직후** `:global(.mo.mo-wide.snap-hist-modal)` 폭·표 래퍼 `overflow-x`·`min-width` (캐스케이드 우선) | 다른 `mo-wide` 유지 | → GATE C:👤히스토리 모달 가로·스크롤 한 줄
+
+[2026-05-14 KST] ⚡ GSD | NOW-HIST-MODAL-01~04 | `.cursor/harness/TASK.md` | 플랜 §1~§6.2 정합 본문·GATE B☑·NOW ☑·BACKLOG NOW-HIST-MODAL-UI-01 | src·SQL 미변경 | → GATE C:👤한 줄 검증 선택 · 차기 UI/DB는 별도 GATE B
 
 [2026-05-14 KST] ✅ GATE D:👤승인 | NOW-ACL-BG-*·DEL-WS 후속 | Stephen 채팅 → `@qa` Step5
 
@@ -617,5 +1458,11 @@
     * ⏳ 파일럿 갭 검증 (DOM 계약, drawEdges/updMM, 루트 노드, 트리↔탭 동기)
   - **검증 기록:** `GATE-C-回帰-check-2026-05-14.md` 작성 (상세 체크리스트 및 진행 상태)
   - **다음:** 👤 Stephen localhost 수동 검증 → GATE D 승인 → @qa STEP5
+
+---
+
+[2026-05-29 KST] 🔓 GATE C | **NOW-P0-DEL-WS-06** | Stephen ☑ | 삭제 고스트 복원 방어 · 추가 RPC 0 | → **NOW-GATE-C-CSP** (GATE D)
+
+[2026-05-29 14:38 KST] ✅ **NOW-P0-DEL-WS-06 구현 완료** | 삭제 프로젝트 고스트 일괄 복원 방어 | `src/lib/stores/projects.ts` · `src/lib/supabase/sync.ts` · `src/lib/stores/projects.workspaceDeletion.test.ts` | ~25분 | **네트워크 영향: 추가 RPC/fetch 0** — 기존 upload/pull 타이밍 유지 · 클라이언트 필터·tombstone 정책만 변경 | **방어층:** ① `workspaceDeletedProjectSkipIds`(pending+tombstone+ghost-hide) ② `gatherWorkspaceBundle` 제외 ③ merge skip + `clearDeletedTombstone:false` ④ `stripResurrectedDeletedProjectsFromLocal` ⑤ tombstone 조기 cloud-prune 제거(TTL-only) ⑥ upload 성공 후 `releaseDeletedProjectTombstonesAfterUpload` | **검증:** vitest 12 ✓ · build ✓ | GATE C:👤 Stephen (삭제→드래그 CSP→모달 목록·Network 추가 요청 없음)
 
 *GSD_LOG.md | Plannode | Harness Flow v1.0*

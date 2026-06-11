@@ -1,9 +1,13 @@
 # Plannode — 와이어프레임 자동 생성 기능 개발 가이드
 
-**작성일**: 2026.04.29  
-**대상**: Cursor AI 에이전트 / 풀스택 개발자  
-**목표**: JSON 노드 구조 → 프로토타입 와이어프레임 자동 변환  
-**예상 개발 시간**: 2주 (Step 1~2) / 4주 (Step 3까지)
+**로컬 파일명:** `plannode_wireframe_figma_dev.md` (구 `개발가이드-PLANNODE_WIREFRAME_DEV.md`)
+
+> **로드맵:** [`plannode_integrated_milestone_v3.md`](./plannode_integrated_milestone_v3.md) **§6 트랙 B** · M4~M5 GATE B 후만. **트랙 A(MD)** = PRD F2-4 · [`plannode_llm_phase2.md`](./plannode_llm_phase2.md) Part II.
+
+**작성일**: 2026.04.29 · **갱신**: 2026-06-04  
+**대상**: Cursor AI / 개발자  
+**목표**: JSON 노드 → Figma 프로토타입 ( **`src/lib/wireframe/` 미착수** )  
+**예상**: 2주 (Step 1~2) / 4주 (Step 3)
 
 ---
 

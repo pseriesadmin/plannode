@@ -1,9 +1,10 @@
 # 플랜노드 — 아젠다 → 노드트리 파이프라인 정밀 개발서 v1.0
 
-> **메인 마일스톤:** [`plannode_integrated_milestone_v2.md`](https://docs.plannode.io/dev/back/plannode_integrated_milestone_v2.md) — 통합 로드맵·하네스·M1~M5·H1~H4. **본 문서**는 그 플랜 **§3 M2-CORE(아젠다→노드트리)** 의 **구현 단일 기준**이며, 우선순위·GATE·`TASK.md` NOW 규칙은 마일스톤 문서를 따른다.  
-> 로컬 원본(형제 `back` 폴더): [`plannode_integrated_milestone_v2.md`](/Users/stevenmac/Documents/PSERIES/Plannode/Dev/back/plannode_integrated_milestone_v2.md)
+**로컬 파일명:** `plannode_dev_spec_v1.0.md` (구 `노드트리 AI생성 자동화- 파이프라인 정밀 개발서 v1.0.md` · docs.plannode.io `plannode_dev_spec.md`)
 
-> Cursor AI 즉시 착수용 · 내부 갭 분석(ai_스택·갭_정리) 기반 · 2026.05
+> **메인 마일스톤:** [`plannode_integrated_milestone_v3.md`](./plannode_integrated_milestone_v3.md) — §3 M2-CORE **구현 단일 기준** · CORE 상태 표는 마일스톤 §3 · GATE·`TASK.md`는 마일스톤·하네스 우선.
+
+> Cursor AI 즉시 착수용 · 갭 분석 [ai_stack_gap](https://docs.plannode.io/ai_stack_gap.plan.md) · **갱신:** 2026-06-04
 
 ---
 
@@ -24,19 +25,28 @@
 | `src/lib/supabase/aiGenerations.ts` | `insertAiGenerationL5` |
 | `src/lib/pilot/pilotBridge.ts` | `hydrateFromStore`, `pilotNodesToStore` |
 
-### 없는 것 (이번에 만든다) — 핵심 갭
-1. **아젠다 입력 UI** — 자유 아젠다 전용 진입점
-2. **백엔드 프롬프팅 에이전트** — 아젠다 구조화 + plannode.tree JSON 강제
-3. **AI 응답 → 파싱 → 스토어 → 캔버스 연결** — `triggerAI`는 텍스트 패널에만 표시, 캔버스 반영 없음
-4. **머지 정책** — 기존 트리 교체 vs 부분 병합 결정
+### M2-CORE 구현 상태 (2026-06 — 마일스톤 §3와 동기)
+
+| 항목 | 상태 | 비고 |
+|------|------|------|
+| `agendaDomainDetector` · `agendaPromptAgent` · `agendaResponseParser` | ☑ | `src/lib/ai/` |
+| `POST /api/ai/agenda-to-tree` | ☑ | 파싱·스토어는 **클라이언트** |
+| 아젠다 → 캔버스 E2E | ☑ | **`+page.svelte`** 프로젝트 생성·요구사항 (별도 `AgendaInputModal` 없음) |
+| 머지·교체 confirm (CORE-07) | ☐ | TASK 확인 |
+| `AGENDA_TO_TREE` · `insertAiGenerationL5` (CORE-09~10) | ☐ | |
+
+### 잔여·선택 갭
+1. **전용 아젠다 모달** — 계획 초안 `AgendaInputModal.svelte` · **미생성**(내장 플로로 대체 가능)
+2. **머지 정책** — 기존 트리 교체 vs 부분 병합
+3. **ai_generations** — `output_intent: AGENDA_TO_TREE` 영속
 
 ---
 
 ## 1. 전체 파이프라인 설계
 
 ```
-[AgendaInputModal.svelte]
-  사용자 아젠다 텍스트 입력
+[+page.svelte 프로젝트 생성·요구사항 필드]
+  사용자 아젠다 텍스트 입력 (계획 초안: AgendaInputModal.svelte — 미분리)
        │
        ▼
 [POST /api/ai/agenda-to-tree]  ← 신규 API 라우트
