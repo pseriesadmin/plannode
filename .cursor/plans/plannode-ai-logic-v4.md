@@ -1,10 +1,10 @@
 ---
 name: Plannode AI 로직 정리 v4
 version: 4.1
-overview: "중심 착수 명세: Dev/back `plannode_dev_spec.md`(아젠다→plannode.tree→캔버스). 본 v4는 Manyfast 정합·M2/M3 ID·하네스·PILOT 잔류만 유지한다. M1 코어(L5·callAI 경계·DB·IA 메뉴 등)는 완료 — 상세 귀결은 TASK·GATE 로그 참조."
+overview: "중심 착수 명세: `.cursor/plans/plannode_dev_spec_v1.0.md`(아젠다→plannode.tree→캔버스). 본 v4는 Manyfast 정합·M2/M3 ID·하네스·PILOT 잔류만 유지. M1·P2-A/B 완료 — CORE API·+page E2E는 마일스톤 §3."
 todos:
   - id: agenda-pipeline-dev-spec
-    content: "아젠다→트리: plannode_dev_spec.md 단일 기준(신규 API·모달·파서·머지)"
+    content: "아젠다→트리: plannode_dev_spec_v1.0.md 단일 기준(API·+page E2E·파서·머지 잔여)"
     status: pending
   - id: manyfast-core-parity
     content: "M2~M3: Manyfast 풀패리티 — 온보딩 업로드·PRD 인라인/부분AI·디렉터리·플로버전·와이어·개발지시서·xlsx 번들 등"
@@ -23,14 +23,14 @@ isProject: false
 
 # Plannode AI: Manyfast 정합 + M2/M3 + 하네스 잔류 (v4.1)
 
-> **v4.1** — M1 서술·중복 스택 표는 **[`plannode_dev_spec.md`](/Users/stevenmac/Documents/PSERIES/Plannode/Dev/back/plannode_dev_spec.md)** 로 이관·대체. 본 파일은 **제품 경계(M1/M2/M3)·Manyfast 4.2·뷰/출력 계약·PILOT UX·하네스 NOW 규칙**만 유지한다.  
-> 원본 v4 히스토리·M1 완료 표는 git 이전 커밋 참조.
+> **v4.1** — M1 서술·스택 표는 **[`plannode_dev_spec_v1.0.md`](./plannode_dev_spec_v1.0.md)** · **[`plannode_integrated_milestone_v3.md`](./plannode_integrated_milestone_v3.md)**. 본 파일은 **제품 경계·Manyfast 4.2·M2/M3 ID·PILOT·하네스 NOW**만 유지.  
+> IA/LLM 완료·P2-B2 → [`plannode_llm_phase2.md`](./plannode_llm_phase2.md). 협업 → `plannode-architecture.mdc` §10.
 
 ## 문서 구조 (읽는 순서)
 
 | § | 제목 | 역할 |
 |---|------|------|
-| **0** | **중심 착수 명세** | 아젠다→트리 파이프 — `plannode_dev_spec.md` |
+| **0** | **중심 착수 명세** | 아젠다→트리 — [`plannode_dev_spec_v1.0.md`](./plannode_dev_spec_v1.0.md) · 상태 — 마일스톤 §3 |
 | **1** | 하네스·문서 진실 순위 | TASK · §1.2 규칙 · H1~H4 |
 | **2** | 마일스톤 M1/M2/M3 | 범위 경계(한 표) |
 | **3** | L5·IA 3종 (완료 요지) | 코드 계약 유지용 요약 |
@@ -43,11 +43,11 @@ isProject: false
 
 ## 0. 중심 착수: 아젠다 → 노드트리
 
-**단일 구현 기준:** [`/Users/stevenmac/Documents/PSERIES/Plannode/Dev/back/plannode_dev_spec.md`](/Users/stevenmac/Documents/PSERIES/Plannode/Dev/back/plannode_dev_spec.md)
+**단일 구현 기준:** [`plannode_dev_spec_v1.0.md`](./plannode_dev_spec_v1.0.md) · 로드맵 [`plannode_integrated_milestone_v3.md`](./plannode_integrated_milestone_v3.md)
 
-- 이미 구현된 스택(`messages` 라우트, `anthropicMessages`, `contextSerializer`, `promptMatrix`, `parsePlannodeTreeV1*`, 배지 파이프, `upsertImported…`, `insertAiGenerationL5`, `pilotBridge`)은 개발서 **§0 표**를 따른다.
-- **미구현 갭**(아젠다 UI, JSON 강제 프롬프트, 응답→파싱→스토어→캔버스, 머지 정책)은 개발서 **§1~§8** 파이프라인·파일 목록·구현 순서로만 진행한다.
-- **정본 보정:** 파서 반환형(`ParsePlannodeTreeV1Result`), 인증(`getSupabaseUserForRequest`), `fetchAnthropicAssistantText` 인자, `insertAiGenerationL5` 필드명 — [`.cursor/plans/ai_스택·갭_정리_1e8a3f28.plan.md`](ai_스택·갭_정리_1e8a3f28.plan.md) §4.
+- 공통 스택·**CORE API·파서·`+page` E2E** — 개발서 **§0 구현 상태** · 마일스톤 **§3 CORE 표**.
+- **잔여:** CORE-07 머지 · CORE-09~10 `AGENDA_TO_TREE` 영속 · (선택) 전용 아젠다 모달.
+- **정본 보정:** [ai_stack_gap.plan.md](https://docs.plannode.io/ai_stack_gap.plan.md) §4 — 파서·인증·Anthropic·`insertAiGenerationL5` 필드명.
 
 `callAI` 관행명 = `POST /api/ai/messages` + `fetchAnthropicAssistantText` (하네스·TASK 동일). 아젠다 플로우는 **`POST /api/ai/agenda-to-tree`** (개발서).
 
@@ -99,7 +99,7 @@ flowchart TB
   M1 --> AG
 ```
 
-아젠다→초기 트리는 **M1 이후 보강**으로 `plannode_dev_spec`에 정의(신규 라우트·모달).
+아젠다→초기 트리: **`/api/ai/agenda-to-tree`** · **`+page.svelte`** (개발서·마일스톤 §3).
 
 ---
 
@@ -185,8 +185,10 @@ Manyfast **풀** 온보딩·문서 추출·PRD 부분 AI 풀·디렉터리 풀·
 
 | 무엇 | 어디서 본다 |
 |------|-------------|
-| 아젠다→트리 **구현** | **`plannode_dev_spec.md`** |
-| 스택·파서·정본 보정 요약 | **`ai_스택·갭_정리_1e8a3f28.plan.md`** |
+| 아젠다→트리 **구현** | **`plannode_dev_spec_v1.0.md`** |
+| 로드맵·CORE 상태 | **`plannode_integrated_milestone_v3.md`** |
+| IA/LLM·P2-B2 | **`plannode_llm_phase2.md`** |
+| 스택·파서·정본 보정 | **ai_stack_gap** (docs.plannode.io) |
 | M2/M3·Manyfast·뷰/출력 계약 | **본 v4.1 §4~§5** |
 | 하네스·NOW·갭 ID | **본 §1** + `TASK.md` |
 | PILOT 회귀 | **§6** |
@@ -195,4 +197,4 @@ Manyfast **풀** 온보딩·문서 추출·PRD 부분 AI 풀·디렉터리 풀·
 
 **결합 문서 (역할만):** [plannode_ai_v2_고도화_b084b2b3.plan.md](plannode_ai_v2_고도화_b084b2b3.plan.md) 로드맵 YAML · [plannode-ai-enhancement-v3.md](plannode-ai-enhancement-v3.md) L1~L5 기술 세부.
 
-*v4.1 | 중심: plannode_dev_spec.md | 2026-05*
+*v4.1 | [`plannode_integrated_milestone_v3.md`](./plannode_integrated_milestone_v3.md) · [`plannode_dev_spec_v1.0.md`](./plannode_dev_spec_v1.0.md) | 2026-06*

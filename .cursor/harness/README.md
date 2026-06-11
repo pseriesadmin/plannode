@@ -11,16 +11,18 @@
 
 | 순서 | 문서 | 용도 |
 |------|------|------|
-| **1** | [`.cursor/plans/plannode_integrated_milestone_v2.md`](../plans/plannode_integrated_milestone_v2.md) | **M1~M5·H1~H4·M2-CORE** 단계별 통합 플랜 · §0 실행 순서 · §7 진실 순위·지침 교차표 |
+| **1** | [`.cursor/plans/plannode_integrated_milestone_v3.md`](../plans/plannode_integrated_milestone_v3.md) | **M1~M5·H1~H4·M2-CORE** 단계별 통합 플랜 · §0 실행 순서 · §7 진실 순위·지침 교차표 |
 | **2** | [`.cursor/plans/harness-workflow_final.md`](../plans/harness-workflow_final.md) | 기본·단축 모드 · GATE · 복붙(G/R/W) |
 | **3** | [`AGENTS.md`](../../AGENTS.md) (저장소 루트) | 황금 원칙(GP) · 트리 보호 헌장 · **에이전트 호출 순서** |
 | **4** | [`.cursor/rules/plannode-prd.mdc`](../rules/plannode-prd.mdc) | 제품 M#·F#·Phase — `plan-output`·`TASK` **PRD:** 한 줄 근거 |
 | **4a** | [`.cursor/rules/README.md`](../rules/README.md) | **규칙 폴더** 영역별 `.mdc` 지침 통합 인덱스 |
 | **5** | `docs/PILOT_FUNCTIONAL_SPEC.md` | 파일럿 vs SvelteKit 갭 §9~§10 |
 | **6** | [`.cursor/plans/PLANNODE_INTEGRATED_GUIDE.md`](../plans/PLANNODE_INTEGRATED_GUIDE.md) | Git · Supabase · Vercel · DNS |
-| **7** | [노드트리 AI생성 자동화- 파이프라인 정밀 개발서 v1.0.md](../plans/노드트리%20AI생성%20자동화-%20파이프라인%20정밀%20개발서%20v1.0.md) | **M2-CORE** 구현 파일·순서 단일 기준 |
-| **8** | [`.cursor/plans/plannode-ai-logic-v4.md`](../plans/plannode-ai-logic-v4.md) | M2/M3 ID · 제품 경계(참고) |
-| **9** | [`.cursor/plans/개발가이드-PLANNODE_WIREFRAME_DEV.md`](../plans/개발가이드-PLANNODE_WIREFRAME_DEV.md) | 와이어 Figma 트랙(마일스톤 §6 트랙 B) |
+| **7** | [`plannode_dev_spec_v1.0.md`](../plans/plannode_dev_spec_v1.0.md) | **M2-CORE** 구현 명세 (구 한글 파일명) |
+| **8** | [`plannode-ai-logic-v4.md`](../plans/plannode-ai-logic-v4.md) | M2/M3 NOW ID · Manyfast |
+| **8a** | [`plannode_llm_phase2.md`](../plans/plannode_llm_phase2.md) | IA/LLM P2-A/B ☑ · M3 P2-B2 |
+| **9** | [`plannode_wireframe_figma_dev.md`](../plans/plannode_wireframe_figma_dev.md) | M4~M5 트랙 B (Figma) |
+| **10** | [`.cursor/rules/plannode-architecture.mdc`](../rules/plannode-architecture.mdc) **§10** | 협업·동기화 정본 (구 realtime redesign **폐기**) |
 
 **하네스 산출물(이 폴더):** [TASK.md](TASK.md) · [plan-output.md](plan-output.md) · [GSD_LOG.md](GSD_LOG.md) · [context-hook.md](context-hook.md) — 역할은 아래 **폴더 파일 역할** 표 참조.
 
@@ -28,7 +30,7 @@
 
 ## PRD(제품)와 하네스(절차)의 연계
 
-- **통합 단계별 로드맵:** [plannode_integrated_milestone_v2.md](../plans/plannode_integrated_milestone_v2.md) §0 — 스코프(단계 0)부터 M4~M5(단계 5)까지 **실행 순서**; 본 README 상단 **「개발 계획·문서 인덱스」**와 쌍으로 본다.
+- **통합 단계별 로드맵:** [plannode_integrated_milestone_v3.md](../plans/plannode_integrated_milestone_v3.md) §0 — 스코프(단계 0)부터 M4~M5(단계 5)까지 **실행 순서**; 본 README 상단 **「개발 계획·문서 인덱스」**와 쌍으로 본다.
 - **제품 기준(단일 진실)**: `.cursor/rules/plannode-prd.mdc` — 모듈 M#·기능 F#-#, MVP/Phase(§6), IA/와이어(F2-4, F4-3/4-4) vs LLM(F2-5, §10), v2 DB(§11) 등.
 - **하네스 산출물**은 PRD의 **이번 사이클에 해당하는 조각**을 구현·검수한다.
   - `plan-output.md`: **PRD 연계** 섹션에 M#·F#-# (필요 시 PRD 절 §) + **이번에 제외하는 Phase/기능**을 명시.

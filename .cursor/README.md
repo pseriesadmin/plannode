@@ -11,11 +11,12 @@
 
 ## Rules (`rules/`)
 
-- `plannode-core.mdc` — 스택·유지보수·Task(내장 explore/shell) 원칙 (`alwaysApply: true`)
-- `plannode-web.mdc` — `index.html` 등 웹 UI 작업 시
-- `plannode-docs.mdc` — `*.md` 문서 편집 시
+전체 목록·주제별 인덱스: **`rules/README.md`** (6× `.mdc` 빠른 참조 정본).
 
-규칙 추가 시: `.mdc` + `description` / `globs` / `alwaysApply` 를 맞춘다.
+- `plannode-core.mdc` · `plannode-prd.mdc` · `plannode-architecture.mdc` — `alwaysApply: true`
+- `plannode-ui-identity.mdc` · `plannode-web.mdc` · `plannode-badge-mapping.mdc` — globs별 적용
+
+규칙 추가 시: `.mdc` + `description` / `globs` / `alwaysApply` 를 맞추고 **`rules/README.md` 표**를 갱신한다.
 
 ## Subagents (`agents/`)
 

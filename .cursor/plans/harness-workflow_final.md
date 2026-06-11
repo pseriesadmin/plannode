@@ -298,7 +298,7 @@ Harness 아님 · `@promptor`·TASK·GATE·`@harness-executor`·`@qa` **안 씀*
 | UI 파일 로직(+page·파일럿) | `plannode-web.mdc` `plannode-architecture.mdc` |
 | 스토어·브리지 | `plannode-architecture.mdc` `plannode-core.mdc` |
 | 배지·가져오기·트리 텍스트 | `plannode-badge-mapping.mdc` `plannode-core.mdc` |
-| 문서 `.md`만 | `plannode-docs.mdc` |
+| 문서 `.md`만 | `rules/README.md` §「Markdown·README」 |
 
 경로는 모두 `@.cursor/rules/…` 붙임. 배지 안 건드리면 badge-mapping 생략 · 중복 `@` 금지.
 

@@ -3114,32 +3114,121 @@ function compareSiblingNodesForLayout(a, b) {
   return String(a.id).localeCompare(String(b.id));
 }
 
+/** render() 세션 동안 유효 — parent_id → 직계 자식 Node[] (PERF-B) */
+let _renderChildrenById = null;
+
+function buildChildrenByIdMap(nodeList) {
+  const m = new Map();
+  for (const n of nodeList) {
+    if (!n.parent_id) continue;
+    if (!m.has(n.parent_id)) m.set(n.parent_id, []);
+    m.get(n.parent_id).push(n);
+  }
+  return m;
+}
+
+function directKidsForLayout(nid) {
+  if (collapsedNodeIds.has(nid)) return [];
+  const raw =
+    _renderChildrenById?.get(nid) ?? nodes.filter((n) => n.parent_id === nid);
+  return raw.slice().sort(compareSiblingNodesForLayout);
+}
+
+function shownDirectKids(parentId) {
+  const raw =
+    _renderChildrenById?.get(parentId) ??
+    nodes.filter((n) => n.parent_id === parentId);
+  return raw.filter((c) => isTreeNodeShown(c));
+}
+
+function bldDirectKidsForLayout(nid) {
+  return directKidsForLayout(nid);
+}
+
+/**
+ * 단일 자식 체인의 전체 세로 row 범위(startRow~endRow)를 구한다 — 하위 자식·손자의 합산.
+ * bld()가 내려가면서 이미 lm을 채웠으므로 lm에서 리프의 advance까지 읽기 전용으로 집계.
+ */
+function getSpineChainRowRange(nid, col, startRow, pitch) {
+  let cur = nid;
+  let row = startRow;
+  while (cur) {
+    const kids = bldDirectKidsForLayout(cur);
+    if (kids.length !== 1) {
+      const node = find(cur);
+      row += node ? rightLayoutRowAdvanceForNode(node) : 1;
+      break;
+    }
+    const node = find(cur);
+    if (!node) break;
+    cur = kids[0].id;
+  }
+  // 마지막 리프의 row end는 bld가 이미 계산해 lm에 반영돼 있으므로 직접 계산 대신 bld return값 활용
+  return row;
+}
+
+/**
+ * 우측분포 — bld 후처리: 부모~리프 단일자식 체인 전체를 같은 세로 중앙 row로 보정.
+ * bld()가 모든 자식 lm을 확정한 뒤 상위에서 1회만 호출 — 중복 호출 없음 (FIX-EDGE-SPINE v2).
+ * endRow는 bld(kids[0].id) 반환값으로 정확한 subtree 끝 row.
+ */
+function alignSpineChainToCenterRow(nid, col, startRow, endRow, pitch) {
+  const groupCenterRow = (startRow + endRow) / 2;
+  let cur = nid;
+  let curCol = col;
+  while (cur) {
+    const node = find(cur);
+    if (!node) break;
+    const h = nodeHeightForRightLayout(node);
+    const topRow = groupCenterRow - h / (2 * pitch);
+    lm[cur] = { col: curCol, row: topRow };
+    const kids = bldDirectKidsForLayout(cur);
+    if (kids.length !== 1) break;
+    cur = kids[0].id;
+    curCol += 1;
+  }
+}
+
 function bld(nid, col, r) {
-  const kids = collapsedNodeIds.has(nid)
-    ? []
-    : nodes.filter((n) => n.parent_id === nid).sort(compareSiblingNodesForLayout);
+  const kids = bldDirectKidsForLayout(nid);
   if (!kids.length) {
     lm[nid] = { col, row: r };
     const node = find(nid);
     return r + (node ? rightLayoutRowAdvanceForNode(node) : 1);
   }
-  let row = r;
   const startRow = r;
+  const pitch = layoutRowH();
+  if (kids.length === 1) {
+    // 자식 subtree 전체 bld 완료 후 spine 체인 일괄 보정 (중복 호출 방지)
+    const row = bld(kids[0].id, col + 1, r);
+    alignSpineChainToCenterRow(nid, col, startRow, row, pitch);
+    const node = find(nid);
+    if (node && lm[nid]) {
+      const parentH = nodeHeightForRightLayout(node);
+      const parentTopRow = lm[nid].row;
+      const parentBottomRow =
+        parentTopRow + (parentH + TOPDOWN_SIBLING_COL_GAP) / pitch;
+      if (parentBottomRow > row) return parentBottomRow;
+    }
+    return row;
+  }
+  let row = r;
   for (const k of kids) {
     row = bld(k.id, col + 1, row);
   }
-  /** 부모 Y — 자식 구간 [startRow, row) 중앙( fractional row · FIX-12) */
-  const parentCenterRow = (startRow + row) / 2;
-  lm[nid] = { col, row: parentCenterRow };
-  // [수정] FIX-OVERLAP (2026-06-01): 부모 자체 높이가 자식 범위 끝을 초과하면 보정
-  // 문제: 부모를 children center에 배치할 때 부모 height가 커서 다음 형제를 침범함
-  //       예) parent center=668px, height=138px → bottom=806px가 next sibling(762px)을 덮음
-  // 해결: 부모 bottom row > 자식 끝 row이면 subtree end를 부모 bottom으로 확장
+  /** 부모 Y — 자식 그룹 세로 중앙에 부모 카드 중앙 정렬 (lm.row = top row · FIX-EDGE-3) */
   const node = find(nid);
   if (node) {
-    const pitch = layoutRowH();
-    const parentBottomRow = parentCenterRow + (nodeHeightForRightLayout(node) + TOPDOWN_SIBLING_COL_GAP) / pitch;
+    const groupCenterRow = (startRow + row) / 2;
+    const parentH = nodeHeightForRightLayout(node);
+    const parentTopRow = groupCenterRow - parentH / (2 * pitch);
+    lm[nid] = { col, row: parentTopRow };
+    const parentBottomRow =
+      parentTopRow + (parentH + TOPDOWN_SIBLING_COL_GAP) / pitch;
     if (parentBottomRow > row) return parentBottomRow;
+  } else {
+    const parentCenterRow = (startRow + row) / 2;
+    lm[nid] = { col, row: parentCenterRow };
   }
   return row;
 }
@@ -3252,6 +3341,11 @@ function applyNodeMapLayout(mode) {
   if (nodeMapLayoutMode === mode) return;
   nodeMapLayoutMode = mode;
   saveNodeMapLayoutPreference();
+  // 레이아웃 모드 전환 시 이전 모드의 mx/my 좌표를 모두 초기화한다.
+  // gp(n)은 mx/my가 존재하면 항상 그 값을 우선하므로,
+  // topdown→right 전환 시 topdown 위치가 간선·reflow 계산에 오염되어
+  // "잠시 불균형 후 정상" 플래시가 발생한다.
+  for (const n of nodes) { n.mx = null; n.my = null; }
   render();
   dispatchNodeMapLayoutEvent();
   requestAnimationFrame(() => {
@@ -3263,9 +3357,7 @@ function applyNodeMapLayout(mode) {
 
 /** 탑다운: `row` = 깊이, `col` = 가로(부모는 자식 col 범위의 중심) */
 function bldTopDown(nid, depth, colCursor) {
-  const kids = collapsedNodeIds.has(nid)
-    ? []
-    : nodes.filter((n) => n.parent_id === nid).sort(compareSiblingNodesForLayout);
+  const kids = directKidsForLayout(nid);
   if (!kids.length) {
     lm[nid] = { col: colCursor + 0.5, row: depth };
     return colCursor + 1;
@@ -3335,6 +3427,42 @@ function nodeCenterY(n) {
   return top + h / 2;
 }
 
+/** sDrag 활성 중에만 nodeGraphPos가 transform DOM을 읽음 (PERF-C) */
+let _canvasDragActive = false;
+
+/**
+ * 드래그 transform 중 `.nw` 시각 좌표 — 실제 드래그 중일 때만 transform 반영 (FIX-EDGE-SPINE drag)
+ * 비드래그 drawEdges: mx/my·gp()만 사용 — getElementById 2N회 제거 (PERF-C)
+ */
+function nodeGraphPos(n) {
+  if (n.mx != null && n.my != null) return { x: n.mx, y: n.my };
+  if (_canvasDragActive) {
+    const w = typeof document !== 'undefined' ? document.getElementById('nw-' + n.id) : null;
+    if (w && w.style.willChange === 'transform') {
+      const raw = w.style.transform || '';
+      const m = raw.match(/translate3d\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px/);
+      if (m) {
+        const left = parseFloat(w.style.left) || 0;
+        const top = parseFloat(w.style.top) || 0;
+        const tx = parseFloat(m[1]);
+        const ty = parseFloat(m[2]);
+        if (tx !== 0 || ty !== 0) {
+          return { x: left + tx, y: top + ty };
+        }
+      }
+    }
+  }
+  return gp(n);
+}
+
+function nodeGraphCenterY(n) {
+  const pos = nodeGraphPos(n);
+  const nd = typeof document !== 'undefined' ? document.getElementById('nd-' + n.id) : null;
+  const h =
+    nd && nd.offsetHeight > 28 ? nd.offsetHeight : estimateNodeCardHeightPx(n);
+  return pos.y + h / 2;
+}
+
 function nodeCardWidth(n) {
   const d = getDepth(n.id);
   return d === 0 ? NODE_CARD_W_ROOT : NODE_CARD_W_CHILD;
@@ -3359,7 +3487,7 @@ function nodeBottomY(n) {
 /** 하위분포: 펼침(자식 있음) 또는 +(자식 없음) 버튼 중심 Y — 간선 출발 */
 function nodeTopdownBranchAnchorY(n) {
   const bottom = nodeHasAnyChild(n.id) ? TOPDOWN_COLLAPSE_BOTTOM : TOPDOWN_PLUS_BOTTOM;
-  return nodeBottomY(n) + (-bottom - NODE_COLLAPSE_BTN_PX / 2);
+  return nodeBottomY(n) + (-bottom + NODE_COLLAPSE_BTN_PX / 2);
 }
 /** 우측분포: 펼침(자식 있음) 또는 +(자식 없음) 버튼 중심 X — 간선 출발 */
 function nodeRightBranchAnchorX(n, pp) {
@@ -3428,17 +3556,12 @@ function updateSelHighlightOnly() {
 function render() {
   clearSmartGuides();
   lm = {};
-  
-  // 자식 수 집계 맵 빌드 (parent_id별 직계 자식 수)
+  _renderChildrenById = buildChildrenByIdMap(nodes);
+
   const childCountByParentId = {};
-  nodes.forEach((n) => {
-    if (n.parent_id) {
-      if (!childCountByParentId[n.parent_id]) {
-        childCountByParentId[n.parent_id] = 0;
-      }
-      childCountByParentId[n.parent_id]++;
-    }
-  });
+  for (const [pid, kids] of _renderChildrenById) {
+    if (kids.length > 0) childCountByParentId[pid] = kids.length;
+  }
   
   if (nodeMapLayoutMode === 'right') {
     let globalRow = 0;
@@ -3764,9 +3887,13 @@ function render() {
     CV.appendChild(w);
   });
   if (nodeMapLayoutMode === 'right') {
+    // FIX-6 / PERF-A: 우측분포에서 drawEdges()는 reflow 후 이 블록에서만 1회 호출.
+    // reflow 전 1-pass lm으로 간선을 그리면 불균형·유령 간선이 남는다.
     reflowRightLayoutAfterDomMeasure();
+    drawEdges();
+  } else {
+    drawEdges();
   }
-  drawEdges();
   applyTx();
   
   // Shift+드래그 범위 선택 박스 그리기
@@ -3823,8 +3950,8 @@ function ensureEdgeArrowDefs() {
 }
 
 function computeEdgePathD(parent, child) {
-  const pp = gp(parent);
-  const cp = gp(child);
+  const pp = nodeGraphPos(parent);
+  const cp = nodeGraphPos(child);
   if (nodeMapLayoutMode === 'topdown') {
     const pw = nodeCardWidth(parent);
     const cw = nodeCardWidth(child);
@@ -3843,10 +3970,14 @@ function computeEdgePathD(parent, child) {
     return `M${x1},${y1} C${cx1},${y1 + dyStart} ${x2},${y2 - dEnd} ${x2},${y2}`;
   }
   const x1 = nodeRightBranchAnchorX(parent, pp);
-  const y1 = nodeCenterY(parent);
+  const y1 = nodeGraphCenterY(parent);
   const x2raw = cp.x;
   const x2 = x2raw - 12;
-  const y2 = nodeCenterY(child);
+  const y2 = nodeGraphCenterY(child);
+  const shownKids = shownDirectKids(parent.id);
+  if (shownKids.length === 1) {
+    return `M${x1},${y1} L${x2},${y2}`;
+  }
   const dist = Math.max(Math.abs(x2 - x1), 8);
   const dx = Math.min(88, dist * 0.52);
   return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
@@ -3878,13 +4009,11 @@ function drawEdgesPartialForNodeIds(idSet) {
   let touched = 0;
   nodes.forEach((n) => {
     if (!isTreeNodeShown(n)) return;
-    nodes
-      .filter((c) => c.parent_id === n.id && isTreeNodeShown(c))
-      .forEach((c) => {
-        if (!idSet.has(n.id) && !idSet.has(c.id)) return;
-        upsertEdgePath(n, c, hiKeys);
-        touched++;
-      });
+    for (const c of shownDirectKids(n.id)) {
+      if (!idSet.has(n.id) && !idSet.has(c.id)) continue;
+      upsertEdgePath(n, c, hiKeys);
+      touched++;
+    }
   });
   if (touched === 0 && !EG.querySelector('path[data-pe]')) drawEdges();
 }
@@ -3895,11 +4024,9 @@ function drawEdges() {
   const hiKeys = buildSelectionHighlightEdgeKeys();
   nodes.forEach((n) => {
     if (!isTreeNodeShown(n)) return;
-    nodes
-      .filter((c) => c.parent_id === n.id && isTreeNodeShown(c))
-      .forEach((c) => {
-        upsertEdgePath(n, c, hiKeys);
-      });
+    for (const c of shownDirectKids(n.id)) {
+      upsertEdgePath(n, c, hiKeys);
+    }
   });
 }
 
@@ -3932,6 +4059,7 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     hadManual.set(id, node.mx != null && node.my != null);
   }
   if (!start.has(n.id)) return;
+  _canvasDragActive = true;
   const p0 = start.get(n.id);
   const dragPid = e.pointerId;
   const anchorX = anchorClient != null && Number.isFinite(anchorClient.x) ? anchorClient.x : e.clientX;
@@ -3968,7 +4096,12 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     if (edgesRaf != null) return;
     edgesRaf = requestAnimationFrame(() => {
       edgesRaf = null;
-      drawEdgesPartialForNodeIds(visualSeen);
+      const edgeIds = new Set(visualSeen);
+      for (const id of visualSeen) {
+        const node = find(id);
+        if (node?.parent_id) edgeIds.add(node.parent_id);
+      }
+      drawEdgesPartialForNodeIds(edgeIds);
     });
   };
   const applyDragPositions = (rawX, rawY) => {
@@ -4000,6 +4133,7 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     applyDragPositions(g.gx - sx, g.gy - sy);
   };
   const cleanupDragVisual = () => {
+    _canvasDragActive = false;
     for (const id of visualIds) {
       const node = find(id);
       const w = document.getElementById('nw-' + id);
