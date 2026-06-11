@@ -1400,6 +1400,30 @@ export function replayStructureOpsOnNodes(
       );
       continue;
     }
+    if (op.type === 'reorder_siblings') {
+      const sibs = list.filter((n) => n.parent_id === op.parent_id);
+      if (sibs.length < 2) continue;
+      const idSet = new Set(sibs.map((s) => s.id));
+      const ordered: Node[] = [];
+      const seen = new Set<string>();
+      for (const id of op.ordered_ids) {
+        if (!idSet.has(id) || seen.has(id)) continue;
+        const row = sibs.find((s) => s.id === id);
+        if (row) {
+          ordered.push(row);
+          seen.add(id);
+        }
+      }
+      for (const s of sibs) {
+        if (!seen.has(s.id)) ordered.push(s);
+      }
+      if (ordered.length < 2) continue;
+      const idxs = sibs.map((s) => list.findIndex((n) => n.id === s.id)).filter((i) => i >= 0);
+      const insertAt = Math.min(...idxs);
+      const without = list.filter((n) => !idSet.has(n.id));
+      list = [...without.slice(0, insertAt), ...ordered, ...without.slice(insertAt)];
+      continue;
+    }
     if (op.type === 'delete_node') {
       // Phase 2: 소프트 삭제 — _deleted: true 마킹 (grace period 후 하드 삭제)
       const removeIds = new Set(collectSubtreeNodeIds(list, op.node_id));
@@ -2123,17 +2147,19 @@ export function projectWorkspaceNodesJsonSnapshot(nodes: Node[]): string {
  * **원격 메타가 더 최신이어도** 로컬에 없을 때는 넣지 않음(소유자 슬라이스가 merge 실패 등으로 옛 목록을 유지할 때 되살림 방지).
  * `preserveLocalNewIds`: `remoteProjectMetaNewer === true`일 때 원격 목록에 없는 로컬 id를 통째 삭제하지 않도록
  * **예외 집합**(아직 소유자 슬라이스에 안 올라간 신규 노드 등). 보존된 노드는 원격 순서 뒤에 **로컬 배열 순서**로 붙인다.
- * CSP: id LWW로 remote row가 이겼을 때 `mx`/`my`가 없으면 local non-null 좌표를 유지(Broadcast 후 slice 덮어쓰기 완화).
+ * CSP: id LWW로 remote row가 이겼을 때
+ *   - remote에 좌표가 있으면 → remote 좌표 사용 (remote 정본)
+ *   - remote에 좌표가 명시 null이면 → 자동배치(undefined)
+ *   - remote에 좌표 필드가 아예 없으면(undefined) → local 수동 좌표 보존 (Broadcast-only 경로 완화)
+ *
+ * COLLAB-SYNC-FIX: 형제 순서 수렴은 reorder_siblings op 전송으로 해결. 좌표는 위 규칙 유지.
  */
 function preserveManualCoordsOnCloudMergeWinner(remote: Node, local: Node | undefined): Node {
   if (!local) return remote;
-  // [수정] Bug-2 (2026-06-01): 축별 독립 null 처리
-  // 이전: mx AND my 둘 다 null일 때만 자동배치로 확정 → 부분 null(mx=null, my=200 등)은
-  //       guard를 통과하지 못해 local.mx가 복원되고 비대칭 좌표 → 겹침·쏠림 발생.
-  // 수정: 각 축이 명시 null이면 자동배치(undefined), non-null이면 remote 우선, undefined면 local 보존.
-  // TS 타입은 number|undefined지만 런타임에서 null 사용 → 캐스트 처리
+  // TS 타입은 number|undefined지만 런타임에서 null이 올 수 있어 캐스트 처리
   const rnx = remote.mx as number | null | undefined;
   const rny = remote.my as number | null | undefined;
+  // remote가 null을 명시 → 자동배치(undefined), undefined(필드 없음) → local 보존, number → remote 우선
   const resMx: number | undefined = rnx != null ? rnx : rnx === null ? undefined : local.mx;
   const resMy: number | undefined = rny != null ? rny : rny === null ? undefined : local.my;
   if (resMx === remote.mx && resMy === remote.my) return remote;

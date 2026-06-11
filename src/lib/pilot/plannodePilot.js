@@ -647,6 +647,30 @@ function teardownStructureOps() {
   unsubscribeProjectStructureOps();
 }
 
+/** render() 전용 — idToIndex·byId 없이 depth·children만 (400+ 노드 render 부하 완화) */
+function buildRenderDepthIndex(nodeList = nodes) {
+  const childrenById = buildChildrenByIdMap(nodeList);
+  const byId = new Map();
+  for (const n of nodeList) byId.set(n.id, n);
+  const depthById = new Map();
+  function depthOf(id, visiting = new Set()) {
+    if (depthById.has(id)) return depthById.get(id);
+    if (visiting.has(id)) return 0;
+    const n = byId.get(id);
+    if (!n || !n.parent_id) {
+      depthById.set(id, 0);
+      return 0;
+    }
+    visiting.add(id);
+    const d = 1 + depthOf(n.parent_id, visiting);
+    visiting.delete(id);
+    depthById.set(id, d);
+    return d;
+  }
+  for (const n of nodeList) depthOf(n.id);
+  return { childrenById, depthById };
+}
+
 /** DRAG-END-PERF — 한 후처리 사이클용 읽기 전용 인덱스 (persist·스토어·ops 전달 금지) */
 function buildPilotNodeIndexes(nodeList = nodes) {
   const byId = new Map();
@@ -768,6 +792,7 @@ function applyRemoteMoveNodeFromStructureOp(payload) {
   node.mx = mx;
   node.my = my;
   if (payload.num != null && String(payload.num).trim() !== '') node.num = String(payload.num);
+  node.updated_at = new Date().toISOString();
   // [수정] P1 (2026-05-31): 원격 이동 시 자식 mx/my null 처리 추가
   // 이유: 공유 환경에서 상대 이동 시 자식이 부모를 따라가지 않는 현상 해소
   for (const childId of collectShownSubtreeIds(node.id).slice(1)) {
@@ -776,6 +801,46 @@ function applyRemoteMoveNodeFromStructureOp(payload) {
   }
   nodes = [...nodes];
   render();
+}
+
+/** reorder_siblings Broadcast — 형제 평면 배열 순서 동기 (slice skip 시에도 수렴) */
+function applyRemoteReorderSiblingsFromStructureOp(payload) {
+  if (!payload || payload.type !== 'reorder_siblings' || !payload.parent_id) return;
+  const parentId = payload.parent_id;
+  const orderedIds = Array.isArray(payload.ordered_ids)
+    ? payload.ordered_ids.filter((id) => typeof id === 'string' && id.trim())
+    : [];
+  if (orderedIds.length < 2) return;
+  const idx = buildPilotNodeIndexes();
+  const sibs = nodes.filter((n) => n.parent_id === parentId);
+  if (sibs.length < 2) return;
+  const idSet = new Set(sibs.map((s) => s.id));
+  const sorted = [];
+  const seen = new Set();
+  for (const id of orderedIds) {
+    if (!idSet.has(id) || seen.has(id)) continue;
+    const row = findIndexed(id, idx) ?? find(id);
+    if (row) {
+      sorted.push(row);
+      seen.add(id);
+    }
+  }
+  for (const s of sibs) {
+    if (!seen.has(s.id)) sorted.push(s);
+  }
+  if (sorted.length < 2) return;
+  if (!commitFlatSiblingReorder(parentId, sorted, idx)) return;
+  clearSiblingManualLayout(parentId, idx);
+  applyHierarchyNumsFromTreeOrder(idx);
+  nodes = [...nodes];
+  skipSchedulePersistOnce = true;
+  if (!relayoutCanvasIncrementalAfterReorder()) render();
+  skipSchedulePersistOnce = false;
+  const materializeIdSet = new Set();
+  for (const sib of sibs) {
+    for (const sid of collectShownSubtreeIds(sib.id, idx)) materializeIdSet.add(sid);
+  }
+  materializeDisplayCoordsForNodes([...materializeIdSet]);
 }
 
 function applyRemoteDeleteNodeFromStructureOp(payload) {
@@ -896,6 +961,7 @@ function handleRemoteStructureOp(op) {
     if (payload?.type === 'add_node') applyRemoteAddNodeFromStructureOp(payload);
     else if (payload?.type === 'delete_node') applyRemoteDeleteNodeFromStructureOp(payload);
     else if (payload?.type === 'move_node') applyRemoteMoveNodeFromStructureOp(payload);
+    else if (payload?.type === 'reorder_siblings') applyRemoteReorderSiblingsFromStructureOp(payload);
     else if (payload?.type === 'update_node') applyRemoteUpdateNodeFromStructureOp(payload);
     else return;
     syncStoreFromRemoteStructureOp();
@@ -968,6 +1034,25 @@ function sendDeleteNodeStructureOp(rootId) {
   const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
   if (!collabUid) return;
   sendProjectStructureOp(curP.id, { type: 'delete_node', node_id: rootId }, collabPersistOpts());
+}
+
+/** 형제 순서 변경 시 reorder_siblings 전송 — move_node만으로는 평면 배열 순서가 상대에 안 맞음 */
+function sendReorderSiblingStructureOps(affectedParentIds, idx) {
+  if (!curP?.id || !affectedParentIds?.length) return;
+  const collabUid = typeof getCollabAuthUserId === 'function' ? getCollabAuthUserId() : null;
+  if (!collabUid) return;
+  const pilotIdx = idx ?? buildPilotNodeIndexes();
+  for (const pid of affectedParentIds) {
+    if (pid == null) continue;
+    const kids = pilotIdx.childrenById.get(pid) ?? nodes.filter((n) => n.parent_id === pid);
+    if (kids.length < 2) continue;
+    const ordered_ids = kids.map((k) => k.id);
+    sendProjectStructureOp(
+      curP.id,
+      { type: 'reorder_siblings', parent_id: pid, ordered_ids },
+      collabPersistOpts()
+    );
+  }
 }
 
 /** sDrag pointerup — 드래그 루트만 move_node 전송 (자식 subtree 제외 — CSP-TRAFFIC) */
@@ -2266,7 +2351,85 @@ function refreshPilotNodeIdToIndex(idx) {
   for (let i = 0; i < nodes.length; i++) idx.idToIndex.set(nodes[i].id, i);
 }
 
-/** 드래그 종료 — persist 루트 subtree clear 후 render·materialize */
+/** RENDER-INCREMENTAL P2 — lm 재계산 후 기존 `.nw` 좌표·num·간선만 갱신 (DOM 재생성 없음) */
+function rebuildLayoutMapFromTree() {
+  lm = {};
+  if (nodeMapLayoutMode === 'right') {
+    let globalRow = 0;
+    nodes
+      .filter((n) => !n.parent_id)
+      .forEach((n) => {
+        globalRow = bld(n.id, 0, globalRow);
+      });
+  } else {
+    let gc = 0;
+    nodes
+      .filter((n) => !n.parent_id)
+      .forEach((root) => {
+        gc = bldTopDown(root.id, 0, gc);
+      });
+  }
+}
+
+/** @returns {number} 좌표 패치 실패(`.nw` 없음) 노드 수 */
+function applyLayoutMapPositionsToDom() {
+  let missing = 0;
+  nodes.forEach((n) => {
+    if (!isTreeNodeShown(n)) return;
+    const w = document.getElementById('nw-' + n.id);
+    if (!w) {
+      missing++;
+      return;
+    }
+    const pos = ap(n.id);
+    w.style.left = `${pos.x}px`;
+    w.style.top = `${pos.y}px`;
+  });
+  return missing;
+}
+
+function patchNodeNumLabelsInDom() {
+  for (const n of nodes) {
+    if (!isTreeNodeShown(n)) continue;
+    const nd = document.getElementById('nd-' + n.id);
+    if (!nd) continue;
+    const nnum = nd.querySelector('.nnum');
+    if (!nnum) continue;
+    const label =
+      n.num && String(n.num).trim() ? String(n.num).trim() : defaultNumForNode(n);
+    nnum.textContent = label;
+  }
+}
+
+/**
+ * 형제 reorder 후처리 — `render()` 생략 · 실패 시 full render fallback
+ * @returns {boolean} incremental 성공 여부
+ */
+function relayoutCanvasIncrementalAfterReorder() {
+  _renderPilotDepthIdx = buildRenderDepthIndex();
+  _renderChildrenById = _renderPilotDepthIdx.childrenById;
+  let missing = 0;
+  if (nodeMapLayoutMode === 'right') {
+    missing = reflowRightLayoutAfterDomMeasure();
+  } else {
+    rebuildLayoutMapFromTree();
+    missing = applyLayoutMapPositionsToDom();
+  }
+  if (missing > 0) {
+    _renderPilotDepthIdx = null;
+    return false;
+  }
+  patchNodeNumLabelsInDom();
+  drawEdges();
+  applyTx();
+  if (curView === 'prd') buildPRD();
+  if (curView === 'spec') buildSpec();
+  maybeEmitNodeSelect();
+  _renderPilotDepthIdx = null;
+  return true;
+}
+
+/** 드래그 종료 — persist 루트 subtree clear 후 incremental relayout·materialize */
 function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds, idx) {
   const pilotIdx = idx ?? buildPilotNodeIndexes();
   for (const id of persistIds) {
@@ -2277,7 +2440,7 @@ function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds, idx) {
     }
   }
   skipSchedulePersistOnce = true;
-  render();
+  if (!relayoutCanvasIncrementalAfterReorder()) render();
   const materializeIdSet = new Set(persistIds);
   // [수정] P0-2 (2026-05-31): affectedParentIds 직계 자식만 → 각 형제 shown-subtree 전체 materialize
   // 이유: clearSiblingManualLayout과 범위 동기화 (손자 노드 포함)
@@ -2425,21 +2588,46 @@ function syncSiblingOrderAndNumsAfterDrag(draggedIds, idx) {
   }
   let changedOrder = false;
   for (const pid of parents) {
-    if (pid != null && reorderFlatSiblingsByVisualY(pid, draggedIds, pilotIdx)) changedOrder = true;
-    if (pid != null) clearSiblingManualLayout(pid, pilotIdx);
+    if (pid == null) continue;
+    if (reorderFlatSiblingsByVisualY(pid, draggedIds, pilotIdx)) {
+      changedOrder = true;
+      clearSiblingManualLayout(pid, pilotIdx);
+    }
   }
-  applyHierarchyNumsFromTreeOrder(pilotIdx);
-  nodes = [...nodes];
+  if (changedOrder) {
+    applyHierarchyNumsFromTreeOrder(pilotIdx);
+    nodes = [...nodes];
+  }
   const affectedParentIds = [...parents].filter((pid) => pid != null);
   return { changedOrder, affectedParentIds };
+}
+
+/** 드래그 종료 후 간선·미니맵만 갱신 — 전체 render 생략 (위치만 이동) */
+function refreshEdgesAndMinimapAfterPositionDrag(persistIds, idx) {
+  const edgeIds = new Set(persistIds);
+  for (const id of persistIds) {
+    const node = findIndexed(id, idx) ?? find(id);
+    if (node?.parent_id) edgeIds.add(node.parent_id);
+    for (const sid of collectShownSubtreeIds(id, idx)) {
+      edgeIds.add(sid);
+      const sn = findIndexed(sid, idx);
+      if (sn?.parent_id) edgeIds.add(sn.parent_id);
+    }
+  }
+  drawEdgesPartialForNodeIds(edgeIds);
+  updMM();
 }
 
 /** DRAG-END-PERF — layout-only · persist/ops/defer는 호출부에 유지 (§5.4) */
 function runPostDragSiblingLayout(persistIds) {
   const idx = buildPilotNodeIndexes();
   const result = syncSiblingOrderAndNumsAfterDrag(persistIds, idx);
-  refreshPilotNodeIdToIndex(idx);
-  relayoutAndMaterializeAfterDrag(persistIds, result.affectedParentIds, idx);
+  if (result.changedOrder) {
+    refreshPilotNodeIdToIndex(idx);
+    relayoutAndMaterializeAfterDrag(persistIds, result.affectedParentIds, idx);
+  } else {
+    refreshEdgesAndMinimapAfterPositionDrag(persistIds, idx);
+  }
   return result;
 }
 
@@ -3379,19 +3567,8 @@ function bld(nid, col, r) {
 }
 
 /** 우측분포 2pass — DOM 실측 후 lm·`.nw` 재배치(형제 세로 겹침·gap 불균형 방지 · FIX-12R) */
-function applyLayoutMapPositionsToDom() {
-  nodes.forEach((n) => {
-    if (!isTreeNodeShown(n)) return;
-    const w = document.getElementById('nw-' + n.id);
-    if (!w) return;
-    const pos = ap(n.id);
-    w.style.left = `${pos.x}px`;
-    w.style.top = `${pos.y}px`;
-  });
-}
-
 function reflowRightLayoutAfterDomMeasure() {
-  if (nodeMapLayoutMode !== 'right') return;
+  if (nodeMapLayoutMode !== 'right') return 0;
   lm = {};
   let globalRow = 0;
   nodes
@@ -3399,7 +3576,7 @@ function reflowRightLayoutAfterDomMeasure() {
     .forEach((root) => {
       globalRow = bld(root.id, 0, globalRow);
     });
-  applyLayoutMapPositionsToDom();
+  return applyLayoutMapPositionsToDom();
 }
 
 function readLayoutMap() {
@@ -3701,7 +3878,7 @@ function updateSelHighlightOnly() {
 function render() {
   clearSmartGuides();
   lm = {};
-  _renderPilotDepthIdx = buildPilotNodeIndexes();
+  _renderPilotDepthIdx = buildRenderDepthIndex();
   _renderChildrenById = _renderPilotDepthIdx.childrenById;
 
   const childCountByParentId = {};
@@ -4185,10 +4362,11 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     toast('가져온 JSON 전역 노드는 드래그로 옮길 수 없어.');
     return;
   }
+  const dragIdx = buildPilotNodeIndexes();
   const visualIds = [];
   const visualSeen = new Set();
   for (const rid of persistIds) {
-    for (const sid of collectShownSubtreeIds(rid)) {
+    for (const sid of collectShownSubtreeIds(rid, dragIdx)) {
       if (!visualSeen.has(sid)) {
         visualSeen.add(sid);
         visualIds.push(sid);
@@ -4346,11 +4524,18 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     if (edgesRaf != null) cancelAnimationFrame(edgesRaf);
     edgesRaf = null;
     scheduleUpdMM();
-    const { changedOrder } = runPostDragSiblingLayout(persistIds);
+    const layoutResult = runPostDragSiblingLayout(persistIds);
+    const { changedOrder, affectedParentIds } = layoutResult;
     flushPersistNow({ force: true });
     pendingHydrateFromStore = null;
     sendMoveNodeStructureOps(persistIds);
-    if (changedOrder) toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
+    if (changedOrder) {
+      sendReorderSiblingStructureOps(affectedParentIds, buildPilotNodeIndexes());
+      emitAutoCloudSync('node-drag-reorder');
+      toast('형제 순서·분류번호를 트리에 맞췄어 ✓');
+    } else {
+      emitAutoCloudSync('node-drag');
+    }
     endCanvasPointerInteractionDeferHydrate();
     // [수정] post-drag defer: flushPersistNow 이후 async cloud flush → nodes.set → unguarded hydrate → render() 차단
     armCanvasPostDragDeferHydrate();
