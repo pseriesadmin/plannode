@@ -647,23 +647,61 @@ function teardownStructureOps() {
   unsubscribeProjectStructureOps();
 }
 
+/** DRAG-END-PERF — 한 후처리 사이클용 읽기 전용 인덱스 (persist·스토어·ops 전달 금지) */
+function buildPilotNodeIndexes(nodeList = nodes) {
+  const byId = new Map();
+  const childrenById = buildChildrenByIdMap(nodeList);
+  const idToIndex = new Map();
+  const depthById = new Map();
+  for (let i = 0; i < nodeList.length; i++) {
+    const n = nodeList[i];
+    byId.set(n.id, n);
+    idToIndex.set(n.id, i);
+  }
+  function depthOf(id) {
+    if (depthById.has(id)) return depthById.get(id);
+    const n = byId.get(id);
+    if (!n || !n.parent_id) {
+      depthById.set(id, 0);
+      return 0;
+    }
+    const d = 1 + depthOf(n.parent_id);
+    depthById.set(id, d);
+    return d;
+  }
+  for (const n of nodeList) depthOf(n.id);
+  return { byId, childrenById, idToIndex, depthById };
+}
+
+function findIndexed(id, idx) {
+  return idx?.byId?.get(id);
+}
+
 /** cDel·원격 delete_node 공통 — 루트 포함 하위 id 목록 */
-function collectNodeSubtreeIds(rootId) {
-  const walk = (nid) => [nid, ...nodes.filter((x) => x.parent_id === nid).flatMap((c) => walk(c.id))];
+function collectNodeSubtreeIds(rootId, idx) {
+  if (!idx) {
+    const walk = (nid) => [nid, ...nodes.filter((x) => x.parent_id === nid).flatMap((c) => walk(c.id))];
+    return walk(rootId);
+  }
+  const walk = (nid) => {
+    const kids = idx.childrenById.get(nid) ?? [];
+    return [nid, ...kids.flatMap((c) => walk(c.id))];
+  };
   return walk(rootId);
 }
 
 /** 드래그 시각용 — 펼쳐 보이는 하위만(접힌 분기·숨김 노드 제외) */
-function collectShownSubtreeIds(rootId) {
+function collectShownSubtreeIds(rootId, idx) {
   const out = [];
   const visit = (nid) => {
-    const node = find(nid);
+    const node = idx ? findIndexed(nid, idx) : find(nid);
     if (!node || !isTreeNodeShown(node)) return;
     out.push(nid);
     if (collapsedNodeIds.has(nid)) return;
-    for (const c of nodes) {
-      if (c.parent_id === nid) visit(c.id);
-    }
+    const children = idx
+      ? (idx.childrenById.get(nid) ?? [])
+      : nodes.filter((c) => c.parent_id === nid);
+    for (const c of children) visit(c.id);
   };
   visit(rootId);
   return out;
@@ -1980,9 +2018,11 @@ function applyRelinkCopyDrop(newParentId) {
   }
   nodes = [...nodes, ...newNodes];
   syncNcFromNodes();
-  reorderFlatSiblingsByVisualY(newParentId);
-  clearSiblingManualLayout(newParentId);
-  applyHierarchyNumsFromTreeOrder();
+  const copyRootIds = newNodes.filter((n) => n.parent_id === newParentId).map((n) => n.id);
+  reorderFlatSiblingsByVisualY(newParentId, copyRootIds);
+  const relinkCopyIdx = buildPilotNodeIndexes();
+  clearSiblingManualLayout(newParentId, relinkCopyIdx);
+  applyHierarchyNumsFromTreeOrder(relinkCopyIdx);
   nodes = [...nodes];
   if (curP?.id) registerRecentlyAddedNodeIdsForCloudMerge(curP.id, allNewIds);
   const copyRootCount = relinkArm.nodeIds.length;
@@ -2056,14 +2096,14 @@ function applyRelinkDrop(newParentId) {
     nodes = [...nodes];
     oldPids.add(newParentId);
     for (const pid of oldPids) {
-      if (pid != null) {
-        reorderFlatSiblingsByVisualY(pid);
-        clearSiblingManualLayout(pid);
-      }
+      if (pid != null) reorderFlatSiblingsByVisualY(pid, []);
     }
-    reorderFlatSiblingsByVisualY(newParentId);
-    clearSiblingManualLayout(newParentId);
-    applyHierarchyNumsFromTreeOrder();
+    reorderFlatSiblingsByVisualY(newParentId, toMove);
+    const relinkSingleIdx = buildPilotNodeIndexes();
+    for (const pid of oldPids) {
+      if (pid != null) clearSiblingManualLayout(pid, relinkSingleIdx);
+    }
+    applyHierarchyNumsFromTreeOrder(relinkSingleIdx);
     nodes = [...nodes];
     relinkMovedIds = toMove;
   } else {
@@ -2076,11 +2116,12 @@ function applyRelinkDrop(newParentId) {
       k.my = null;
     }
     nodes = [...nodes];
-    reorderFlatSiblingsByVisualY(newParentId);
-    reorderFlatSiblingsByVisualY(anchorId);
-    clearSiblingManualLayout(newParentId);
-    clearSiblingManualLayout(anchorId);
-    applyHierarchyNumsFromTreeOrder();
+    reorderFlatSiblingsByVisualY(newParentId, kids.map((k) => k.id));
+    reorderFlatSiblingsByVisualY(anchorId, []);
+    const relinkAnchorIdx = buildPilotNodeIndexes();
+    clearSiblingManualLayout(newParentId, relinkAnchorIdx);
+    clearSiblingManualLayout(anchorId, relinkAnchorIdx);
+    applyHierarchyNumsFromTreeOrder(relinkAnchorIdx);
     nodes = [...nodes];
     relinkMovedIds = kids.map((k) => k.id);
   }
@@ -2168,23 +2209,26 @@ function startRelinkHoldOrDeferDrag(e, n, fromTitle) {
 }
 
 /** num 비어 있을 때(플레이스홀더) 표시·저장용 — 형제 순서 = nodes 상 동일 parent_id 그룹 순서 */
-function defaultNumForNode(node) {
+function defaultNumForNode(node, idx) {
   if (!node) return '';
   if (!node.parent_id) {
     const t = (node.num && String(node.num).trim()) || '';
     return t || 'PRD';
   }
-  const p = find(node.parent_id);
+  const p = idx ? findIndexed(node.parent_id, idx) : find(node.parent_id);
   if (!p) return '';
-  const sibs = nodes.filter((n) => n.parent_id === node.parent_id);
-  const idx = sibs.findIndex((k) => k.id === node.id);
-  const ord = (idx >= 0 ? idx : sibs.length - 1) + 1;
+  const sibs = idx
+    ? (idx.childrenById.get(node.parent_id) ?? [])
+    : nodes.filter((n) => n.parent_id === node.parent_id);
+  const sibIdx = sibs.findIndex((k) => k.id === node.id);
+  const ord = (sibIdx >= 0 ? sibIdx : sibs.length - 1) + 1;
   const pfx = p.num && String(p.num).trim() ? `${p.num}.` : '';
   return pfx + ord;
 }
 
 /** 같은 부모 형제 중 mx/my null·수동 혼재 시 전 subtree 자동배치로 통일(FIX-11 · `__pnLayoutAudit`.mixedParentGroups) */
 function reconcileMixedSiblingAutoLayout() {
+  const pilotIdx = buildPilotNodeIndexes();
   const byParent = new Map();
   for (const n of nodes) {
     if (n.parent_id == null) continue;
@@ -2196,28 +2240,39 @@ function reconcileMixedSiblingAutoLayout() {
     if (sibs.length < 2) continue;
     const hasManual = sibs.some((n) => n.mx != null && n.my != null);
     const hasAuto = sibs.some((n) => n.mx == null || n.my == null);
-    if (hasManual && hasAuto) clearSiblingManualLayout(pid);
+    if (hasManual && hasAuto) clearSiblingManualLayout(pid, pilotIdx);
   }
 }
 
 /** 형제 그룹의 수동 좌표 제거 → bld/ap 자동 열 배치만 사용 */
-function clearSiblingManualLayout(parentId) {
+function clearSiblingManualLayout(parentId, idx) {
   // [수정] P0-1 (2026-05-31): 직계 형제만 → 각 형제의 shown-subtree 전체 null 처리
   // 이유: 드래그 후 손자 노드의 옛 좌표가 잔존하여 쏠림 발생 → subtree 전체 정리
-  for (const sib of nodes.filter((n) => n.parent_id === parentId)) {
-    for (const sid of collectShownSubtreeIds(sib.id)) {
-      const nd = find(sid);
+  const sibs = idx
+    ? (idx.childrenById.get(parentId) ?? [])
+    : nodes.filter((n) => n.parent_id === parentId);
+  for (const sib of sibs) {
+    for (const sid of collectShownSubtreeIds(sib.id, idx)) {
+      const nd = idx ? findIndexed(sid, idx) : find(sid);
       if (nd) { nd.mx = null; nd.my = null; }
     }
   }
 }
 
+/** reorder 후 `nodes` 배열 순서와 idToIndex 동기화 */
+function refreshPilotNodeIdToIndex(idx) {
+  if (!idx?.idToIndex) return;
+  idx.idToIndex.clear();
+  for (let i = 0; i < nodes.length; i++) idx.idToIndex.set(nodes[i].id, i);
+}
+
 /** 드래그 종료 — persist 루트 subtree clear 후 render·materialize */
-function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds) {
+function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds, idx) {
+  const pilotIdx = idx ?? buildPilotNodeIndexes();
   for (const id of persistIds) {
-    for (const sid of collectNodeSubtreeIds(id)) {
+    for (const sid of collectNodeSubtreeIds(id, pilotIdx)) {
       if (sid === id) continue;
-      const node = find(sid);
+      const node = findIndexed(sid, pilotIdx);
       if (node) { node.mx = null; node.my = null; }
     }
   }
@@ -2227,14 +2282,15 @@ function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds) {
   // [수정] P0-2 (2026-05-31): affectedParentIds 직계 자식만 → 각 형제 shown-subtree 전체 materialize
   // 이유: clearSiblingManualLayout과 범위 동기화 (손자 노드 포함)
   for (const pid of affectedParentIds) {
-    for (const sib of nodes.filter((n) => n.parent_id === pid)) {
-      for (const sid of collectShownSubtreeIds(sib.id)) {
+    const sibs = pilotIdx.childrenById.get(pid) ?? [];
+    for (const sib of sibs) {
+      for (const sid of collectShownSubtreeIds(sib.id, pilotIdx)) {
         materializeIdSet.add(sid);
       }
     }
   }
   for (const id of persistIds) {
-    for (const sid of collectShownSubtreeIds(id)) {
+    for (const sid of collectShownSubtreeIds(id, pilotIdx)) {
       materializeIdSet.add(sid);
     }
   }
@@ -2243,15 +2299,91 @@ function relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds) {
   return materializeIds;
 }
 
-/**
- * 같은 부모 아래 형제를 화면 위치로 `nodes` 평면 배열에 반영.
- * 우선 Y(위→아래), 같은 줄이면 X(왼→오) — 가로로만 옮긴 순서도 반영됨.
- * @returns 순서가 바뀌었으면 true
- */
-function reorderFlatSiblingsByVisualY(parentId) {
+/** 형제 reorder 결과를 `nodes` 평면 배열에 반영 — 우측·하위분포 공통 */
+function commitFlatSiblingReorder(parentId, sorted, idx) {
   const sibs = nodes.filter((n) => n.parent_id === parentId);
   if (sibs.length < 2) return false;
-  const idxOf = (id) => nodes.findIndex((n) => n.id === id);
+  const orig = sibs.map((s) => s.id).join('|');
+  const neu = sorted.map((s) => s.id).join('|');
+  if (orig === neu) return false;
+  const idSet = new Set(sibs.map((s) => s.id));
+  const idxOf = (id) => (idx ? (idx.idToIndex.get(id) ?? -1) : nodes.findIndex((n) => n.id === id));
+  const idxs = sibs.map((s) => idxOf(s.id)).filter((i) => i >= 0);
+  const insertAt = Math.min(...idxs);
+  const without = nodes.filter((n) => !idSet.has(n.id));
+  nodes = [...without.slice(0, insertAt), ...sorted, ...without.slice(insertAt)];
+  if (idx) {
+    idx.idToIndex.clear();
+    for (let i = 0; i < nodes.length; i++) idx.idToIndex.set(nodes[i].id, i);
+  }
+  return true;
+}
+
+/** 하위분포 — 카드 가로 중심 X + 슬롯 삽입(맨 앞·사이·맨 뒤). 8px dead zone 없음. */
+function siblingLayoutCenterX(node, preferDom = false) {
+  if (!node) return 0;
+  const w = nodeWn(node);
+  if (preferDom && typeof document !== 'undefined') {
+    const el = document.getElementById('nw-' + node.id);
+    if (el) {
+      const lx = parseFloat(el.style.left);
+      if (Number.isFinite(lx)) {
+        const ow = el.offsetWidth > 0 ? el.offsetWidth : w;
+        return lx + ow / 2;
+      }
+    }
+  }
+  if (node.mx != null && node.my != null) return node.mx + w / 2;
+  return gp(node).x + w / 2;
+}
+
+/** @param {string} parentId @param {string[]} draggedIds */
+function reorderTopDownSiblingsByDropSlot(parentId, draggedIds = [], idx) {
+  const sibs = nodes.filter((n) => n.parent_id === parentId);
+  if (sibs.length < 2) return false;
+  const idxOf = (id) => (idx ? (idx.idToIndex.get(id) ?? -1) : nodes.findIndex((n) => n.id === id));
+  const draggedSet = new Set(
+    (Array.isArray(draggedIds) ? draggedIds : []).filter((id) => sibs.some((s) => s.id === id))
+  );
+  const compareCenterX = (a, b) => {
+    const ca = siblingLayoutCenterX(a, true);
+    const cb = siblingLayoutCenterX(b, true);
+    if (ca !== cb) return ca - cb;
+    return idxOf(a.id) - idxOf(b.id);
+  };
+
+  if (draggedSet.size === 0) {
+    return commitFlatSiblingReorder(parentId, [...sibs].sort(compareCenterX), idx);
+  }
+
+  const staticSorted = sibs.filter((s) => !draggedSet.has(s.id)).sort(compareCenterX);
+  const draggedSorted = sibs.filter((s) => draggedSet.has(s.id)).sort(compareCenterX);
+  const blockCenterX = Math.min(...draggedSorted.map((d) => siblingLayoutCenterX(d, true)));
+  let insertAt = 0;
+  while (
+    insertAt < staticSorted.length &&
+    siblingLayoutCenterX(staticSorted[insertAt], true) < blockCenterX
+  ) {
+    insertAt++;
+  }
+  const newOrder = [...staticSorted.slice(0, insertAt), ...draggedSorted, ...staticSorted.slice(insertAt)];
+  return commitFlatSiblingReorder(parentId, newOrder, idx);
+}
+
+/**
+ * 같은 부모 아래 형제를 화면 위치로 `nodes` 평면 배열에 반영.
+ * 우측분포: Y(위→아래), 같은 줄 X — 하위분포: center-X 슬롯 삽입.
+ * @param {string} parentId
+ * @param {string[]} [draggedIds]
+ * @returns 순서가 바뀌었으면 true
+ */
+function reorderFlatSiblingsByVisualY(parentId, draggedIds = [], idx) {
+  if (nodeMapLayoutMode === 'topdown') {
+    return reorderTopDownSiblingsByDropSlot(parentId, draggedIds, idx);
+  }
+  const sibs = nodes.filter((n) => n.parent_id === parentId);
+  if (sibs.length < 2) return false;
+  const idxOf = (id) => (idx ? (idx.idToIndex.get(id) ?? -1) : nodes.findIndex((n) => n.id === id));
   const sorted = [...sibs].sort((a, b) => {
     const pa = gp(a),
       pb = gp(b);
@@ -2261,27 +2393,21 @@ function reorderFlatSiblingsByVisualY(parentId) {
     if (Math.abs(dx) >= 8) return dx;
     return idxOf(a.id) - idxOf(b.id);
   });
-  const orig = sibs.map((s) => s.id).join('|');
-  const neu = sorted.map((s) => s.id).join('|');
-  if (orig === neu) return false;
-  const idSet = new Set(sibs.map((s) => s.id));
-  const idxs = sibs.map((s) => idxOf(s.id)).filter((i) => i >= 0);
-  const insertAt = Math.min(...idxs);
-  const without = nodes.filter((n) => !idSet.has(n.id));
-  nodes = [...without.slice(0, insertAt), ...sorted, ...without.slice(insertAt)];
-  return true;
+  return commitFlatSiblingReorder(parentId, sorted, idx);
 }
 
 /** 트리·nodes 순서에 맞춰 분류 번호 일괄 재부여(부모 먼저, DFS) */
-function applyHierarchyNumsFromTreeOrder() {
+function applyHierarchyNumsFromTreeOrder(idx) {
   const roots = nodes.filter((n) => !n.parent_id);
   for (const r of roots) {
     if (!String(r.num || '').trim()) r.num = 'PRD';
   }
   function walk(pid) {
-    const kids = nodes.filter((n) => n.parent_id === pid);
+    const kids = idx
+      ? (idx.childrenById.get(pid) ?? [])
+      : nodes.filter((n) => n.parent_id === pid);
     for (const k of kids) {
-      k.num = defaultNumForNode(k);
+      k.num = defaultNumForNode(k, idx);
       walk(k.id);
     }
   }
@@ -2289,25 +2415,42 @@ function applyHierarchyNumsFromTreeOrder() {
 }
 
 /** 수동 드래그 종료: 형제 순서·번호·자동열 배치 반영 */
-function syncSiblingOrderAndNumsAfterDrag(draggedIds) {
+function syncSiblingOrderAndNumsAfterDrag(draggedIds, idx) {
   if (!draggedIds.length || !nodes.length) return { changedOrder: false, affectedParentIds: [] };
+  const pilotIdx = idx ?? buildPilotNodeIndexes();
   const parents = new Set();
   for (const id of draggedIds) {
-    const node = find(id);
+    const node = pilotIdx ? findIndexed(id, pilotIdx) : find(id);
     if (node) parents.add(node.parent_id);
   }
   let changedOrder = false;
   for (const pid of parents) {
-    if (pid != null && reorderFlatSiblingsByVisualY(pid)) changedOrder = true;
-    if (pid != null) clearSiblingManualLayout(pid);
+    if (pid != null && reorderFlatSiblingsByVisualY(pid, draggedIds, pilotIdx)) changedOrder = true;
+    if (pid != null) clearSiblingManualLayout(pid, pilotIdx);
   }
-  applyHierarchyNumsFromTreeOrder();
+  applyHierarchyNumsFromTreeOrder(pilotIdx);
   nodes = [...nodes];
   const affectedParentIds = [...parents].filter((pid) => pid != null);
   return { changedOrder, affectedParentIds };
 }
 
-function getDepth(id, v = new Set()) {
+/** DRAG-END-PERF — layout-only · persist/ops/defer는 호출부에 유지 (§5.4) */
+function runPostDragSiblingLayout(persistIds) {
+  const idx = buildPilotNodeIndexes();
+  const result = syncSiblingOrderAndNumsAfterDrag(persistIds, idx);
+  refreshPilotNodeIdToIndex(idx);
+  relayoutAndMaterializeAfterDrag(persistIds, result.affectedParentIds, idx);
+  return result;
+}
+
+function getDepth(id, idxOrVisited) {
+  if (idxOrVisited?.depthById) {
+    return idxOrVisited.depthById.get(id) ?? 0;
+  }
+  if (_renderPilotDepthIdx?.depthById) {
+    return _renderPilotDepthIdx.depthById.get(id) ?? 0;
+  }
+  const v = idxOrVisited instanceof Set ? idxOrVisited : new Set();
   if (v.has(id)) return 0;
   v.add(id);
   const n = find(id);
@@ -3116,6 +3259,8 @@ function compareSiblingNodesForLayout(a, b) {
 
 /** render() 세션 동안 유효 — parent_id → 직계 자식 Node[] (PERF-B) */
 let _renderChildrenById = null;
+/** render() 세션 동안 유효 — getDepth fast-path (DRAG-END-PERF · D4) */
+let _renderPilotDepthIdx = null;
 
 function buildChildrenByIdMap(nodeList) {
   const m = new Map();
@@ -3556,7 +3701,8 @@ function updateSelHighlightOnly() {
 function render() {
   clearSmartGuides();
   lm = {};
-  _renderChildrenById = buildChildrenByIdMap(nodes);
+  _renderPilotDepthIdx = buildPilotNodeIndexes();
+  _renderChildrenById = _renderPilotDepthIdx.childrenById;
 
   const childCountByParentId = {};
   for (const [pid, kids] of _renderChildrenById) {
@@ -3925,6 +4071,7 @@ function render() {
   if (!skipSchedulePersistOnce) schedulePersist();
   skipSchedulePersistOnce = false;
   maybeEmitNodeSelect();
+  _renderPilotDepthIdx = null;
 }
 
 function edgePathKey(parentId, childId) {
@@ -4199,8 +4346,7 @@ function sDrag(e, n, isShiftPressed, anchorClient) {
     if (edgesRaf != null) cancelAnimationFrame(edgesRaf);
     edgesRaf = null;
     scheduleUpdMM();
-    const { changedOrder, affectedParentIds } = syncSiblingOrderAndNumsAfterDrag(persistIds);
-    relayoutAndMaterializeAfterDrag(persistIds, affectedParentIds);
+    const { changedOrder } = runPostDragSiblingLayout(persistIds);
     flushPersistNow({ force: true });
     pendingHydrateFromStore = null;
     sendMoveNodeStructureOps(persistIds);
@@ -4248,7 +4394,7 @@ function addChild(pid) {
   // bld()는 mx/my를 무시하고 트리 기준 row를 계산하지만, 기존 형제는 mx/my(구 좌표)를 유지하여
   // gp()가 lm 대신 mx/my를 반환 → 새 노드(lm 기준)가 기존 형제 위치와 겹칩.
   // 형제 및 서브트리 mx/my를 null로 초기화 → render() 시 bld() 기준 일관 배치.
-  clearSiblingManualLayout(pid);
+  clearSiblingManualLayout(pid, buildPilotNodeIndexes());
   render();
   // [수정] 신규 노드 materialize 제거 (2026-05-31):
   // materializeDisplayCoordsForNodes([nn.id])를 호출하면 B.mx/my가 num='' 기준 row 위치로 고정됨.
