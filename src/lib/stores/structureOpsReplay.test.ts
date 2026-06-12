@@ -146,4 +146,19 @@ describe('replayStructureOpsOnNodes', () => {
     expect(list.find((n) => n.id === 'n-parent')).toBeDefined();
     expect(list.find((n) => n.id === 'n-child')).toBeDefined();
   });
+
+  it('reorder_siblings reorders flat array under parent', () => {
+    let list = replayStructureOpsOnNodes(baseNodes(), [
+      { type: 'add_node', node: { id: 'n1', parent_id: rootId, name: 'A', mx: 0, my: 0 } },
+      { type: 'add_node', node: { id: 'n2', parent_id: rootId, name: 'B', mx: 0, my: 10 } },
+      { type: 'add_node', node: { id: 'n3', parent_id: rootId, name: 'C', mx: 0, my: 20 } }
+    ], projectId);
+    list = replayStructureOpsOnNodes(
+      list,
+      [{ type: 'reorder_siblings', parent_id: rootId, ordered_ids: ['n3', 'n1', 'n2'] }],
+      projectId
+    );
+    const childOrder = list.filter((n) => n.parent_id === rootId).map((n) => n.id);
+    expect(childOrder).toEqual(['n3', 'n1', 'n2']);
+  });
 });
