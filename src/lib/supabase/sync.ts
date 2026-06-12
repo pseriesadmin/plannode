@@ -1067,8 +1067,8 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
         } catch {
           /* ignore */
         }
-        clearPendingWorkspaceDeletions();
         releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle);
+        clearPendingWorkspaceDeletions();
         markCloudWorkspaceSynced();
         scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
         return { ok: true, message: '클라우드에 올렸어 ✓' };
@@ -1110,8 +1110,8 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
     } catch {
       /* ignore */
     }
-    clearPendingWorkspaceDeletions();
     releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle);
+    clearPendingWorkspaceDeletions();
     markCloudWorkspaceSynced();
     clearUploadConflictCooldown();
     if (lastConflict && import.meta.env.DEV) {

@@ -8,6 +8,7 @@ import {
   stripResurrectedDeletedProjectsFromLocal,
   workspaceDeletedProjectSkipIds,
   pruneDeletedProjectTombstonesAgainstCloudProjectIds,
+  releaseDeletedProjectMarkersAbsentFromRemoteBundle,
   releaseDeletedProjectTombstonesAfterUpload,
   getDeletedProjectTombstoneIds,
   deleteProject
@@ -87,6 +88,21 @@ describe('workspace deletion guard (NOW-P0-DEL-WS-06)', () => {
     );
     pruneDeletedProjectTombstonesAgainstCloudProjectIds(new Set());
     expect(getDeletedProjectTombstoneIds().has('deleted')).toBe(true);
+  });
+
+  it('releaseDeletedProjectMarkersAbsentFromRemoteBundle clears tombstone when id absent from remote bundle', () => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(
+      'plannode_workspace_deleted_project_tombstones_v1',
+      JSON.stringify({ gone: Date.now(), keep: Date.now() })
+    );
+    releaseDeletedProjectMarkersAbsentFromRemoteBundle({
+      projects: [P('keep', 'Keep')],
+      nodesByProject: { keep: [] }
+    });
+    const left = getDeletedProjectTombstoneIds();
+    expect(left.has('gone')).toBe(false);
+    expect(left.has('keep')).toBe(true);
   });
 
   it('releaseDeletedProjectTombstonesAfterUpload clears only excluded ids', () => {

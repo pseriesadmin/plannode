@@ -33,6 +33,24 @@ const MAX_HINTS_PER_NODE = 6;
 
 let memoryUserRules: UserBadgeInferenceRule[] = [];
 
+/** PERF-RENDER-P1: render N회 호출 시 localStorage parse 중복 방지 */
+let aiLearnedRulesCache: UserBadgeInferenceRule[] | null = null;
+let aiLearnedRulesLsRaw: string | null | undefined = undefined;
+let userRulesCache: UserBadgeInferenceRule[] | null = null;
+let userRulesLsRaw: string | null | undefined = undefined;
+
+function invalidateBadgeRulesCache(): void {
+  aiLearnedRulesCache = null;
+  aiLearnedRulesLsRaw = undefined;
+  userRulesCache = null;
+  userRulesLsRaw = undefined;
+}
+
+/** 테스트·afterEach용 — localStorage 데이터는 유지, 런타임 캐시만 초기화 */
+export function clearBadgeInferenceRulesRuntimeCache(): void {
+  invalidateBadgeRulesCache();
+}
+
 export type UserBadgeInferenceRule = {
   /** `description` | `name` | `metadataHaystack`(기능명세·IA·tech 등 합친 문자열) */
   field: 'description' | 'name' | 'metadataHaystack';
@@ -319,11 +337,23 @@ function keywordHints(hay: string, name: string, desc: string): string[] {
 
 export function getUserBadgeInferenceRules(): UserBadgeInferenceRule[] {
   if (typeof localStorage !== 'undefined') {
+    if (userRulesCache && userRulesLsRaw !== undefined) return userRulesCache;
     try {
       const raw = localStorage.getItem(USER_RULES_STORAGE_KEY);
       if (raw) {
+        if (userRulesLsRaw === raw && userRulesCache) return userRulesCache;
         const p = JSON.parse(raw) as UserBadgeInferenceConfig;
-        if (Array.isArray(p?.rules)) return p.rules;
+        if (Array.isArray(p?.rules)) {
+          userRulesLsRaw = raw;
+          userRulesCache = p.rules;
+          return userRulesCache;
+        }
+      } else if (userRulesLsRaw === null && userRulesCache) {
+        return userRulesCache;
+      } else {
+        userRulesLsRaw = null;
+        userRulesCache = [...memoryUserRules];
+        return userRulesCache;
       }
     } catch {
       /* ignore */
@@ -335,6 +365,7 @@ export function getUserBadgeInferenceRules(): UserBadgeInferenceRule[] {
 /** 브라우저 설정 — 추후 UI에서 호출 가능 */
 export function setUserBadgeInferenceRules(rules: UserBadgeInferenceRule[]): void {
   memoryUserRules = [...rules];
+  invalidateBadgeRulesCache();
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(USER_RULES_STORAGE_KEY, JSON.stringify({ rules: memoryUserRules }));
@@ -347,6 +378,7 @@ export function setUserBadgeInferenceRules(rules: UserBadgeInferenceRule[]): voi
 /** 규칙 초기화(테스트·설정 리셋) */
 export function clearBadgeInferenceUserRules(): void {
   memoryUserRules = [];
+  invalidateBadgeRulesCache();
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.removeItem(USER_RULES_STORAGE_KEY);
@@ -365,19 +397,31 @@ function ruleMergeKey(r: UserBadgeInferenceRule): string {
 /** 외부 AI·타 트리 가져오기로 누적되는 메타 매핑(표준 풀로 해석되는 토큰만 저장). */
 export function getAiLearnedBadgeInferenceRules(): UserBadgeInferenceRule[] {
   if (typeof localStorage === 'undefined') return [];
+  if (aiLearnedRulesCache !== null && aiLearnedRulesLsRaw !== undefined) return aiLearnedRulesCache;
   try {
     const raw = localStorage.getItem(AI_LEARNED_RULES_STORAGE_KEY);
-    if (!raw) return [];
+    if (!raw) {
+      aiLearnedRulesLsRaw = raw;
+      aiLearnedRulesCache = [];
+      return aiLearnedRulesCache;
+    }
     const p = JSON.parse(raw) as AiLearnedPersistV1;
-    if (p?.v === 1 && Array.isArray(p.rules)) return p.rules;
+    if (p?.v === 1 && Array.isArray(p.rules)) {
+      aiLearnedRulesLsRaw = raw;
+      aiLearnedRulesCache = p.rules;
+      return aiLearnedRulesCache;
+    }
   } catch {
     /* ignore */
   }
-  return [];
+  aiLearnedRulesLsRaw = null;
+  aiLearnedRulesCache = [];
+  return aiLearnedRulesCache;
 }
 
 function saveAiLearnedRules(rules: UserBadgeInferenceRule[]): void {
   if (typeof localStorage === 'undefined') return;
+  invalidateBadgeRulesCache();
   try {
     localStorage.setItem(
       AI_LEARNED_RULES_STORAGE_KEY,
@@ -526,6 +570,7 @@ export function mergeLearnedBadgeRulesFromPlannodeExportUnknown(obj: unknown): M
 
 /** 테스트·디버그용 — AI 학습 규칙만 초기화 */
 export function clearAiLearnedBadgeInferenceRules(): void {
+  invalidateBadgeRulesCache();
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.removeItem(AI_LEARNED_RULES_STORAGE_KEY);

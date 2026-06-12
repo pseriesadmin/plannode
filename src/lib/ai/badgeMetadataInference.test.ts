@@ -7,6 +7,7 @@ import {
   mergeLearnedBadgeRulesFromImportedNodes,
   clearAiLearnedBadgeInferenceRules,
   getAiLearnedBadgeInferenceRules,
+  clearBadgeInferenceRulesRuntimeCache,
   AI_LEARNED_RULES_MAX,
   type UserBadgeInferenceRule
 } from './badgeMetadataInference';
@@ -15,6 +16,8 @@ import type { Node } from '$lib/supabase/client';
 import { clearBadgePoolRuntimeCache } from './badgePoolConfig';
 
 const lsMockStore: Record<string, string> = {};
+const AI_LEARNED_LS_KEY = 'plannode.badgeInferenceAiLearnedRules.v1';
+const USER_RULES_LS_KEY = 'plannode.badgeInferenceUserRules.v1';
 
 describe('badgeMetadataInference', () => {
   beforeEach(() => {
@@ -43,6 +46,7 @@ describe('badgeMetadataInference', () => {
   afterEach(() => {
     clearBadgeInferenceUserRules();
     clearAiLearnedBadgeInferenceRules();
+    clearBadgeInferenceRulesRuntimeCache();
     for (const k of Object.keys(lsMockStore)) delete lsMockStore[k];
     vi.unstubAllGlobals();
     clearBadgePoolRuntimeCache();
@@ -389,6 +393,66 @@ describe('badgeMetadataInference', () => {
     for (const removed of ['JSON', 'LOCAL', 'STAGING', 'PROD', 'DEPLOY', 'HOTFIX', 'PR', 'CRUD']) {
       expect(hints).not.toContain(removed);
     }
+  });
+
+  describe('PERF-RENDER-P1 rules runtime cache', () => {
+    it('getAiLearnedBadgeInferenceRules reads AI localStorage once per stable raw', () => {
+      lsMockStore[AI_LEARNED_LS_KEY] = JSON.stringify({
+        v: 1,
+        updatedAt: 't',
+        rules: [{ field: 'name', contains: 'cached-node', suggestBadges: ['API'] }]
+      });
+      clearBadgeInferenceRulesRuntimeCache();
+      const getItemSpy = vi.spyOn(localStorage, 'getItem');
+      for (let i = 0; i < 100; i++) {
+        getAiLearnedBadgeInferenceRules();
+      }
+      const aiCalls = getItemSpy.mock.calls.filter((c) => c[0] === AI_LEARNED_LS_KEY);
+      expect(aiCalls).toHaveLength(1);
+      getItemSpy.mockRestore();
+    });
+
+    it('getUserBadgeInferenceRules reads user localStorage once when LS raw is absent', () => {
+      setUserBadgeInferenceRules([{ field: 'name', contains: 'MEM', suggestBadges: ['MVP'] }]);
+      delete lsMockStore[USER_RULES_LS_KEY];
+      clearBadgeInferenceRulesRuntimeCache();
+      const getItemSpy = vi.spyOn(localStorage, 'getItem');
+      for (let i = 0; i < 100; i++) {
+        getUserBadgeInferenceRules();
+      }
+      const userCalls = getItemSpy.mock.calls.filter((c) => c[0] === USER_RULES_LS_KEY);
+      expect(userCalls).toHaveLength(1);
+      expect(getUserBadgeInferenceRules()[0]?.contains).toBe('MEM');
+      getItemSpy.mockRestore();
+    });
+
+    it('clearAiLearnedBadgeInferenceRules invalidates AI cache (next read hits localStorage again)', () => {
+      mergeLearnedBadgeRulesFromImportedNodes([
+        { name: 'Cache Invalidate Alpha', metadata: { badges: { dev: ['API'], ux: [], prj: [] } } }
+      ]);
+      clearBadgeInferenceRulesRuntimeCache();
+      const getItemSpy = vi.spyOn(localStorage, 'getItem');
+      getAiLearnedBadgeInferenceRules();
+      getAiLearnedBadgeInferenceRules();
+      expect(getItemSpy.mock.calls.filter((c) => c[0] === AI_LEARNED_LS_KEY)).toHaveLength(1);
+      clearAiLearnedBadgeInferenceRules();
+      expect(getAiLearnedBadgeInferenceRules()).toEqual([]);
+      expect(getItemSpy.mock.calls.filter((c) => c[0] === AI_LEARNED_LS_KEY)).toHaveLength(2);
+      getItemSpy.mockRestore();
+    });
+
+    it('mergeLearnedBadgeRulesFromImportedNodes refreshes AI cache after invalidate', () => {
+      mergeLearnedBadgeRulesFromImportedNodes([
+        { name: 'Merge Cache First Unique', metadata: { badges: { dev: ['TDD'], ux: [], prj: [] } } }
+      ]);
+      clearBadgeInferenceRulesRuntimeCache();
+      getAiLearnedBadgeInferenceRules();
+      mergeLearnedBadgeRulesFromImportedNodes([
+        { name: 'Merge Cache Second Unique', metadata: { badges: { dev: ['AUTH'], ux: [], prj: [] } } }
+      ]);
+      const rules = getAiLearnedBadgeInferenceRules();
+      expect(rules.some((r) => r.contains === 'Merge Cache Second Unique')).toBe(true);
+    });
   });
 
   it('caps hints at MAX_HINTS_PER_NODE = 6', () => {

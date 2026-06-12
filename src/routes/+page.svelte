@@ -15,13 +15,14 @@
     deleteProject,
     registerPendingWorkspaceDeletion,
     getPendingWorkspaceDeletionIds,
-    pruneOwnedProjectGhostHideAgainstCloudCanon,
     pruneDeletedProjectTombstonesAgainstCloudProjectIds,
     getDeletedProjectTombstoneIds,
     registerOwnedProjectGhostHideForModal,
     getOwnedProjectGhostHideIdsForModal,
     removeDeletedProjectsFromLocalCache,
     mergeModalListCloudCanon,
+    filterProjectsForModalListDisplay,
+    stripResurrectedDeletedProjectsFromLocal,
     captureLogoutSessionSnapshot,
     clearSessionProjectSelectionForLogout,
     readLogoutSessionSnapshotV1,
@@ -940,6 +941,7 @@
     }
 
     // 동시성 문제 회피(P0): 스토어 스냅샷을 여기서 한 번만 가져온다
+    stripResurrectedDeletedProjectsFromLocal();
     const plist = get(projects);
     let mergedList: Project[];
     try {
@@ -948,7 +950,6 @@
         if (token !== modalProjectListToken) return;
         if (cloudRes.ok) {
           const cloudCanonIds = new Set(cloudRes.projects.map((p) => p.id));
-          pruneOwnedProjectGhostHideAgainstCloudCanon(uid, cloudCanonIds);
           pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudCanonIds);
           pruneModalInstantHideAgainstCloudCanon(cloudCanonIds);
         }
@@ -1000,7 +1001,7 @@
         removeDeletedProjectsFromLocalCache(accessFailedIds);
       }
       if (token !== modalProjectListToken) return;
-      projectsForModal = next;
+      projectsForModal = filterProjectsForModalListDisplay(next, uid);
       modalProjectListInitialHydrated = true;
     } finally {
       if (token === modalProjectListToken) projectModalListSyncing = false;
@@ -1023,23 +1024,20 @@
     void modalInstantHideEpoch;
     void projectModalListSyncing;
     void modalProjectListInitialHydrated;
+    const viewerUid = $authUser?.id ?? '';
+    const stripModalDeletedRows = (arr: Project[]) => {
+      let out = filterProjectsForModalListDisplay(arr, viewerUid);
+      if (modalInstantHideDeletedIds.size) {
+        out = out.filter((p) => !modalInstantHideDeletedIds.has(p.id));
+      }
+      return out;
+    };
     if (isAclEnforced() && projectModalListSyncing && !modalProjectListInitialHydrated) {
       return [];
     }
-    const tomb = getDeletedProjectTombstoneIds();
-    const stripInstantHide = (arr: Project[]) =>
-      arr.filter((p) => !modalInstantHideDeletedIds.has(p.id) && !tomb.has(p.id));
-    if (projectsForModal !== null) return stripInstantHide(projectsForModal);
-    if (!isAclEnforced()) return stripInstantHide($projects);
-    const pend = getPendingWorkspaceDeletionIds();
-    const ghostHide = getOwnedProjectGhostHideIdsForModal($authUser?.id ?? '');
-    return $projects.filter(
-      (p) =>
-        !pend.has(p.id) &&
-        !ghostHide.has(p.id) &&
-        !modalInstantHideDeletedIds.has(p.id) &&
-        !tomb.has(p.id)
-    );
+    if (projectsForModal !== null) return stripModalDeletedRows(projectsForModal);
+    if (!isAclEnforced()) return stripModalDeletedRows($projects);
+    return stripModalDeletedRows($projects);
   })();
 
   let autoLoadAttempted = false;
@@ -2177,6 +2175,9 @@
     }
     deleteProject(proj.id);
     markModalInstantHideDeletedProject(proj.id);
+    if (projectsForModal !== null) {
+      projectsForModal = projectsForModal.filter((p) => p.id !== proj.id);
+    }
     if (cloudSyncAvailable) {
       scheduleCloudFlush('delete-project', 100);
     }
@@ -2677,6 +2678,9 @@
         // P0: deleteProject 호출로 스토어·로컬 정리 + markCloudWorkspaceDirty 자동 수행
         deleteProject(projId);
         markModalInstantHideDeletedProject(projId);
+        if (projectsForModal !== null) {
+          projectsForModal = projectsForModal.filter((p) => p.id !== projId);
+        }
 
         // 현재 열린 프로젝트가 삭제됐으면 경고 모달 표시
         const cp = get(currentProject);

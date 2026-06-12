@@ -568,7 +568,7 @@ export function getPendingWorkspaceDeletionIds(): Set<string> {
 /**
  * 서버 `projects_json`에 고스트로 남은 id가 pending 제거·캐시 일부 삭제 후 `mergeWorkspaceBundleFromCloudRemote`로
  * 되살아오는 것을 막음. pending과 별도 TTL(전체 사이트 데이터 삭제 시 키도 사라짐 — 서버 정본 반영이 최종 해결).
- * NOW-DEL-WS-02 / NOW-P0-DEL-WS-06: tombstone은 TTL·업로드 성공 후 `releaseDeletedProjectTombstonesAfterUpload`로만 해제.
+ * NOW-DEL-WS-02 / NOW-P0-DEL-WS-06: tombstone은 TTL·서버 `projects_json` 정본에서 id가 사라졌을 때만 해제(업로드 직후 조기 해제 금지).
  * 클라우드 fetch만으로 tombstone prune 하지 않음(조기 해제 → stale pull 일괄 복원 레ース).
  */
 const WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY = 'plannode_workspace_deleted_project_tombstones_v1';
@@ -657,13 +657,36 @@ export function stripResurrectedDeletedProjectsFromLocal(skipIds?: ReadonlySet<s
   return toRemove.length;
 }
 
-/** 서버 정본에 id가 없을 때 tombstone 제거 — 레거시 호출부(+page 모달)는 TTL 만료만 수행(조기 prune 레ース 방지). */
+/** 모달 fetch 직후 — TTL 만료 tombstone만 정리. id별 해제는 **풀 번들** `mergeWorkspaceBundleFromCloudRemote`에서만(P0-DEL-WS-06). */
 export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(_cloudProjectIds: Set<string>): void {
   if (typeof window === 'undefined') return;
   const now = Date.now();
   const raw = readDeletedProjectTombstoneMap();
   const pruned = pruneExpiredDeletedProjectTombstones(raw, now);
   if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
+}
+
+/** 풀 워크스페이스 번들 pull 후 — 서버 `projects_json`에 없는 id만 tombstone·ghost-hide 해제. */
+export function releaseDeletedProjectMarkersAbsentFromRemoteBundle(remote: WorkspaceBundle): void {
+  if (typeof window === 'undefined') return;
+  const remoteIds = new Set(
+    (Array.isArray(remote.projects) ? remote.projects : [])
+      .map((p) => p.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  );
+  const raw = readDeletedProjectTombstoneMap();
+  const now = Date.now();
+  let map = pruneExpiredDeletedProjectTombstones(raw, now);
+  let changed = JSON.stringify(map) !== JSON.stringify(raw);
+  for (const id of Object.keys(map)) {
+    if (!remoteIds.has(id)) {
+      delete map[id];
+      changed = true;
+    }
+  }
+  if (changed) writeDeletedProjectTombstoneMap(map);
+  const uid = getAuthUserId();
+  if (uid) pruneOwnedProjectGhostHideAgainstCloudCanon(uid, remoteIds);
 }
 
 /**
@@ -1640,6 +1663,8 @@ export function deleteProject(projectId: string) {
       console.error('Failed to clear current project:', e);
     }
   }
+  const uid = getAuthUserId();
+  if (uid) registerOwnedProjectGhostHideForModal(uid, projectId);
   registerDeletedProjectTombstone(projectId);
   markCloudWorkspaceDirty();
 }
@@ -1803,6 +1828,21 @@ const parseTs = (iso: string | undefined): number => {
  * P3: `viewerUid` + 고스트-hide — pending 제거 뒤에도 원격 `projects_json`에 잠깐 남은 id 모달 노출 차단.
  * P4: 삭제 톰브스톤 — pending 비움·캐시 일부 삭제 후에도 원격 고스트 id 모달·병합에서 제외(NOW-DEL-WS-02).
  */
+/** 모달 표시 최종 방어 — pending·tombstone·ghost-hide (NOW-DEL-WS / P0-DEL-WS-06). `+page` stale `projectsForModal` 재발 방지. */
+export function filterProjectsForModalListDisplay(
+  rows: Project[],
+  viewerUid?: string | null
+): Project[] {
+  if (!rows.length) return rows;
+  const pendingDelete = getPendingWorkspaceDeletionIds();
+  const tombstoned = readDeletedProjectTombstoneIdSet();
+  const ghostHide = getOwnedProjectGhostHideIdsForModal(viewerUid);
+  if (!pendingDelete.size && !tombstoned.size && !ghostHide.size) return rows;
+  return rows.filter(
+    (p) => !pendingDelete.has(p.id) && !tombstoned.has(p.id) && !ghostHide.has(p.id)
+  );
+}
+
 /** 모달·ACL 검사용 — LWW로 고른 뒤에도 공유·소유 메타는 비어 있지 않은 쪽을 유지 */
 function mergeProjectRowForModalList(cloud: Project, local: Project): Project {
   const lt = parseTs(local.updated_at);
@@ -2468,6 +2508,7 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   /** 히스토리 병합(append-only, LWW) */
   mergeHistoryEntriesFromCloudRemote(remote.historyEntries ?? []);
 
+  releaseDeletedProjectMarkersAbsentFromRemoteBundle(remote);
   stripResurrectedDeletedProjectsFromLocal(skipIds);
 
   if (n > 0) {
