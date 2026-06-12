@@ -4,8 +4,12 @@ import {
   registerPendingWorkspaceDeletion,
   pruneOwnedProjectGhostHideAgainstCloudCanon,
   registerOwnedProjectGhostHideForModal,
-  filterProjectsForModalListDisplay
+  filterProjectsForModalListDisplay,
+  reconcileDeletedProjectMarkersAgainstServerGhosts,
+  getDeletedProjectTombstoneIds,
+  projects
 } from './projects';
+import { get } from 'svelte/store';
 import type { Project } from '$lib/supabase/client';
 
 function P(id: string, name: string, updated: string): Project {
@@ -155,6 +159,31 @@ describe('mergeModalListCloudCanon', () => {
       P('tomb1', 'Tomb', '2026-01-03T00:00:00.000Z')
     ];
     expect(filterProjectsForModalListDisplay(rows).map((x) => x.id)).toEqual(['ok']);
+  });
+
+  it('reconcileDeletedProjectMarkersAgainstServerGhosts hides server-only ghost from modal merge', () => {
+    if (typeof window === 'undefined') return;
+    const uid = 'u-reconcile-modal';
+    const local = [P('keep', 'Keep', '2026-01-01T00:00:00.000Z')];
+    projects.set(local);
+    const cloud = [
+      P('keep', 'Keep', '2026-01-01T00:00:00.000Z'),
+      P('ghost', 'Server ghost', '2026-01-02T00:00:00.000Z')
+    ];
+    reconcileDeletedProjectMarkersAgainstServerGhosts(cloud, local);
+    expect(getDeletedProjectTombstoneIds().has('ghost')).toBe(true);
+    expect(get(projects).map((p) => p.id)).toEqual(['keep']);
+    expect(mergeModalListCloudCanon(cloud, get(projects), uid).map((x) => x.id)).toEqual(['keep']);
+  });
+
+  it('tombstone remains when upload path skips releaseDeletedProjectTombstonesAfterUpload (P0-DEL-WS-06)', () => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(
+      'plannode_workspace_deleted_project_tombstones_v1',
+      JSON.stringify({ gone: Date.now() })
+    );
+    // sync.ts 성공 경로: pending만 clear — tombstone 조기 해제 호출 없음
+    expect(getDeletedProjectTombstoneIds().has('gone')).toBe(true);
   });
 });
 

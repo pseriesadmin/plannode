@@ -23,6 +23,7 @@
     mergeModalListCloudCanon,
     filterProjectsForModalListDisplay,
     stripResurrectedDeletedProjectsFromLocal,
+    reconcileDeletedProjectMarkersAgainstServerGhosts,
     captureLogoutSessionSnapshot,
     clearSessionProjectSelectionForLogout,
     readLogoutSessionSnapshotV1,
@@ -79,7 +80,9 @@
     isSupabaseCloudConfigured,
     fetchOwnWorkspaceProjectMetasForModal,
     fetchOwnWorkspaceBundleFresh,
-    mergeSharedProjectSliceFromCloudIfApplicable
+    mergeSharedProjectSliceFromCloudIfApplicable,
+    removeProjectFromWorkspaceCloud,
+    syncServerProjectDeletionsFromCloud
   } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
   import { startCloudBackgroundSync, stopCloudBackgroundSync } from '$lib/supabase/cloudBackgroundSync';
@@ -946,10 +949,12 @@
     let mergedList: Project[];
     try {
       if (cloudSyncAvailable) {
+        await syncServerProjectDeletionsFromCloud();
         const cloudRes = await fetchOwnWorkspaceProjectMetasForModal();
         if (token !== modalProjectListToken) return;
         if (cloudRes.ok) {
           const cloudCanonIds = new Set(cloudRes.projects.map((p) => p.id));
+          reconcileDeletedProjectMarkersAgainstServerGhosts(cloudRes.projects, plist);
           pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudCanonIds);
           pruneModalInstantHideAgainstCloudCanon(cloudCanonIds);
         }
@@ -2179,7 +2184,13 @@
       projectsForModal = projectsForModal.filter((p) => p.id !== proj.id);
     }
     if (cloudSyncAvailable) {
-      scheduleCloudFlush('delete-project', 100);
+      const rpcR = await removeProjectFromWorkspaceCloud(proj.id);
+      if (!rpcR.ok) {
+        scheduleCloudFlush('delete-project', 100);
+        if (import.meta.env.DEV && rpcR.rpcMissing) {
+          console.info('[handleDeleteProjectCard] remove_project RPC missing — bundle upsert fallback');
+        }
+      }
     }
     showPilotToast('프로젝트를 삭제했어.');
     invitePanelEpoch++;
