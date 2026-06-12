@@ -3047,7 +3047,7 @@
                   type="button"
                   role="menuitem"
                   class="tb-viewport-menu-item"
-                  title="드래그로 저장된 수동 위치(mx/my) 전부 제거 → 트리 자동 배치"
+                  title="드래그로 옮긴 카드 위치를 지우고 트리 열·행 배치로 되돌립니다. 확인 후 화면도 전체에 맞춥니다. 단축키 Ctrl+V — Mac은 Control(⌃)+V(붙여넣기 ⌘V와 다름). 되돌리기: Ctrl+Z(⌘Z)."
                   on:click={() => triggerPilotViewport('BAR')}>자동정렬</button>
               </div>
             {/if}
@@ -3275,6 +3275,10 @@
                   >그룹선택: Shift+드래그</span
                 ><span class="zc-hint" title="노드 1.5초: 카드가 따라 움직이며 다른 노드 + 근처에 놓기 · + 1.5초: 직속 하위 카드만 같이 이동(앵커 유지)"
                   >상위바꿈: 노드 1.5초 드래그 / + 1.5초 하위만</span
+                ><span
+                  class="zc-hint"
+                  title="드래그로 옮긴 카드 위치를 지우고 트리 열·행 배치로 되돌립니다. 확인 후 화면도 전체에 맞춥니다. Mac은 Control(⌃)+V — 붙여넣기(⌘V)와 다릅니다. 되돌리기: Ctrl+Z(⌘Z)."
+                  >자동정렬: Ctrl+V</span
                 >
               </div>
               {#if $currentProject}

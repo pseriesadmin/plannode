@@ -3306,6 +3306,7 @@ function resetAllManualLayout() {
     n.my = null;
   }
   render();
+  fitViewportToContent({ silent: true });
   // [수정] Fix1-보정 (2026-05-31): schedulePersist(50ms debounce) → flushPersistNow({force})
   // 이유: schedulePersist는 50ms 후 markCloudWorkspaceDirty를 호출하지만
   //       emitAutoCloudSync → scheduleCloudFlush → hasAnyCloudSyncPending() 체크가 먼저
