@@ -15,13 +15,15 @@
     deleteProject,
     registerPendingWorkspaceDeletion,
     getPendingWorkspaceDeletionIds,
-    pruneOwnedProjectGhostHideAgainstCloudCanon,
     pruneDeletedProjectTombstonesAgainstCloudProjectIds,
     getDeletedProjectTombstoneIds,
     registerOwnedProjectGhostHideForModal,
     getOwnedProjectGhostHideIdsForModal,
     removeDeletedProjectsFromLocalCache,
     mergeModalListCloudCanon,
+    filterProjectsForModalListDisplay,
+    stripResurrectedDeletedProjectsFromLocal,
+    reconcileDeletedProjectMarkersAgainstServerGhosts,
     captureLogoutSessionSnapshot,
     clearSessionProjectSelectionForLogout,
     readLogoutSessionSnapshotV1,
@@ -78,7 +80,9 @@
     isSupabaseCloudConfigured,
     fetchOwnWorkspaceProjectMetasForModal,
     fetchOwnWorkspaceBundleFresh,
-    mergeSharedProjectSliceFromCloudIfApplicable
+    mergeSharedProjectSliceFromCloudIfApplicable,
+    removeProjectFromWorkspaceCloud,
+    syncServerProjectDeletionsFromCloud
   } from '$lib/supabase/sync';
   import { flushCloudWorkspaceNow, scheduleCloudFlush } from '$lib/supabase/workspacePush';
   import { startCloudBackgroundSync, stopCloudBackgroundSync } from '$lib/supabase/cloudBackgroundSync';
@@ -940,15 +944,17 @@
     }
 
     // 동시성 문제 회피(P0): 스토어 스냅샷을 여기서 한 번만 가져온다
+    stripResurrectedDeletedProjectsFromLocal();
     const plist = get(projects);
     let mergedList: Project[];
     try {
       if (cloudSyncAvailable) {
+        await syncServerProjectDeletionsFromCloud();
         const cloudRes = await fetchOwnWorkspaceProjectMetasForModal();
         if (token !== modalProjectListToken) return;
         if (cloudRes.ok) {
           const cloudCanonIds = new Set(cloudRes.projects.map((p) => p.id));
-          pruneOwnedProjectGhostHideAgainstCloudCanon(uid, cloudCanonIds);
+          reconcileDeletedProjectMarkersAgainstServerGhosts(cloudRes.projects, plist);
           pruneDeletedProjectTombstonesAgainstCloudProjectIds(cloudCanonIds);
           pruneModalInstantHideAgainstCloudCanon(cloudCanonIds);
         }
@@ -1000,7 +1006,7 @@
         removeDeletedProjectsFromLocalCache(accessFailedIds);
       }
       if (token !== modalProjectListToken) return;
-      projectsForModal = next;
+      projectsForModal = filterProjectsForModalListDisplay(next, uid);
       modalProjectListInitialHydrated = true;
     } finally {
       if (token === modalProjectListToken) projectModalListSyncing = false;
@@ -1023,23 +1029,20 @@
     void modalInstantHideEpoch;
     void projectModalListSyncing;
     void modalProjectListInitialHydrated;
+    const viewerUid = $authUser?.id ?? '';
+    const stripModalDeletedRows = (arr: Project[]) => {
+      let out = filterProjectsForModalListDisplay(arr, viewerUid);
+      if (modalInstantHideDeletedIds.size) {
+        out = out.filter((p) => !modalInstantHideDeletedIds.has(p.id));
+      }
+      return out;
+    };
     if (isAclEnforced() && projectModalListSyncing && !modalProjectListInitialHydrated) {
       return [];
     }
-    const tomb = getDeletedProjectTombstoneIds();
-    const stripInstantHide = (arr: Project[]) =>
-      arr.filter((p) => !modalInstantHideDeletedIds.has(p.id) && !tomb.has(p.id));
-    if (projectsForModal !== null) return stripInstantHide(projectsForModal);
-    if (!isAclEnforced()) return stripInstantHide($projects);
-    const pend = getPendingWorkspaceDeletionIds();
-    const ghostHide = getOwnedProjectGhostHideIdsForModal($authUser?.id ?? '');
-    return $projects.filter(
-      (p) =>
-        !pend.has(p.id) &&
-        !ghostHide.has(p.id) &&
-        !modalInstantHideDeletedIds.has(p.id) &&
-        !tomb.has(p.id)
-    );
+    if (projectsForModal !== null) return stripModalDeletedRows(projectsForModal);
+    if (!isAclEnforced()) return stripModalDeletedRows($projects);
+    return stripModalDeletedRows($projects);
   })();
 
   let autoLoadAttempted = false;
@@ -2177,8 +2180,17 @@
     }
     deleteProject(proj.id);
     markModalInstantHideDeletedProject(proj.id);
+    if (projectsForModal !== null) {
+      projectsForModal = projectsForModal.filter((p) => p.id !== proj.id);
+    }
     if (cloudSyncAvailable) {
-      scheduleCloudFlush('delete-project', 100);
+      const rpcR = await removeProjectFromWorkspaceCloud(proj.id);
+      if (!rpcR.ok) {
+        scheduleCloudFlush('delete-project', 100);
+        if (import.meta.env.DEV && rpcR.rpcMissing) {
+          console.info('[handleDeleteProjectCard] remove_project RPC missing — bundle upsert fallback');
+        }
+      }
     }
     showPilotToast('프로젝트를 삭제했어.');
     invitePanelEpoch++;
@@ -2677,6 +2689,9 @@
         // P0: deleteProject 호출로 스토어·로컬 정리 + markCloudWorkspaceDirty 자동 수행
         deleteProject(projId);
         markModalInstantHideDeletedProject(projId);
+        if (projectsForModal !== null) {
+          projectsForModal = projectsForModal.filter((p) => p.id !== projId);
+        }
 
         // 현재 열린 프로젝트가 삭제됐으면 경고 모달 표시
         const cp = get(currentProject);
@@ -3032,7 +3047,7 @@
                   type="button"
                   role="menuitem"
                   class="tb-viewport-menu-item"
-                  title="드래그로 저장된 수동 위치(mx/my) 전부 제거 → 트리 자동 배치"
+                  title="드래그로 옮긴 카드 위치를 지우고 트리 열·행 배치로 되돌립니다. 확인 후 화면도 전체에 맞춥니다. 단축키 Ctrl+V — Mac은 Control(⌃)+V(붙여넣기 ⌘V와 다름). 되돌리기: Ctrl+Z(⌘Z)."
                   on:click={() => triggerPilotViewport('BAR')}>자동정렬</button>
               </div>
             {/if}
@@ -3260,6 +3275,10 @@
                   >그룹선택: Shift+드래그</span
                 ><span class="zc-hint" title="노드 1.5초: 카드가 따라 움직이며 다른 노드 + 근처에 놓기 · + 1.5초: 직속 하위 카드만 같이 이동(앵커 유지)"
                   >상위바꿈: 노드 1.5초 드래그 / + 1.5초 하위만</span
+                ><span
+                  class="zc-hint"
+                  title="드래그로 옮긴 카드 위치를 지우고 트리 열·행 배치로 되돌립니다. 확인 후 화면도 전체에 맞춥니다. Mac은 Control(⌃)+V — 붙여넣기(⌘V)와 다릅니다. 되돌리기: Ctrl+Z(⌘Z)."
+                  >자동정렬: Ctrl+V</span
                 >
               </div>
               {#if $currentProject}

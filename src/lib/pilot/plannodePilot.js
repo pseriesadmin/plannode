@@ -2302,9 +2302,7 @@ function defaultNumForNode(node, idx) {
   }
   const p = idx ? findIndexed(node.parent_id, idx) : find(node.parent_id);
   if (!p) return '';
-  const sibs = idx
-    ? (idx.childrenById.get(node.parent_id) ?? [])
-    : nodes.filter((n) => n.parent_id === node.parent_id);
+  const sibs = nodes.filter((n) => n.parent_id === node.parent_id);
   const sibIdx = sibs.findIndex((k) => k.id === node.id);
   const ord = (sibIdx >= 0 ? sibIdx : sibs.length - 1) + 1;
   const pfx = p.num && String(p.num).trim() ? `${p.num}.` : '';
@@ -2478,6 +2476,7 @@ function commitFlatSiblingReorder(parentId, sorted, idx) {
   if (idx) {
     idx.idToIndex.clear();
     for (let i = 0; i < nodes.length; i++) idx.idToIndex.set(nodes[i].id, i);
+    if (idx.childrenById) idx.childrenById.set(parentId, [...sorted]);
   }
   return true;
 }
@@ -2533,9 +2532,60 @@ function reorderTopDownSiblingsByDropSlot(parentId, draggedIds = [], idx) {
   return commitFlatSiblingReorder(parentId, newOrder, idx);
 }
 
+/** 우측분포 — 카드 세로 중심 Y · 드래그 직후 DOM 실측 우선 */
+function siblingLayoutCenterY(node, preferDom = false) {
+  if (!node) return 0;
+  if (preferDom && typeof document !== 'undefined') {
+    const el = document.getElementById('nw-' + node.id);
+    if (el) {
+      const ty = parseFloat(el.style.top);
+      if (Number.isFinite(ty)) {
+        const oh = el.offsetHeight > 28 ? el.offsetHeight : estimateNodeCardHeightPx(node);
+        return ty + oh / 2;
+      }
+    }
+  }
+  if (node.my != null) return node.my + nodeHeightForRightLayout(node) / 2;
+  const pos = gp(node);
+  return pos.y + nodeHeightForRightLayout(node) / 2;
+}
+
+/** @param {string} parentId @param {string[]} draggedIds */
+function reorderRightSiblingsByDropSlot(parentId, draggedIds = [], idx) {
+  const sibs = nodes.filter((n) => n.parent_id === parentId);
+  if (sibs.length < 2) return false;
+  const idxOf = (id) => (idx ? (idx.idToIndex.get(id) ?? -1) : nodes.findIndex((n) => n.id === id));
+  const draggedSet = new Set(
+    (Array.isArray(draggedIds) ? draggedIds : []).filter((id) => sibs.some((s) => s.id === id))
+  );
+  const compareCenterY = (a, b) => {
+    const ca = siblingLayoutCenterY(a, true);
+    const cb = siblingLayoutCenterY(b, true);
+    if (ca !== cb) return ca - cb;
+    return idxOf(a.id) - idxOf(b.id);
+  };
+
+  if (draggedSet.size === 0) {
+    return commitFlatSiblingReorder(parentId, [...sibs].sort(compareCenterY), idx);
+  }
+
+  const staticSorted = sibs.filter((s) => !draggedSet.has(s.id)).sort(compareCenterY);
+  const draggedSorted = sibs.filter((s) => draggedSet.has(s.id)).sort(compareCenterY);
+  const blockCenterY = Math.min(...draggedSorted.map((d) => siblingLayoutCenterY(d, true)));
+  let insertAt = 0;
+  while (
+    insertAt < staticSorted.length &&
+    siblingLayoutCenterY(staticSorted[insertAt], true) < blockCenterY
+  ) {
+    insertAt++;
+  }
+  const newOrder = [...staticSorted.slice(0, insertAt), ...draggedSorted, ...staticSorted.slice(insertAt)];
+  return commitFlatSiblingReorder(parentId, newOrder, idx);
+}
+
 /**
  * 같은 부모 아래 형제를 화면 위치로 `nodes` 평면 배열에 반영.
- * 우측분포: Y(위→아래), 같은 줄 X — 하위분포: center-X 슬롯 삽입.
+ * 우측분포: Y 슬롯 · 하위분포: center-X 슬롯 삽입.
  * @param {string} parentId
  * @param {string[]} [draggedIds]
  * @returns 순서가 바뀌었으면 true
@@ -2544,19 +2594,7 @@ function reorderFlatSiblingsByVisualY(parentId, draggedIds = [], idx) {
   if (nodeMapLayoutMode === 'topdown') {
     return reorderTopDownSiblingsByDropSlot(parentId, draggedIds, idx);
   }
-  const sibs = nodes.filter((n) => n.parent_id === parentId);
-  if (sibs.length < 2) return false;
-  const idxOf = (id) => (idx ? (idx.idToIndex.get(id) ?? -1) : nodes.findIndex((n) => n.id === id));
-  const sorted = [...sibs].sort((a, b) => {
-    const pa = gp(a),
-      pb = gp(b);
-    const dy = pa.y - pb.y;
-    if (Math.abs(dy) >= 8) return dy;
-    const dx = pa.x - pb.x;
-    if (Math.abs(dx) >= 8) return dx;
-    return idxOf(a.id) - idxOf(b.id);
-  });
-  return commitFlatSiblingReorder(parentId, sorted, idx);
+  return reorderRightSiblingsByDropSlot(parentId, draggedIds, idx);
 }
 
 /** 트리·nodes 순서에 맞춰 분류 번호 일괄 재부여(부모 먼저, DFS) */
@@ -2566,9 +2604,7 @@ function applyHierarchyNumsFromTreeOrder(idx) {
     if (!String(r.num || '').trim()) r.num = 'PRD';
   }
   function walk(pid) {
-    const kids = idx
-      ? (idx.childrenById.get(pid) ?? [])
-      : nodes.filter((n) => n.parent_id === pid);
+    const kids = nodes.filter((n) => n.parent_id === pid);
     for (const k of kids) {
       k.num = defaultNumForNode(k, idx);
       walk(k.id);
@@ -3220,7 +3256,14 @@ function fitViewportToContent(opts = {}) {
 
 function fitToScreen() {
   collapsedNodeIds.clear();
-  render();
+  skipSchedulePersistOnce = true;
+  _renderInferHintsOff = true;
+  try {
+    render();
+  } finally {
+    _renderInferHintsOff = false;
+    skipSchedulePersistOnce = false;
+  }
   fitViewportToContent({ silent: false });
 }
 
@@ -3263,6 +3306,7 @@ function resetAllManualLayout() {
     n.my = null;
   }
   render();
+  fitViewportToContent({ silent: true });
   // [수정] Fix1-보정 (2026-05-31): schedulePersist(50ms debounce) → flushPersistNow({force})
   // 이유: schedulePersist는 50ms 후 markCloudWorkspaceDirty를 호출하지만
   //       emitAutoCloudSync → scheduleCloudFlush → hasAnyCloudSyncPending() 체크가 먼저
@@ -3397,8 +3441,7 @@ function estimateNodeCardHeightPx(n) {
     const lines = Math.min(2, Math.max(1, Math.ceil(desc.length / 42)));
     h += 8 + lines * 14;
   }
-  const _descEmpty = !desc;
-  const badges = flattenBadgeSet(getBadgeSetFromNodeInput(n, { inferHints: !_descEmpty }));
+  const badges = cardBadgeFlatForRender(n);
   if (badges.length) {
     h += 20;
     const innerW = cardW - 26;
@@ -3410,11 +3453,26 @@ function estimateNodeCardHeightPx(n) {
   return Math.max(NODE_H, h);
 }
 
+/** render() 패스 내 배지 flat 캐시 — getBadgeSetFromNodeInput 중복 제거 (PERF-RENDER-P2) */
+function cardBadgeFlatForRender(n) {
+  if (_renderSession?.badgeFlatById.has(n.id)) return _renderSession.badgeFlatById.get(n.id);
+  const _descEmpty = !String(n.description ?? '').trim();
+  const inferHints = _renderInferHintsOff ? false : !_descEmpty;
+  const flat = flattenBadgeSet(getBadgeSetFromNodeInput(n, { inferHints }));
+  if (_renderSession) _renderSession.badgeFlatById.set(n.id, flat);
+  return flat;
+}
+
 /** 우측분포 전용 — DOM `.nd` 실측 우선(배지 clamp·설명 wrap). pre-DOM은 estimate(1pass) */
 function nodeHeightForRightLayout(n) {
   if (!n) return NODE_H;
+  if (_renderSession?.ndHeightById.has(n.id)) return _renderSession.ndHeightById.get(n.id);
   const el = typeof document !== 'undefined' ? document.getElementById('nd-' + n.id) : null;
-  if (el && el.offsetHeight > 28) return el.offsetHeight;
+  if (el && el.offsetHeight > 28) {
+    const h = el.offsetHeight;
+    if (_renderSession) _renderSession.ndHeightById.set(n.id, h);
+    return h;
+  }
   return estimateNodeCardHeightPx(n);
 }
 
@@ -3449,6 +3507,10 @@ function compareSiblingNodesForLayout(a, b) {
 let _renderChildrenById = null;
 /** render() 세션 동안 유효 — getDepth fast-path (DRAG-END-PERF · D4) */
 let _renderPilotDepthIdx = null;
+/** render() 세션 — 배지 flat·`.nd` 높이 패스 내 캐시 (PERF-RENDER-P2) */
+let _renderSession = null;
+/** fitToScreen 등 viewport-only render에서 AI/키워드 추론 스킵 (PERF-RENDER-P3) */
+let _renderInferHintsOff = false;
 
 function buildChildrenByIdMap(nodeList) {
   const m = new Map();
@@ -3876,6 +3938,8 @@ function updateSelHighlightOnly() {
 }
 
 function render() {
+  _renderSession = { badgeFlatById: new Map(), ndHeightById: new Map() };
+  try {
   clearSmartGuides();
   lm = {};
   _renderPilotDepthIdx = buildRenderDepthIndex();
@@ -3983,10 +4047,7 @@ function render() {
       nd.style.background = 'rgba(248,250,252,0.6)';
     }
     // 설명(description)이 없으면 name만으로 추론하지 않음 — user/AI학습 규칙 오추론 차단
-    const _descEmpty = !String(n.description ?? '').trim();
-    const cardBadgeFlat = flattenBadgeSet(
-      getBadgeSetFromNodeInput(n, { inferHints: !_descEmpty })
-    );
+    const cardBadgeFlat = cardBadgeFlatForRender(n);
     const bgs = cardBadgeFlat
       .map((b) => `<span class="bg ${badgeClassForNode(b)}">${bl(b)}</span>`)
       .join('');
@@ -4248,7 +4309,10 @@ function render() {
   if (!skipSchedulePersistOnce) schedulePersist();
   skipSchedulePersistOnce = false;
   maybeEmitNodeSelect();
-  _renderPilotDepthIdx = null;
+  } finally {
+    _renderSession = null;
+    _renderPilotDepthIdx = null;
+  }
 }
 
 function edgePathKey(parentId, childId) {

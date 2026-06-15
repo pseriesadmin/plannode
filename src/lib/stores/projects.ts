@@ -568,7 +568,7 @@ export function getPendingWorkspaceDeletionIds(): Set<string> {
 /**
  * 서버 `projects_json`에 고스트로 남은 id가 pending 제거·캐시 일부 삭제 후 `mergeWorkspaceBundleFromCloudRemote`로
  * 되살아오는 것을 막음. pending과 별도 TTL(전체 사이트 데이터 삭제 시 키도 사라짐 — 서버 정본 반영이 최종 해결).
- * NOW-DEL-WS-02 / NOW-P0-DEL-WS-06: tombstone은 TTL·업로드 성공 후 `releaseDeletedProjectTombstonesAfterUpload`로만 해제.
+ * NOW-DEL-WS-02 / NOW-P0-DEL-WS-06: tombstone·ghost는 **풀 번들 pull**에서 서버 `projects_json`에 id가 없을 때만 해제(업로드 직후 조기 해제 금지).
  * 클라우드 fetch만으로 tombstone prune 하지 않음(조기 해제 → stale pull 일괄 복원 레ース).
  */
 const WORKSPACE_DELETED_PROJECT_TOMBSTONES_KEY = 'plannode_workspace_deleted_project_tombstones_v1';
@@ -609,11 +609,12 @@ function pruneExpiredDeletedProjectTombstones(map: Record<string, number>, now: 
   return Object.fromEntries(entries);
 }
 
-/** 삭제·보류·모달 ghost-hide id — 병합 skip·번들 업로드 제외 공통 집합(추가 RPC 없음) */
+/** 삭제·보류·모달 ghost-hide·서버 deletion id — 병합 skip·번들 업로드 제외 공통 집합 */
 export function workspaceDeletedProjectSkipIds(): Set<string> {
   const skip = new Set<string>([
     ...readPendingWorkspaceDeletionSet(),
-    ...readDeletedProjectTombstoneIdSet()
+    ...readDeletedProjectTombstoneIdSet(),
+    ...readServerDeletedProjectIdSet()
   ]);
   const uid = getAuthUserId();
   if (uid) {
@@ -657,7 +658,7 @@ export function stripResurrectedDeletedProjectsFromLocal(skipIds?: ReadonlySet<s
   return toRemove.length;
 }
 
-/** 서버 정본에 id가 없을 때 tombstone 제거 — 레거시 호출부(+page 모달)는 TTL 만료만 수행(조기 prune 레ース 방지). */
+/** 모달 fetch 직후 — TTL 만료 tombstone만 정리. id별 해제는 **풀 번들** `mergeWorkspaceBundleFromCloudRemote`에서만(P0-DEL-WS-06). */
 export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(_cloudProjectIds: Set<string>): void {
   if (typeof window === 'undefined') return;
   const now = Date.now();
@@ -666,9 +667,32 @@ export function pruneDeletedProjectTombstonesAgainstCloudProjectIds(_cloudProjec
   if (JSON.stringify(pruned) !== JSON.stringify(raw)) writeDeletedProjectTombstoneMap(pruned);
 }
 
+/** 풀 워크스페이스 번들 pull 후 — 서버 `projects_json`에 없는 id만 tombstone·ghost-hide 해제. */
+export function releaseDeletedProjectMarkersAbsentFromRemoteBundle(remote: WorkspaceBundle): void {
+  if (typeof window === 'undefined') return;
+  const remoteIds = new Set(
+    (Array.isArray(remote.projects) ? remote.projects : [])
+      .map((p) => p.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  );
+  const raw = readDeletedProjectTombstoneMap();
+  const now = Date.now();
+  let map = pruneExpiredDeletedProjectTombstones(raw, now);
+  let changed = JSON.stringify(map) !== JSON.stringify(raw);
+  for (const id of Object.keys(map)) {
+    if (!remoteIds.has(id)) {
+      delete map[id];
+      changed = true;
+    }
+  }
+  if (changed) writeDeletedProjectTombstoneMap(map);
+  const uid = getAuthUserId();
+  if (uid) pruneOwnedProjectGhostHideAgainstCloudCanon(uid, remoteIds);
+}
+
 /**
- * 업로드 성공 직후: 번들에서 의도적으로 제외한 삭제 id의 tombstone 해제.
- * 서버 fetch 없음 — gatherWorkspaceBundle 제외 집합 = 삭제 반영 payload.
+ * (레거시·테스트) 업로드 성공 직후 tombstone 해제 — **sync.ts에서 호출하지 않음**.
+ * P0-DEL-WS-06: 조기 해제 시 서버 고스트 pull·모달 재노출 레이스. 해제는 `releaseDeletedProjectMarkersAbsentFromRemoteBundle`만.
  */
 export function releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle: ReadonlySet<string>): void {
   if (typeof window === 'undefined' || !excludedFromBundle.size) return;
@@ -716,6 +740,90 @@ function clearDeletedProjectTombstoneForReimport(projectId: string): void {
   if (!map[projectId]) return;
   delete map[projectId];
   writeDeletedProjectTombstoneMap(map);
+}
+
+/** Phase C — 서버 `plannode_project_deletions` 정본 (stale JSON 고스트보다 우선) */
+const SERVER_DELETED_PROJECTS_KEY = 'plannode_server_deleted_project_ids_v1';
+export const SERVER_DELETIONS_LAST_FETCH_KEY = 'plannode_server_deletions_last_fetch_v1';
+const SERVER_DELETED_MAP_MAX_IDS = 320;
+
+export type ServerProjectDeletionRow = {
+  project_id: string;
+  deleted_at: string;
+  deletion_kind?: string;
+};
+
+function readServerDeletedProjectMap(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const s = localStorage.getItem(SERVER_DELETED_PROJECTS_KEY);
+    const o = s ? JSON.parse(s) : {};
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeServerDeletedProjectMap(m: Record<string, number>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(SERVER_DELETED_PROJECTS_KEY, JSON.stringify(m));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function readServerDeletedProjectIdSet(): Set<string> {
+  return new Set(Object.keys(readServerDeletedProjectMap()));
+}
+
+function pruneServerDeletedProjectMap(map: Record<string, number>): Record<string, number> {
+  let entries = Object.entries(map).sort((a, b) => a[1] - b[1]);
+  while (entries.length > SERVER_DELETED_MAP_MAX_IDS) {
+    entries = entries.slice(1);
+  }
+  return Object.fromEntries(entries);
+}
+
+/** RPC remove·fetch 반영 — 서버 deletion 정본 LS 등록. tombstone은 stale `projects_json` 고스트 동안 유지(P0-DEL-WS-06). */
+export function registerServerDeletedProjectId(projectId: string, deletedAtIso?: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  const ts = deletedAtIso ? Date.parse(deletedAtIso) : Date.now();
+  let map = pruneServerDeletedProjectMap(readServerDeletedProjectMap());
+  map[projectId] = Number.isFinite(ts) ? ts : Date.now();
+  writeServerDeletedProjectMap(map);
+  registerDeletedProjectTombstone(projectId);
+}
+
+export function clearServerDeletedProjectIdForReimport(projectId: string): void {
+  if (typeof window === 'undefined' || !projectId) return;
+  const map = { ...readServerDeletedProjectMap() };
+  if (!map[projectId]) return;
+  delete map[projectId];
+  writeServerDeletedProjectMap(map);
+}
+
+/** `plannode_fetch_project_deletions_since` 결과 병합 — @returns 신규·갱신 id 수 */
+export function applyServerProjectDeletionsFromCloud(rows: ServerProjectDeletionRow[]): number {
+  if (typeof window === 'undefined' || !rows.length) return 0;
+  let map = { ...readServerDeletedProjectMap() };
+  const added = new Set<string>();
+  for (const row of rows) {
+    const id = row.project_id;
+    if (!id) continue;
+    const t = Date.parse(row.deleted_at);
+    const ts = Number.isFinite(t) ? t : Date.now();
+    if (!map[id] || ts >= map[id]) {
+      map[id] = ts;
+      added.add(id);
+    }
+  }
+  if (!added.size) return 0;
+  map = pruneServerDeletedProjectMap(map);
+  writeServerDeletedProjectMap(map);
+  for (const id of added) registerDeletedProjectTombstone(id);
+  stripResurrectedDeletedProjectsFromLocal();
+  return added.size;
 }
 
 /**
@@ -830,6 +938,7 @@ export function loadProjectsFromLocalStorage() {
         }
       }
       projects.set(reconciled);
+      stripResurrectedDeletedProjectsFromLocal();
     }
   } catch (e) {
     console.error('Failed to load projects:', e);
@@ -1640,6 +1749,8 @@ export function deleteProject(projectId: string) {
       console.error('Failed to clear current project:', e);
     }
   }
+  const uid = getAuthUserId();
+  if (uid) registerOwnedProjectGhostHideForModal(uid, projectId);
   registerDeletedProjectTombstone(projectId);
   markCloudWorkspaceDirty();
 }
@@ -1803,6 +1914,56 @@ const parseTs = (iso: string | undefined): number => {
  * P3: `viewerUid` + 고스트-hide — pending 제거 뒤에도 원격 `projects_json`에 잠깐 남은 id 모달 노출 차단.
  * P4: 삭제 톰브스톤 — pending 비움·캐시 일부 삭제 후에도 원격 고스트 id 모달·병합에서 제외(NOW-DEL-WS-02).
  */
+/**
+ * 서버 `projects_json`에는 있는데 로컬 스토어에는 없는 id — 로컬 삭제 후 마커만 유실된 고스트 heal.
+ * (로컬·서버 둘 다 있으면 `stripResurrectedDeletedProjectsFromLocal`이 마커 있을 때 제거)
+ */
+export function reconcileDeletedProjectMarkersAgainstServerGhosts(
+  cloudProjects: Project[],
+  localPlist: Project[]
+): void {
+  if (typeof window === 'undefined') return;
+  const localIds = new Set(localPlist.map((p) => p.id));
+  const uid = getAuthUserId();
+  const serverDeleted = readServerDeletedProjectIdSet();
+  const skip = workspaceDeletedProjectSkipIds();
+  for (const cp of cloudProjects) {
+    const id = cp.id;
+    if (!id) continue;
+    if (serverDeleted.has(id) || skip.has(id)) {
+      if (serverDeleted.has(id)) {
+        registerDeletedProjectTombstone(id);
+        if (uid) registerOwnedProjectGhostHideForModal(uid, id);
+      }
+      continue;
+    }
+    if (localIds.has(id)) continue;
+    registerDeletedProjectTombstone(id);
+    if (uid) registerOwnedProjectGhostHideForModal(uid, id);
+  }
+  stripResurrectedDeletedProjectsFromLocal();
+}
+
+/** 모달 표시 최종 방어 — pending·tombstone·ghost-hide (NOW-DEL-WS / P0-DEL-WS-06). `+page` stale `projectsForModal` 재발 방지. */
+export function filterProjectsForModalListDisplay(
+  rows: Project[],
+  viewerUid?: string | null
+): Project[] {
+  if (!rows.length) return rows;
+  const pendingDelete = getPendingWorkspaceDeletionIds();
+  const tombstoned = readDeletedProjectTombstoneIdSet();
+  const ghostHide = getOwnedProjectGhostHideIdsForModal(viewerUid);
+  const serverDeleted = readServerDeletedProjectIdSet();
+  if (!pendingDelete.size && !tombstoned.size && !ghostHide.size && !serverDeleted.size) return rows;
+  return rows.filter(
+    (p) =>
+      !pendingDelete.has(p.id) &&
+      !tombstoned.has(p.id) &&
+      !ghostHide.has(p.id) &&
+      !serverDeleted.has(p.id)
+  );
+}
+
 /** 모달·ACL 검사용 — LWW로 고른 뒤에도 공유·소유 메타는 비어 있지 않은 쪽을 유지 */
 function mergeProjectRowForModalList(cloud: Project, local: Project): Project {
   const lt = parseTs(local.updated_at);
@@ -1825,6 +1986,7 @@ export function mergeModalListCloudCanon(
   const pendingDelete = getPendingWorkspaceDeletionIds();
   const ghostHide = getOwnedProjectGhostHideIdsForModal(viewerUid);
   const tombstoned = readDeletedProjectTombstoneIdSet();
+  const serverDeleted = readServerDeletedProjectIdSet();
   const cloudIds = new Set(cloudRows.map((p) => p.id));
   const out: Project[] = [];
   for (const cp of cloudRows) {
@@ -1832,6 +1994,7 @@ export function mergeModalListCloudCanon(
     if (pendingDelete.has(cp.id)) continue;
     if (ghostHide.has(cp.id)) continue;
     if (tombstoned.has(cp.id)) continue;
+    if (serverDeleted.has(cp.id)) continue;
 
     const loc = localPlist.find((p) => p.id === cp.id);
     if (!loc) {
@@ -1842,7 +2005,13 @@ export function mergeModalListCloudCanon(
   }
   for (const lp of localPlist) {
     // P2: pending 삭제 id는 로컬 전용 목록에서도 제외
-    if (!cloudIds.has(lp.id) && !pendingDelete.has(lp.id) && !ghostHide.has(lp.id) && !tombstoned.has(lp.id))
+    if (
+      !cloudIds.has(lp.id) &&
+      !pendingDelete.has(lp.id) &&
+      !ghostHide.has(lp.id) &&
+      !tombstoned.has(lp.id) &&
+      !serverDeleted.has(lp.id)
+    )
       out.push(lp);
   }
   return out;
@@ -2112,6 +2281,7 @@ export function upsertImportedPlannodeTreeV1(
   }
   if (opts?.clearDeletedTombstone !== false) {
     clearDeletedProjectTombstoneForReimport(merged.id);
+    clearServerDeletedProjectIdForReimport(merged.id);
   }
   return selected;
 }
@@ -2468,7 +2638,8 @@ export function mergeWorkspaceBundleFromCloudRemote(remote: WorkspaceBundle): nu
   /** 히스토리 병합(append-only, LWW) */
   mergeHistoryEntriesFromCloudRemote(remote.historyEntries ?? []);
 
-  stripResurrectedDeletedProjectsFromLocal(skipIds);
+  releaseDeletedProjectMarkersAbsentFromRemoteBundle(remote);
+  stripResurrectedDeletedProjectsFromLocal();
 
   if (n > 0) {
     const cur = get(currentProject);

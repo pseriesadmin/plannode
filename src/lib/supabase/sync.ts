@@ -19,10 +19,15 @@ import {
   selectProject,
   projectWorkspaceNodesJsonSnapshot,
   clearPendingWorkspaceDeletions,
-  releaseDeletedProjectTombstonesAfterUpload,
   workspaceDeletedProjectSkipIds,
   getDeletedProjectTombstoneIds,
   mergeProjectMetaForCloudSync,
+  applyServerProjectDeletionsFromCloud,
+  registerServerDeletedProjectId,
+  readServerDeletedProjectIdSet,
+  SERVER_DELETIONS_LAST_FETCH_KEY,
+  getPendingWorkspaceDeletionIds,
+  type ServerProjectDeletionRow,
   reconcileProjectRecord,
   replayStructureOpsOnNodes,
   type WorkspaceBundle
@@ -338,6 +343,8 @@ function normalizeBundle(row: {
 
 /** 업로드 직전: 서버 `updated_at`이 내가 마지막으로 맞춘 값과 다르면(다른 기기·탭) LWW로 로컬에 먼저 병합 */
 async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
+  await syncServerProjectDeletionsFromCloud();
+
   const { data, error } = await supabase
     .from(TABLE)
     .select('updated_at, projects_json, nodes_by_project_json')
@@ -356,10 +363,11 @@ async function mergeRemoteWorkspaceBeforeUpload(userId: string): Promise<void> {
   }
 
   const bundle = normalizeBundle(data as { projects_json: unknown; nodes_by_project_json: unknown });
-  if (!bundle?.projects?.length) return;
+  if (!bundle) return;
 
   if (remoteTs === prev) return;
 
+  // DEL-WS-A2: projects_json=[](전체 삭제)여도 tombstone·ghost-hide 해제 경로 실행
   mergeWorkspaceBundleFromCloudRemote(bundle);
   try {
     localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, remoteTs);
@@ -1067,8 +1075,8 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
         } catch {
           /* ignore */
         }
+        await recordServerDeletionsAfterBundleUpload(excludedFromBundle);
         clearPendingWorkspaceDeletions();
-        releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle);
         markCloudWorkspaceSynced();
         scheduleAppendProjectWorkspaceHistoryAfterCloudUploadSuccess();
         return { ok: true, message: '클라우드에 올렸어 ✓' };
@@ -1110,8 +1118,8 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
     } catch {
       /* ignore */
     }
+    await recordServerDeletionsAfterBundleUpload(excludedFromBundle);
     clearPendingWorkspaceDeletions();
-    releaseDeletedProjectTombstonesAfterUpload(excludedFromBundle);
     markCloudWorkspaceSynced();
     clearUploadConflictCooldown();
     if (lastConflict && import.meta.env.DEV) {
@@ -1131,6 +1139,205 @@ export async function uploadWorkspaceToCloud(): Promise<UploadWorkspaceResult> {
     };
   }
   return { ok: false, message: '클라우드 저장 재시도 한도를 넘었어. 잠시 후 다시 시도해줘.' };
+}
+
+type FetchProjectDeletionsRpcResult = {
+  ok?: boolean;
+  reason?: string;
+  deletions?: unknown;
+};
+
+function isFetchProjectDeletionsRpcMissing(err: { message?: string; code?: string; details?: string } | null): boolean {
+  if (!err) return false;
+  const m = (String(err.message ?? '') + ' ' + String(err.details ?? '')).toLowerCase();
+  const c = String(err.code ?? '');
+  return (
+    c === 'PGRST202' ||
+    c === 'PGRST301' ||
+    /\b404\b/.test(m) ||
+    m.includes('not found') ||
+    m.includes('could not find') ||
+    /function public\.plannode_fetch_project_deletions_since/i.test(String(err.message ?? ''))
+  );
+}
+
+function parseServerProjectDeletionRows(raw: unknown): ServerProjectDeletionRow[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const payload = raw as FetchProjectDeletionsRpcResult;
+  if (payload.ok === false) return [];
+  const arr = payload.deletions;
+  if (!Array.isArray(arr)) return [];
+  const out: ServerProjectDeletionRow[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const pid = (item as { project_id?: unknown }).project_id;
+    const at = (item as { deleted_at?: unknown }).deleted_at;
+    const kind = (item as { deletion_kind?: unknown }).deletion_kind;
+    if (typeof pid === 'string' && pid.length > 0 && at != null) {
+      out.push({
+        project_id: pid,
+        deleted_at: String(at),
+        deletion_kind: typeof kind === 'string' ? kind : undefined
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Phase C — 서버 `plannode_project_deletions` 증분 fetch → 로컬 strip · tombstone 축소.
+ * RPC 미배포 시 no-op(Phase A/B tombstone 경로 유지).
+ */
+export async function syncServerProjectDeletionsFromCloud(): Promise<number> {
+  if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
+  const { userId } = await requireSessionUserId();
+  if (!userId) return 0;
+
+  let since: string | null = null;
+  try {
+    since = localStorage.getItem(SERVER_DELETIONS_LAST_FETCH_KEY);
+  } catch {
+    since = null;
+  }
+
+  const { data, error } = await supabase.rpc('plannode_fetch_project_deletions_since', {
+    p_since: since || '1970-01-01T00:00:00.000Z'
+  });
+
+  if (error) {
+    if (!isFetchProjectDeletionsRpcMissing(error) && import.meta.env.DEV) {
+      console.warn('[syncServerProjectDeletionsFromCloud]', error.message);
+    }
+    return 0;
+  }
+
+  const rows = parseServerProjectDeletionRows(data);
+  const n = applyServerProjectDeletionsFromCloud(rows);
+  if (rows.length > 0) {
+    let maxAt = since || '';
+    for (const row of rows) {
+      if (row.deleted_at > maxAt) maxAt = row.deleted_at;
+    }
+    if (maxAt) {
+      try {
+        localStorage.setItem(SERVER_DELETIONS_LAST_FETCH_KEY, maxAt);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return n;
+}
+
+/** bundle upsert 성공 후 tombstone/pending id를 서버 deletion 테이블에 기록(Phase C). */
+async function recordServerDeletionsAfterBundleUpload(excluded: ReadonlySet<string>): Promise<void> {
+  if (!excluded.size || !isSupabaseCloudConfigured()) return;
+  const pending = getPendingWorkspaceDeletionIds();
+  const tombstoned = getDeletedProjectTombstoneIds();
+  const ids = [...excluded].filter((id) => pending.has(id) || tombstoned.has(id));
+  if (!ids.length) return;
+  const nowIso = new Date().toISOString();
+  for (const id of ids) registerServerDeletedProjectId(id, nowIso);
+  const { error } = await supabase.rpc('plannode_record_my_project_deletions', {
+    p_project_ids: ids
+  });
+  if (error && import.meta.env.DEV && !isFetchProjectDeletionsRpcMissing(error)) {
+    console.warn('[recordServerDeletionsAfterBundleUpload]', error.message);
+  }
+}
+
+export type RemoveProjectFromWorkspaceResult = {
+  ok: boolean;
+  message?: string;
+  removed?: boolean;
+  rpcMissing?: boolean;
+  conflict?: boolean;
+};
+
+type RemoveProjectRpcResult = {
+  ok?: boolean;
+  reason?: string;
+  removed?: boolean;
+  server_updated_at?: string;
+  collab_revision_bumps?: unknown;
+};
+
+function isRemoveProjectRpcMissing(err: { message?: string; code?: string; details?: string } | null): boolean {
+  if (!err) return false;
+  const m = (String(err.message ?? '') + ' ' + String(err.details ?? '')).toLowerCase();
+  const c = String(err.code ?? '');
+  return (
+    c === 'PGRST202' ||
+    c === 'PGRST301' ||
+    /\b404\b/.test(m) ||
+    m.includes('not found') ||
+    m.includes('could not find') ||
+    /function public\.plannode_workspace_remove_project/i.test(String(err.message ?? ''))
+  );
+}
+
+/**
+ * DEL-WS-SYNC Phase B — 소유자 워크스페이스 JSON에서 project_id 1건 원자 제거.
+ * RPC 미배포·실패 시 bundle upsert 폴백(`scheduleCloudFlush`) 사용. tombstone은 pull 확인까지 유지.
+ */
+export async function removeProjectFromWorkspaceCloud(
+  projectId: string,
+  opts?: { pruneCollabMeta?: boolean }
+): Promise<RemoveProjectFromWorkspaceResult> {
+  if (!isSupabaseCloudConfigured()) {
+    return { ok: false, message: 'Supabase URL/키가 .env에 없어.' };
+  }
+  const { userId, error: authErr } = await requireSessionUserId();
+  if (!userId) return { ok: false, message: authErr || '로그인 실패' };
+  if (!projectId?.trim()) return { ok: false, message: 'project_id가 비어 있어.' };
+
+  const { data, error } = await supabase.rpc('plannode_workspace_remove_project', {
+    p_project_id: projectId,
+    p_prune_collab_meta: opts?.pruneCollabMeta ?? true
+  });
+
+  if (error) {
+    if (isRemoveProjectRpcMissing(error)) {
+      if (import.meta.env.DEV) {
+        console.info('[removeProjectFromWorkspaceCloud] RPC missing — bundle upsert fallback');
+      }
+      return { ok: false, rpcMissing: true, message: 'remove_project RPC 미배포' };
+    }
+    markCloudWorkspaceFailed();
+    return { ok: false, message: error.message };
+  }
+
+  const res = (data ?? null) as RemoveProjectRpcResult | null;
+  if (!res?.ok) {
+    markCloudWorkspaceFailed();
+    return {
+      ok: false,
+      message:
+        res?.reason === 'auth'
+          ? '로그인 세션이 만료됐을 수 있어. 다시 로그인해줘.'
+          : res?.reason === 'no_workspace'
+            ? '워크스페이스 행이 없어.'
+            : '프로젝트 삭제 RPC에 실패했어.'
+    };
+  }
+
+  const serverTs =
+    res.server_updated_at != null && String(res.server_updated_at)
+      ? String(res.server_updated_at)
+      : new Date().toISOString();
+  applyOwnerCollabRevisionBumps(userId, parseCollabRevisionBumps(res.collab_revision_bumps));
+  try {
+    localStorage.setItem(OWN_WORKSPACE_REMOTE_TS_KEY, serverTs);
+  } catch {
+    /* ignore */
+  }
+  clearPendingWorkspaceDeletions();
+  markCloudWorkspaceSynced();
+  if (res.removed !== false) {
+    registerServerDeletedProjectId(projectId, serverTs);
+  }
+  void pullOwnWorkspaceIfChanged();
+  return { ok: true, removed: res.removed === true, message: '클라우드에서 프로젝트를 제거했어.' };
 }
 
 /** Supabase → 로컬 교체 후 첫 프로젝트 열기 */
@@ -1209,7 +1416,12 @@ export async function fetchOwnWorkspaceProjectMetasForModal(): Promise<{
   }
   if (!data) return { ok: true, projects: [] };
   const pj = (data as { projects_json?: unknown }).projects_json;
-  return { ok: true, projects: Array.isArray(pj) ? (pj as Project[]) : [] };
+  let projects = Array.isArray(pj) ? (pj as Project[]) : [];
+  const serverDeleted = readServerDeletedProjectIdSet();
+  if (serverDeleted.size) {
+    projects = projects.filter((p) => p?.id && !serverDeleted.has(p.id));
+  }
+  return { ok: true, projects };
 }
 
 /** 내 워크스페이스 행이 서버에서 바뀌었으면 프로젝트별 LWW로 로컬에 합침 */
@@ -1217,6 +1429,8 @@ export async function pullOwnWorkspaceIfChanged(): Promise<number> {
   if (typeof window === 'undefined' || !isSupabaseCloudConfigured()) return 0;
   const { userId } = await requireSessionUserId();
   if (!userId) return 0;
+
+  await syncServerProjectDeletionsFromCloud();
 
   const { data, error } = await supabase
     .from(TABLE)
