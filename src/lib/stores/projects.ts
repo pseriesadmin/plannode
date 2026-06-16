@@ -33,6 +33,7 @@ import {
   type NodeChangeLogEntry
 } from '$lib/stores/nodeChangeLog';
 import { scheduleNodeChangeLogDbWrite } from '$lib/supabase/nodeChangeLogDb';
+import { deriveNodeNums } from '$lib/nodeNumUtils';
 import type { StructureOpPayload } from '$lib/supabase/projectStructureOps';
 
 // 프로젝트 상태
@@ -988,7 +989,7 @@ export function selectProject(project: Project | null) {
     }
     const arr = Array.isArray(parsed) ? (parsed as Node[]) : [];
     if (arr.length > 0) {
-      nodes.set(arr);
+      nodes.set(deriveNodeNums(arr));
     } else {
       const rootNode = applySanitizeImportedPlannodeNodeV1(makeRootNode(project), project.id);
       const nodeList = [rootNode];
@@ -1502,7 +1503,6 @@ export function replayStructureOpsOnNodes(
               parent_id: op.parent_id,
               mx: op.mx,
               my: op.my,
-              ...(op.num != null ? { num: op.num } : {}),
               updated_at: now
             }
           : n
@@ -1557,7 +1557,7 @@ export function replayStructureOpsOnNodes(
       if (!op.parent_id || list.find((n) => n.id === op.parent_id)) {
         list = list.map((n) =>
           n.id === op.node_id
-            ? { ...n, parent_id: op.parent_id, mx: op.mx, my: op.my, ...(op.num != null ? { num: op.num } : {}), updated_at: now }
+            ? { ...n, parent_id: op.parent_id, mx: op.mx, my: op.my, updated_at: now }
             : n
         );
       } else if (import.meta.env.DEV) {
@@ -1567,7 +1567,8 @@ export function replayStructureOpsOnNodes(
   }
 
   // Phase 2: _deleted 노드 필터 제거 (렌더링 제외) — add_node가 같은 배치에서 뒤따라오면 부활
-  return list.filter((n) => !(n as unknown as Record<string, unknown>)['_deleted']);
+  const visible = list.filter((n) => !(n as unknown as Record<string, unknown>)['_deleted']);
+  return deriveNodeNums(visible);
 }
 
 /**
@@ -1582,6 +1583,7 @@ export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[
 
   const cur = get(currentProject);
   if (!cur || cur.id !== projectId) return;
+  list = deriveNodeNums(list);
   const prevSnap = get(nodes);
   const prevSameProject =
     prevSnap.length === 0 || prevSnap.every((n) => (n.project_id ?? projectId) === projectId);

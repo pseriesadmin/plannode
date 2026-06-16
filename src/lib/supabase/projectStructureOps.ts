@@ -45,7 +45,6 @@ export type MoveNodeOp = {
   parent_id: string;
   mx: number;
   my: number;
-  num?: string;
 };
 
 export type ReorderSiblingsOp = {
@@ -182,10 +181,7 @@ function parseMoveNodeOp(raw: Record<string, unknown>): MoveNodeOp | null {
   const mx = parseFiniteNumber(raw.mx);
   const my = parseFiniteNumber(raw.my);
   if (!node_id || !parent_id || mx === null || my === null) return null;
-  const op: MoveNodeOp = { type: 'move_node', node_id, parent_id, mx, my };
-  const num = parseNonEmptyString(raw.num);
-  if (num) op.num = num;
-  return op;
+  return { type: 'move_node', node_id, parent_id, mx, my };
 }
 
 function parseReorderSiblingsOp(raw: Record<string, unknown>): ReorderSiblingsOp | null {
