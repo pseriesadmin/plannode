@@ -161,4 +161,29 @@ describe('replayStructureOpsOnNodes', () => {
     const childOrder = list.filter((n) => n.parent_id === rootId).map((n) => n.id);
     expect(childOrder).toEqual(['n3', 'n1', 'n2']);
   });
+
+  it('DERIVE-NODE-NUM: reorder_siblings then derive assigns PRD.1..n by flat order', () => {
+    let list = replayStructureOpsOnNodes(baseNodes(), [
+      { type: 'add_node', node: { id: 'n1', parent_id: rootId, name: 'A', mx: 0, my: 0, num: '9.9' } },
+      { type: 'add_node', node: { id: 'n2', parent_id: rootId, name: 'B', mx: 0, my: 10, num: '1.1' } },
+      { type: 'add_node', node: { id: 'n3', parent_id: rootId, name: 'C', mx: 0, my: 20, num: '2.2' } }
+    ], projectId);
+    list = replayStructureOpsOnNodes(
+      list,
+      [
+        { type: 'reorder_siblings', parent_id: rootId, ordered_ids: ['n3', 'n1', 'n2'] },
+        {
+          type: 'move_node',
+          node_id: 'n1',
+          parent_id: rootId,
+          mx: 5,
+          my: 5
+        }
+      ],
+      projectId
+    );
+    expect(list.find((n) => n.id === 'n3')?.num).toBe('PRD.1');
+    expect(list.find((n) => n.id === 'n1')?.num).toBe('PRD.2');
+    expect(list.find((n) => n.id === 'n2')?.num).toBe('PRD.3');
+  });
 });

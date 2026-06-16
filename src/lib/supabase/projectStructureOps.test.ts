@@ -86,7 +86,34 @@ describe('parseStructureOp', () => {
         num: '1.2'
       }
     });
+    expect(move?.op).toEqual({
+      type: 'move_node',
+      node_id: 'n1',
+      parent_id: 'p2',
+      mx: 1,
+      my: 2
+    });
+  });
+
+  it('DERIVE-NODE-NUM: legacy move_node wire num is stripped at parse', () => {
+    const move = parseStructureOp({
+      v: 1,
+      project_id: 'p1',
+      client_id: 'c1',
+      seq: 4,
+      op: {
+        type: 'move_node',
+        node_id: 'n2',
+        parent_id: 'root',
+        mx: 10,
+        my: 20,
+        num: 'STALE.99'
+      }
+    });
     expect(move?.op.type).toBe('move_node');
+    if (move?.op.type === 'move_node') {
+      expect('num' in move.op).toBe(false);
+    }
   });
 
   it('rejects invalid v, missing fields, and bad ordered_ids', () => {

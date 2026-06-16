@@ -791,7 +791,6 @@ function applyRemoteMoveNodeFromStructureOp(payload) {
   node.parent_id = payload.parent_id;
   node.mx = mx;
   node.my = my;
-  if (payload.num != null && String(payload.num).trim() !== '') node.num = String(payload.num);
   node.updated_at = new Date().toISOString();
   // [수정] P1 (2026-05-31): 원격 이동 시 자식 mx/my null 처리 추가
   // 이유: 공유 환경에서 상대 이동 시 자식이 부모를 따라가지 않는 현상 해소
@@ -799,6 +798,8 @@ function applyRemoteMoveNodeFromStructureOp(payload) {
     const child = find(childId);
     if (child) { child.mx = null; child.my = null; }
   }
+  // DERIVE-NODE-NUM / Claim 3 — reorder_siblings 수신과 동일: wire num 대신 트리 순서 num
+  applyHierarchyNumsFromTreeOrder(buildPilotNodeIndexes());
   nodes = [...nodes];
   render();
 }
@@ -1071,7 +1072,6 @@ function sendMoveNodeStructureOps(draggedRootIds) {
       mx: node.mx != null ? node.mx : pos.x,
       my: node.my != null ? node.my : pos.y
     };
-    if (node.num != null && String(node.num).trim() !== '') op.num = String(node.num);
     sendProjectStructureOp(curP.id, op, collabPersistOpts());
   }
 }
