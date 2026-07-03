@@ -28,11 +28,12 @@ import {
 } from '$lib/stores/nodeSnapshotHistory';
 import {
   appendNodeChangeLog,
-  recordNodeDiffToChangeLog,
   nodeChangeLogAuthor,
+  newChgId,
   type NodeChangeLogEntry
 } from '$lib/stores/nodeChangeLog';
 import { scheduleNodeChangeLogDbWrite } from '$lib/supabase/nodeChangeLogDb';
+import { isSupabaseCloudConfigured } from '$lib/supabase/env';
 import { deriveNodeNums } from '$lib/nodeNumUtils';
 import type { StructureOpPayload } from '$lib/supabase/projectStructureOps';
 
@@ -263,6 +264,8 @@ function pipelineLabelForNodeSnapshotReason(reason: NodeSnapshotReason): string 
       return '10분 무편집';
     case 'cloud_upload':
       return '클라우드 업로드';
+    case 'project_create':
+      return '프로젝트 생성';
     case 'cloud_history':
       return '클라우드(병합 기록)';
     default:
@@ -1013,6 +1016,48 @@ export function selectProject(project: Project | null) {
 }
 
 // 프로젝트 생성
+/** 생성 직후 히스토리·스냅·(클라우드 설정 시) 서버 append — 공유 타임라인 정합 */
+function recordProjectCreationHistory(project: Project, rootNode: Node): void {
+  if (typeof window === 'undefined') return;
+  const author = get(nodeChangeLogAuthor) ?? getAuthEmail() ?? undefined;
+  const now = new Date().toISOString();
+  const rootList = [{ ...rootNode, project_id: project.id }];
+  const changeEntries: NodeChangeLogEntry[] = [
+    {
+      id: newChgId(),
+      at: now,
+      author,
+      nodeId: rootNode.id,
+      nodeName: project.name,
+      action: 'create'
+    },
+    {
+      id: newChgId(),
+      at: now,
+      author,
+      nodeId: '',
+      nodeName: `프로젝트 생성 · ${project.name}`,
+      action: 'snapshot'
+    }
+  ];
+  appendNodeChangeLog(project.id, changeEntries);
+  scheduleNodeChangeLogDbWrite(project.id, changeEntries);
+  captureNodeSnapshot(
+    project.id,
+    rootList,
+    'project_create',
+    buildNodeSnapshotCaptureMeta('project_create', project, rootList)
+  );
+  if (isSupabaseCloudConfigured()) {
+    const snap = listNodeSnapshots(project.id).slice(-1)[0];
+    if (snap) {
+      void import('$lib/supabase/projectWorkspaceHistory').then(({ appendProjectWorkspaceHistoryFromSnapshot }) =>
+        appendProjectWorkspaceHistoryFromSnapshot(project.id, snap, 'project_create')
+      );
+    }
+  }
+}
+
 export function createProject(projectData: Omit<Project, 'id' | 'created_at' | 'updated_at'>) {
   if (typeof window === 'undefined') return null;
 
@@ -1040,6 +1085,8 @@ export function createProject(projectData: Omit<Project, 'id' | 'created_at' | '
   } catch (e) {
     console.error('Failed to create nodes storage:', e);
   }
+
+  recordProjectCreationHistory(newProject, rootNode);
 
   markCloudWorkspaceDirty();
   return newProject;
@@ -1200,6 +1247,18 @@ export function updateProjectFields(
 }
 
 /** PRD 탭 섹션 초안 — 로컬·워크스페이스에 저장, `null`이면 해당 키 제거(노드 자동 초안으로 복귀) */
+const PRD_SECTION_HISTORY_LABELS: Record<PrdSectionKey, string> = {
+  s1: '핵심 PRD 요약',
+  s2: '기능명세',
+  s3: '아키텍처 & 기술 정책',
+  s4: '수용기준 & 비기능',
+  s5: '로드맵·위험'
+};
+
+function badgeSummaryForHistory(badges: string[] | undefined): string {
+  return badges?.length ? badges.join(', ') : '(없음)';
+}
+
 export function updateProjectPrdSectionDraft(
   projectId: string,
   section: PrdSectionKey,
@@ -1207,6 +1266,14 @@ export function updateProjectPrdSectionDraft(
 ): void {
   if (typeof window === 'undefined') return;
   const now = new Date().toISOString();
+  const curBefore = get(currentProject);
+  const prevDraftVal =
+    curBefore?.id === projectId
+      ? (curBefore.prd_section_drafts?.[section] ?? null)
+      : (get(projects).find((p) => p.id === projectId)?.prd_section_drafts?.[section] ?? null);
+  const normalizedNew = value == null || String(value).trim() === '' ? null : value;
+  const normalizedPrev =
+    prevDraftVal == null || String(prevDraftVal).trim() === '' ? null : prevDraftVal;
   projects.update((plist) => {
     const next = plist.map((p) => {
       if (p.id !== projectId) return p;
@@ -1244,6 +1311,25 @@ export function updateProjectPrdSectionDraft(
     }
   }
   markCloudWorkspaceDirty();
+  if (normalizedNew !== normalizedPrev) {
+    const author = get(nodeChangeLogAuthor) ?? undefined;
+    const label = PRD_SECTION_HISTORY_LABELS[section] ?? section;
+    const preview =
+      normalizedNew == null
+        ? '(초기화)'
+        : `${String(normalizedNew).slice(0, 40)}${String(normalizedNew).length > 40 ? '…' : ''}`;
+    const entry: NodeChangeLogEntry = {
+      id: newChgId(),
+      at: now,
+      author,
+      nodeId: '',
+      nodeName: `PRD 초안 · ${label}`,
+      action: 'prd_draft',
+      detail: preview
+    };
+    appendNodeChangeLog(projectId, [entry]);
+    scheduleNodeChangeLogDbWrite(projectId, [entry]);
+  }
   try {
     window.dispatchEvent(new CustomEvent('plannode-auto-cloud-sync', { detail: { reason: 'prd-draft' } }));
   } catch {
@@ -1378,8 +1464,38 @@ export function persistNodesFromPilot(projectId: string, list: Node[]) {
     for (const n of list) {
       if (!prevIds.has(n.id)) continue;
       const prev = prevSnap.find((x) => x.id === n.id);
-      if (prev && (prev.name !== n.name || prev.description !== n.description)) {
-        changeEntries.push({ id: `chg_${Date.now()}_${Math.random().toString(36).slice(2,7)}`, at: now, author, nodeId: n.id, nodeName: n.name || '(제목 없음)', action: 'edit' });
+      if (!prev) continue;
+      const chgId = () => `chg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      if (prev.name !== n.name || prev.description !== n.description) {
+        changeEntries.push({ id: chgId(), at: now, author, nodeId: n.id, nodeName: n.name || '(제목 없음)', action: 'edit' });
+      }
+      if (JSON.stringify(prev.badges ?? []) !== JSON.stringify(n.badges ?? [])) {
+        changeEntries.push({
+          id: chgId(),
+          at: now,
+          author,
+          nodeId: n.id,
+          nodeName: n.name || '(제목 없음)',
+          action: 'badge',
+          detail: `${badgeSummaryForHistory(prev.badges)} → ${badgeSummaryForHistory(n.badges)}`
+        });
+      }
+      const prevParent = prev.parent_id ?? '';
+      const nextParent = n.parent_id ?? '';
+      const prevMx = prev.mx ?? 0;
+      const prevMy = prev.my ?? 0;
+      const nextMx = n.mx ?? 0;
+      const nextMy = n.my ?? 0;
+      if (prevParent !== nextParent || prevMx !== nextMx || prevMy !== nextMy) {
+        changeEntries.push({
+          id: chgId(),
+          at: now,
+          author,
+          nodeId: n.id,
+          nodeName: n.name || '(제목 없음)',
+          action: 'move',
+          detail: prevParent !== nextParent ? '부모 변경' : undefined
+        });
       }
     }
     if (changeEntries.length) {
@@ -1620,10 +1736,6 @@ export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[
     nodes.set(normalized);
   } finally {
     nodesSetFromPilotPersist = false;
-  }
-  // 협업자 실시간 변경 로그 — prevSameProject 시만, author 없음(클라이언트 id→email 매핑 불가)
-  if (prevSameProject) {
-    recordNodeDiffToChangeLog(projectId, prevSnap, normalized);
   }
 }
 
@@ -2048,7 +2160,7 @@ export function dedupeProjectsStoreByLatestUpdatedAt(): void {
  * 내 워크스페이스 업로드 번들 조립 — `projects` + `nodes_by_project` + **`historyEntries`**.
  *
  * **히스토리 이중 축 (NOW-HIST-APP-07 · 서버 중심 로드맵):**
- * - **`historyEntries` (본 함수):** `plannode_workspace` JSON에 실리는 **전 프로젝트 합산 최대 50건** — 로컬 링 스냅을 모아 전역 최신순으로 자름. 번들 크기·오프라인·LWW 풀과 정합.
+ * - **`historyEntries` (본 함수):** 프로젝트당 최근 **15건** 링 스냅 — 전역 50 cap 대신 per-project(다프로젝트 이력 유실 방지).
  * - **`plannode_project_workspace_history`:** 별도 테이블 · ACL 공유 타임라인 · `uploadWorkspaceToCloud` 성공 후 디바운스 append (`projectWorkspaceHistory.ts`). 히스토리 모달은 `mergeModalSnapshotRows`에서 링·병합 버퍼·번들·서버 행을 합침.
  * **클라우드(서버) 단일 소스에 가깝게 이행**할 때는 본 상한·수집을 GATE·TASK로 단계 축소·중복 제거할 것 — 번들 `historyEntries`만 임의 제거하면 업로드·풀·공유 기대와 충돌할 수 있음.
  */
@@ -2063,40 +2175,26 @@ export function gatherWorkspaceBundle(): WorkspaceBundle {
     nodesByProject[p.id] = loadLocalNodesForCollabMerge(p.id);
   }
 
-  /** 최근 N개(50개) 스냅샷 수집 — 최신순 정렬 */
+  /** 프로젝트별 최근 N개 스냅샷 — 전역 50건 cap은 다프로젝트 시 한 프로젝트 이력이 잘리는 회귀 유발 */
   const historyEntries: HistoryEntry[] = [];
-  const MAX_HISTORY_ENTRIES = 50;
-  const allSnapshots: Array<{ projectId: string; snapshot: any }> = [];
+  const MAX_HISTORY_PER_PROJECT = 15;
 
   for (const p of plist) {
     if (skip.has(p.id)) continue;
-    const snaps = listNodeSnapshots(p.id);
-    for (const snap of snaps) {
-      allSnapshots.push({
-        projectId: p.id,
-        snapshot: snap
+    const snaps = [...listNodeSnapshots(p.id)].sort(
+      (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()
+    );
+    for (let i = 0; i < Math.min(snaps.length, MAX_HISTORY_PER_PROJECT); i++) {
+      const snapshot = snaps[i];
+      historyEntries.push({
+        id: snapshot.id,
+        project_id: p.id,
+        at: snapshot.at,
+        reason: snapshot.reason,
+        version: snapshot.version,
+        nodes: snapshot.nodes
       });
     }
-  }
-
-  /** 최신순 정렬(ISO 날짜 역순) */
-  allSnapshots.sort((a, b) => {
-    const aTime = new Date(a.snapshot.at).getTime();
-    const bTime = new Date(b.snapshot.at).getTime();
-    return bTime - aTime;
-  });
-
-  /** 최대 50개까지 추가 */
-  for (let i = 0; i < Math.min(allSnapshots.length, MAX_HISTORY_ENTRIES); i++) {
-    const { projectId, snapshot } = allSnapshots[i];
-    historyEntries.push({
-      id: snapshot.id,
-      project_id: projectId,
-      at: snapshot.at,
-      reason: snapshot.reason,
-      version: snapshot.version,
-      nodes: snapshot.nodes
-    });
   }
 
   return { projects: [...plist], nodesByProject, historyEntries };

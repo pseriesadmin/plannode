@@ -260,6 +260,8 @@ let scale = 0.85,
   selId = null,
   /** 접기: 노드 id가 있으면 해당 노드의 직·간접 자손을 트리에서 숨김 — 세션만(프로젝트 전환 시 초기화) */
   collapsedNodeIds = new Set(),
+  /** GNB 검색: 매칭 노드 id — `.nd.search-match` 아웃라인 (#6B4EFF) */
+  searchHighlightIds = new Set(),
   /** Shift+클릭/범위 선택으로 묶인 다중 선택. 영속 필드 아님. */
   multiSel = new Set(),
   selectionBox = null, // Shift+드래그 범위 선택용
@@ -1374,6 +1376,93 @@ function nodeHasAnyChild(nid) {
   return nodes.some((x) => x.parent_id === nid);
 }
 /** 캔버스 메뉴「모두접기」— 루트 카드만 두고 자손 숨김, 뷰포트를 보이는 루트 영역에 맞춤 */
+/** GNB 검색 — 조상 펼침 상한 (+page.svelte CANVAS_SEARCH_EXPAND_MAX 와 동기) */
+const SEARCH_EXPAND_MAX = 15;
+
+function searchHighlightIdSetEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
+/** 매칭 id 중 상위 SEARCH_EXPAND_MAX개만 조상 접기 해제 — 변경 여부 반환 */
+function expandAncestorsForSearchIds(ids) {
+  let changed = false;
+  const limit = Math.min(ids.length, SEARCH_EXPAND_MAX);
+  for (let i = 0; i < limit; i++) {
+    let cur = find(ids[i]);
+    while (cur && cur.parent_id) {
+      if (collapsedNodeIds.has(cur.parent_id)) {
+        collapsedNodeIds.delete(cur.parent_id);
+        changed = true;
+      }
+      cur = find(cur.parent_id);
+    }
+  }
+  return changed;
+}
+
+/** 전체 render() 없이 .search-match 클래스만 갱신 (Presence updateSelHighlightOnly 패턴) */
+function updateSearchHighlightOnly() {
+  if (!CV) return;
+  try {
+    CV.querySelectorAll('.nd.search-match').forEach((el) => el.classList.remove('search-match'));
+  } catch (_) {}
+  if (!searchHighlightIds.size) return;
+  for (const id of searchHighlightIds) {
+    const el = document.getElementById('nd-' + id);
+    if (el) el.classList.add('search-match');
+  }
+}
+
+/** 검색 결과 노드 id 집합 — 필요 시에만 render · 그 외 search-match 클래스만 */
+function highlightSearchResults(nodeIds, firstNodeId) {
+  const ids = Array.isArray(nodeIds) ? nodeIds.filter(Boolean) : [];
+  const nextSet = new Set(ids);
+  const idsUnchanged = searchHighlightIdSetEqual(searchHighlightIds, nextSet);
+  searchHighlightIds = nextSet;
+
+  if (ids.length === 0) {
+    updateSearchHighlightOnly();
+    return;
+  }
+
+  const collapseChanged = expandAncestorsForSearchIds(ids);
+
+  if (collapseChanged) {
+    skipSchedulePersistOnce = true;
+    render();
+  } else if (!idsUnchanged) {
+    updateSearchHighlightOnly();
+  }
+
+  if (!idsUnchanged) {
+    const panTarget =
+      firstNodeId && searchHighlightIds.has(firstNodeId) ? firstNodeId : ids[0];
+    if (panTarget) panToNodeId(panTarget);
+  }
+}
+
+function clearSearchHighlights() {
+  if (searchHighlightIds.size === 0) return;
+  searchHighlightIds = new Set();
+  updateSearchHighlightOnly();
+}
+
+/** 매칭 노드 카드 중심을 #CW 뷰포트 중앙으로 (scale 유지) */
+function panToNodeId(nodeId) {
+  const n = find(nodeId);
+  if (!n || !CW || CW.offsetWidth < 1) return;
+  const pos = gp(n);
+  const w = nodeCardWidth(n);
+  const h = nodeCardHeightPx(n);
+  const cx = pos.x + w / 2;
+  const cy = pos.y + h / 2;
+  panX = CW.offsetWidth / 2 - cx * scale;
+  panY = CW.offsetHeight / 2 - cy * scale;
+  applyTx();
+}
+
 function collapseAllTreesToRootParentsOnly() {
   if (!curP) {
     toast('프로젝트를 먼저 선택해줘');
@@ -4034,6 +4123,7 @@ function render() {
       (selId === n.id ? ' sel' : '') +
       (multiSel.has(n.id) ? ' msel' : '') +
       (relinkHi && relinkHi.has(n.id) ? ' relink-pick' : '') +
+      (searchHighlightIds.has(n.id) ? ' search-match' : '') +
       (presenceConflict ? ' nd--conflict' : '') +
       (isPlannodeJsonGlobalMirrorNode(n) ? ' nd--json-global-mirror' : '');
     nd.id = 'nd-' + n.id;
@@ -6097,6 +6187,7 @@ export function initPlannode(opts = {}) {
         selId = null;
         lastEmittedSelIdForPresence = undefined;
         collapsedNodeIds.clear();
+        searchHighlightIds = new Set();
         if (ES) ES.style.display = 'flex';
         if (CV) CV.querySelectorAll('.nw,.cp-row,.cp-depth-strip').forEach((e) => e.remove());
         if (EG) EG.innerHTML = '';
@@ -6140,6 +6231,8 @@ export function initPlannode(opts = {}) {
       if (curView === 'prd') buildPRD();
     },
     /** L1 + OutputIntent.PRD + 핵심 요약 절 클립보드 */
-    copyPrdL1CoreSummaryPrompt
+    copyPrdL1CoreSummaryPrompt,
+    highlightSearchResults,
+    clearSearchHighlights
   };
 }

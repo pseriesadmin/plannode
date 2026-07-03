@@ -345,3 +345,13 @@ export function pilotRehydrateCurrentProjectFromStore(): void {
     syncingFromStore = false;
   }
 }
+
+/** GNB 검색 — 매칭 노드 하이라이트·조상 펼침·첫 결과 뷰포트 이동 */
+export function pilotHighlightSearchResults(nodeIds: string[], firstNodeId?: string) {
+  pilotApi?.highlightSearchResults?.(nodeIds, firstNodeId ?? null);
+}
+
+/** GNB 검색 종료 — search-match 아웃라인 제거 */
+export function pilotClearSearchHighlights() {
+  pilotApi?.clearSearchHighlights?.();
+}

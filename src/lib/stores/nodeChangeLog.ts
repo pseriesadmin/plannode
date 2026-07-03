@@ -4,7 +4,7 @@
  */
 import { writable } from 'svelte/store';
 
-export type NodeChangeAction = 'create' | 'edit' | 'delete' | 'snapshot';
+export type NodeChangeAction = 'create' | 'edit' | 'delete' | 'snapshot' | 'badge' | 'move' | 'prd_draft';
 
 export interface NodeChangeLogEntry {
   id: string;
@@ -13,6 +13,8 @@ export interface NodeChangeLogEntry {
   nodeId: string;
   nodeName: string;
   action: NodeChangeAction;
+  /** 배지 요약·PRD 섹션 미리보기 등 보조 텍스트 */
+  detail?: string;
 }
 
 const KEY_PREFIX = 'plannode_node_change_log_v1_';
@@ -63,9 +65,8 @@ export { newChgId };
 export const nodeChangeLogAuthor = writable<string | undefined>(undefined);
 
 /**
- * 두 노드 배열을 비교해 추가·수정·삭제를 감지하고 변경 로그에 기록한다.
- * Node 타입에 의존하지 않도록 필요 필드만 추출하는 generic 시그니처 사용.
- * 과부하 없음 — Map 기반 O(n), localStorage write는 소량 엔트리만.
+ * 두 노드 배열을 비교해 추가·수정·삭제를 감지하고 **로컬** 변경 로그에만 기록한다.
+ * 공유 타임라인 정본은 DB node_op — pull·structure op·slice merge 경로에서는 호출하지 않는다(HIST-SHARED-SYNC).
  */
 export function recordNodeDiffToChangeLog(
   projectId: string,
@@ -111,9 +112,8 @@ export function recordNodeDiffToChangeLog(
 
 function changeLogDedupeKey(entry: NodeChangeLogEntry): string {
   if (entry.action === 'snapshot') return `snap:${entry.id}`;
-  const t = Date.parse(entry.at);
-  const minute = Number.isFinite(t) ? Math.floor(t / 60_000) : 0;
-  return `op:${entry.nodeId}:${entry.action}:${minute}`;
+  // 분 단위 병합은 연속 편집 이력을 삭제함 — ISO 시각까지 키에 포함(db_/pwh_ 우선순위는 유지)
+  return `op:${entry.nodeId}:${entry.action}:${entry.at}`;
 }
 
 /** db_/pwh_ 행이 chg_ 로컬보다 우선(작성자 email 보존) */

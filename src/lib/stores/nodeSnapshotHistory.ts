@@ -25,6 +25,8 @@ export type NodeSnapshotReason =
   | 'persist'
   /** `uploadWorkspaceToCloud` 성공 후 서버 히스토리 append(GATE B 2단계) */
   | 'cloud_upload'
+  /** 프로젝트 최초 생성 직후 루트 스냅 */
+  | 'project_create'
   /** `plannode_merged_history_entries_v1` 등에서 사유 문자열이 알려진 집합 밖일 때 */
   | 'cloud_history';
 
@@ -37,6 +39,7 @@ const KNOWN_REASONS: readonly NodeSnapshotReason[] = [
   'idle_10min',
   'persist',
   'cloud_upload',
+  'project_create',
   'cloud_history'
 ];
 
