@@ -65,9 +65,8 @@ export { newChgId };
 export const nodeChangeLogAuthor = writable<string | undefined>(undefined);
 
 /**
- * 두 노드 배열을 비교해 추가·수정·삭제를 감지하고 변경 로그에 기록한다.
- * Node 타입에 의존하지 않도록 필요 필드만 추출하는 generic 시그니처 사용.
- * 과부하 없음 — Map 기반 O(n), localStorage write는 소량 엔트리만.
+ * 두 노드 배열을 비교해 추가·수정·삭제를 감지하고 **로컬** 변경 로그에만 기록한다.
+ * 공유 타임라인 정본은 DB node_op — pull·structure op·slice merge 경로에서는 호출하지 않는다(HIST-SHARED-SYNC).
  */
 export function recordNodeDiffToChangeLog(
   projectId: string,

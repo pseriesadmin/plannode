@@ -32,7 +32,6 @@ import {
   replayStructureOpsOnNodes,
   type WorkspaceBundle
 } from '$lib/stores/projects';
-import { recordNodeDiffToChangeLog } from '$lib/stores/nodeChangeLog';
 import {
   flushStructureOpsPersistForProject,
   flushAllPendingStructureOpsPersist,
@@ -136,8 +135,6 @@ export async function pullStructureOpsForProject(project: Project): Promise<Stru
     bundle.ops.map((row) => row.op),
     project.id
   );
-  // 클라우드 pull 변경 로그 — upsert 전에 op 기반 diff 기록(과부하 없음: Map O(n), localStorage 소량)
-  recordNodeDiffToChangeLog(project.id, local, replayed);
   const ref = get(projects).find((p) => p.id === project.id) ?? project;
   upsertImportedPlannodeTreeV1(ref, replayed, { openAfter: false, markDirty: false });
   if (get(currentProject)?.id === project.id) {
@@ -1547,7 +1544,6 @@ export async function mergeSharedProjectSliceFromCloudIfApplicable(local: Projec
   if (!nodesChanged && !metaChanged && !projectTsChanged) return false;
 
   captureNodeSnapshot(localRef.id, localNodes, 'pre_pull');
-  recordNodeDiffToChangeLog(localRef.id, preMergeLocal, mergedNodes);
   upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
     openAfter: false,
     markDirty: false,
@@ -1617,7 +1613,6 @@ export async function pullProjectSliceBeforeOpen(project: Project): Promise<void
     reconcileProjectRecord({ ...slice.project })
   );
 
-  recordNodeDiffToChangeLog(localRef.id, preMergeLocal, mergedNodes);
   upsertImportedPlannodeTreeV1(mergedProject, mergedNodes, {
     openAfter: false,
     markDirty: false,
@@ -2647,7 +2642,6 @@ async function pullStructureOpsForProjectOwner(projectId: string, project: Proje
     bundle.ops.map((row) => row.op),
     projectId
   );
-  recordNodeDiffToChangeLog(projectId, local, replayed);
   upsertImportedPlannodeTreeV1(project, replayed, { openAfter: false, markDirty: false });
   if (get(currentProject)?.id === projectId) {
     const latest = get(projects).find((p) => p.id === projectId);

@@ -278,6 +278,10 @@
   let showSnapshotHistoryModal = false;
   let snapshotListVersion = 0;
   let changeLogRows: NodeChangeLogEntry[] = [];
+  /** HIST-SHARED-SYNC: Realtime 누락 시 모달 주기 갱신 */
+  const HIST_MODAL_POLL_MS = 8_000;
+  let histModalPollTimer: ReturnType<typeof setInterval> | null = null;
+  let histModalPollProjectId: string | null = null;
   /** NOW-HIST-APP-05: `plannode_project_workspace_history` Realtime 구독 해제 */
   let pwhRealtimeUnsub: (() => void) | null = null;
   let pwhRealtimeBoundPid: string | null = null;
@@ -366,8 +370,36 @@
     if (isSupabaseCloudConfigured()) {
       void refreshServerWorkspaceHistorySnapshots(pid);
     }
+    ensureHistModalPoll(pid);
   } else if (!showSnapshotHistoryModal) {
     changeLogRows = [];
+    clearHistModalPoll();
+  }
+
+  function clearHistModalPoll(): void {
+    if (histModalPollTimer != null) {
+      clearInterval(histModalPollTimer);
+      histModalPollTimer = null;
+    }
+    histModalPollProjectId = null;
+  }
+
+  function ensureHistModalPoll(projectId: string): void {
+    if (histModalPollTimer != null && histModalPollProjectId === projectId) return;
+    clearHistModalPoll();
+    histModalPollProjectId = projectId;
+    histModalPollTimer = setInterval(() => {
+      if (!showSnapshotHistoryModal) {
+        clearHistModalPoll();
+        return;
+      }
+      const cp = get(currentProject);
+      if (!cp?.id || cp.id !== projectId) {
+        clearHistModalPoll();
+        return;
+      }
+      void refreshNodeChangeLogRows(cp.id);
+    }, HIST_MODAL_POLL_MS);
   }
 
   /** DB · 스냅샷 요약 · localStorage 병합 — 모달 열릴 때만 fetch */
@@ -2892,6 +2924,7 @@
     pwhRealtimeUnsub?.();
     pwhRealtimeUnsub = null;
     pwhRealtimeBoundPid = null;
+    clearHistModalPoll();
     clearPersistSnapshotDebounceTimers();
     disposePrdDraftTimers();
     unsubscribeProjectPresence();

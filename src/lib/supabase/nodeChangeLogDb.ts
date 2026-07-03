@@ -12,6 +12,8 @@ import type { NodeChangeAction, NodeChangeLogEntry } from '$lib/stores/nodeChang
 const REASON_NODE_OP = 'node_op';
 const FLUSH_DEBOUNCE_MS = 2_000;
 const MAX_BATCH_PER_FLUSH = 50;
+/** INSERT 실패 토스트 중복 억제 */
+const HIST_DB_FAIL_TOAST_DEDUP_MS = 30_000;
 
 const PERSISTED_NODE_OP_ACTIONS: NodeChangeAction[] = [
   'create',
@@ -24,6 +26,19 @@ const PERSISTED_NODE_OP_ACTIONS: NodeChangeAction[] = [
 
 let pendingBatch: Array<{ projectId: string; entry: NodeChangeLogEntry }> = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let lastHistDbFailToastAt = 0;
+
+function emitHistoryDbWriteFailedToast(message: string): void {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  if (now - lastHistDbFailToastAt < HIST_DB_FAIL_TOAST_DEDUP_MS) return;
+  lastHistDbFailToastAt = now;
+  try {
+    window.dispatchEvent(new CustomEvent('plannode-pilot-toast', { detail: { message } }));
+  } catch {
+    /* ignore */
+  }
+}
 
 /** persistNodesFromPilot에서만 호출 — 삭제는 즉시, 나머지는 2s 디바운스 배치 INSERT */
 export function scheduleNodeChangeLogDbWrite(
@@ -79,8 +94,13 @@ async function flushToDb(): Promise<void> {
   }
 
   const { error } = await supabase.from('plannode_project_workspace_history').insert(rows);
-  if (error && import.meta.env.DEV) {
-    console.warn('[nodeChangeLogDb] INSERT 실패:', error.message);
+  if (error) {
+    if (import.meta.env.DEV) {
+      console.warn('[nodeChangeLogDb] INSERT 실패:', error.message);
+    }
+    emitHistoryDbWriteFailedToast(
+      '히스토리를 팀에 공유하지 못했어. 로그인·권한을 확인한 뒤 다시 편집해줘.'
+    );
   }
 
   // 배치 초과분이 남아 있으면 재스케줄

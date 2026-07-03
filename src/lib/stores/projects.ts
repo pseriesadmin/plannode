@@ -28,7 +28,6 @@ import {
 } from '$lib/stores/nodeSnapshotHistory';
 import {
   appendNodeChangeLog,
-  recordNodeDiffToChangeLog,
   nodeChangeLogAuthor,
   newChgId,
   type NodeChangeLogEntry
@@ -1737,10 +1736,6 @@ export function persistNodesFromRemoteStructureOp(projectId: string, list: Node[
     nodes.set(normalized);
   } finally {
     nodesSetFromPilotPersist = false;
-  }
-  // 협업자 실시간 변경 로그 — prevSameProject 시만, author 없음(클라이언트 id→email 매핑 불가)
-  if (prevSameProject) {
-    recordNodeDiffToChangeLog(projectId, prevSnap, normalized);
   }
 }
 

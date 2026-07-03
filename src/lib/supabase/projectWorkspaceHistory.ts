@@ -13,8 +13,8 @@ import { currentProject, nodes, buildNodeSnapshotCaptureMeta } from '$lib/stores
 /** RPC `p_payload` 문자열 길이 가드(서버 1.8M와 여유) */
 const PAYLOAD_ROUGH_MAX = 1_700_000;
 
-/** 클라우드 히스토리 append 일시 중지 — 과부하 완화. 재활성화 시 false로 변경 */
-const PWH_CLOUD_APPEND_DISABLED = true;
+/** 클라우드 히스토리 append — false 유지(협업 공유 타임라인). 과부하 시 debounce(60s/120s)만 조정 */
+const PWH_CLOUD_APPEND_DISABLED = false;
 
 /** `uploadWorkspaceToCloud` 성공 후 서버 append — 마지막 성공 시점 기준 트레일링 디바운스(TASK GATE B 2단계) */
 const CLOUD_UPLOAD_PWH_DEBOUNCE_MS = 60_000;
