@@ -137,7 +137,9 @@
     dismissPilotRelinkGuide,
     pilotSetNodeMapLayout,
     pilotGetNodeMapLayoutMode,
-    pilotRehydrateCurrentProjectFromStore
+    pilotRehydrateCurrentProjectFromStore,
+    pilotHighlightSearchResults,
+    pilotClearSearchHighlights
   } from '$lib/pilot/pilotBridge';
   import { pendingIaTemplateExport, type IaTemplateKind } from '$lib/stores/iaExportIntent';
   import { slugExportName } from '$lib/ai/iaGridCsvExport';
@@ -359,7 +361,11 @@
   }
 
   $: if (showSnapshotHistoryModal && $currentProject?.id) {
-    void refreshNodeChangeLogRows($currentProject.id);
+    const pid = $currentProject.id;
+    void refreshNodeChangeLogRows(pid);
+    if (isSupabaseCloudConfigured()) {
+      void refreshServerWorkspaceHistorySnapshots(pid);
+    }
   } else if (!showSnapshotHistoryModal) {
     changeLogRows = [];
   }
@@ -383,6 +389,9 @@
     if (action === 'create') return '생성';
     if (action === 'edit') return '수정';
     if (action === 'delete') return '삭제';
+    if (action === 'badge') return '배지';
+    if (action === 'move') return '이동';
+    if (action === 'prd_draft') return 'PRD';
     return '—';
   }
 
@@ -476,6 +485,7 @@
     if (r === 'idle_10min') return '10분 무편집 저장';
     if (r === 'persist') return '캔버스 저장';
     if (r === 'cloud_upload') return '클라우드 업로드';
+    if (r === 'project_create') return '프로젝트 생성';
     if (r === 'manual') return '수동 스냅샷';
     if (r === 'cloud_history') return '클라우드 병합 기록';
     return '수동';
@@ -862,6 +872,81 @@
 
   /** 뷰(#VIEWS) 터치 시 공통 툴바를 위로 접었다가, 상단 아이콘으로 다시 펼침(모바일·PC 공통) */
   let toolbarSheetHidden = false;
+
+  /** GNB 중앙 노드 검색 (toolbarSheetHidden + 프로젝트 열림 시 pill) */
+  let searchQuery = '';
+  let searchActive = false;
+  let searchMatchIds: string[] = [];
+  let searchInputEl: HTMLInputElement | null = null;
+  /** plannodePilot.js SEARCH_EXPAND_MAX 와 동기 */
+  const CANVAS_SEARCH_EXPAND_MAX = 15;
+  const SEARCH_DEBOUNCE_MS = 200;
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flattenNodeBadgesForSearch(n: Node): string {
+    const metaBadges = n.metadata?.badges;
+    return [
+      ...(n.badges ?? []),
+      ...(metaBadges?.dev ?? []),
+      ...(metaBadges?.ux ?? []),
+      ...(metaBadges?.prj ?? [])
+    ]
+      .map((b) => String(b).toLowerCase())
+      .join(' ');
+  }
+
+  function runCanvasNodeSearch() {
+    const q = searchQuery.toLowerCase().trim();
+    const project = get(currentProject);
+    if (!q || !project) {
+      searchMatchIds = [];
+      pilotClearSearchHighlights();
+      return;
+    }
+    const nodeList = get(nodes);
+    const matched = nodeList
+      .filter((n) => n.project_id === project.id)
+      .filter(
+        (n) =>
+          (n.name ?? '').toLowerCase().includes(q) ||
+          (n.num ?? '').toLowerCase().includes(q) ||
+          (n.description ?? '').toLowerCase().includes(q) ||
+          flattenNodeBadgesForSearch(n).includes(q)
+      );
+    searchMatchIds = matched.map((n) => n.id);
+    pilotHighlightSearchResults(searchMatchIds, searchMatchIds[0]);
+  }
+
+  function scheduleCanvasNodeSearch() {
+    if (searchDebounceTimer != null) clearTimeout(searchDebounceTimer);
+    const delay = searchQuery.trim() ? SEARCH_DEBOUNCE_MS : 0;
+    searchDebounceTimer = setTimeout(() => {
+      searchDebounceTimer = null;
+      runCanvasNodeSearch();
+    }, delay);
+  }
+
+  function openCanvasNodeSearch() {
+    searchActive = true;
+    void tick().then(() => searchInputEl?.focus());
+  }
+
+  function closeCanvasNodeSearch() {
+    if (searchDebounceTimer != null) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = null;
+    }
+    searchQuery = '';
+    searchActive = false;
+    searchMatchIds = [];
+    pilotClearSearchHighlights();
+  }
+
+  $: searchQuery, $currentProject, scheduleCanvasNodeSearch();
+
+  $: if (!$currentProject) {
+    closeCanvasNodeSearch();
+  }
 
   let aclInviteRows: AclInviteSummary[] = [];
   let aclInvitesErr = '';
@@ -1419,6 +1504,7 @@
   }
 
   function expandToolbarSheet() {
+    closeCanvasNodeSearch();
     toolbarSheetHidden = false;
   }
 
@@ -2611,8 +2697,11 @@
       if (!get(snapshotHistoryModalOpenForPwh)) return;
       const cp = get(currentProject);
       if (!cp?.id) return;
-      // 협업자 node_op INSERT 수신 시 모달 목록 즉시 갱신
+      // 협업자 node_op·스냅 INSERT 수신 시 모달 목록 즉시 갱신
       void refreshNodeChangeLogRows(cp.id);
+      if (isSupabaseCloudConfigured()) {
+        void refreshServerWorkspaceHistorySnapshots(cp.id);
+      }
     });
 
     const onPwhAfterCloudAppend = (ev: Event) => {
@@ -2620,6 +2709,9 @@
       if (!d?.projectId || !get(snapshotHistoryModalOpenForPwh)) return;
       if (get(currentProject)?.id !== d.projectId) return;
       void refreshNodeChangeLogRows(d.projectId);
+      if (isSupabaseCloudConfigured()) {
+        void refreshServerWorkspaceHistorySnapshots(d.projectId);
+      }
     };
     window.addEventListener('plannode-pwh-after-cloud-append', onPwhAfterCloudAppend);
 
@@ -2806,6 +2898,7 @@
     if (unsubAclChanges) unsubAclChanges();
     // NOW-HIST-02: 10분 idle 타이머 정리
     if (idleSnapshotTimer) clearTimeout(idleSnapshotTimer);
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   });
 
   $: if (pilotReady) pilotSetActiveView($activeView);
@@ -3221,6 +3314,80 @@
           </svg>
         </button>
       {/if}
+      {#if toolbarSheetHidden && $currentProject}
+        <div class="cw-search-bar" class:cw-search-bar--active={searchActive}>
+          {#if searchActive}
+            <svg
+              class="cw-search-icon cw-search-icon--active"
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" />
+              <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+            <input
+              bind:this={searchInputEl}
+              bind:value={searchQuery}
+              class="cw-search-input"
+              placeholder="노드 검색..."
+              type="search"
+              autocomplete="off"
+              aria-label="노드 검색"
+              on:blur={() => {
+                if (!searchQuery.trim()) closeCanvasNodeSearch();
+              }}
+            />
+            {#if searchMatchIds.length > 0}
+              <span
+                class="cw-search-count"
+                title={searchMatchIds.length > CANVAS_SEARCH_EXPAND_MAX
+                  ? `매칭 ${searchMatchIds.length}개 · 트리는 처음 ${CANVAS_SEARCH_EXPAND_MAX}개 경로만 펼칩니다`
+                  : undefined}
+              >
+                {searchMatchIds.length}개{#if searchMatchIds.length > CANVAS_SEARCH_EXPAND_MAX}
+                  · {CANVAS_SEARCH_EXPAND_MAX}개 펼침{/if}
+              </span>
+            {:else if searchQuery.trim()}
+              <span class="cw-search-count cw-search-count--none">없음</span>
+            {/if}
+            <button
+              type="button"
+              class="cw-search-clear"
+              aria-label="검색 닫기"
+              title="검색 닫기"
+              on:click={closeCanvasNodeSearch}
+            >
+              ✕
+            </button>
+          {:else}
+            <button
+              type="button"
+              class="cw-search-pill-btn"
+              aria-label="노드 검색"
+              title="노드 검색"
+              on:click={openCanvasNodeSearch}
+            >
+              <svg
+                class="cw-search-icon"
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" />
+                <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+              </svg>
+              <span class="cw-search-placeholder">{$currentProject.name}</span>
+            </button>
+          {/if}
+        </div>
+      {/if}
     {/if}
 
     <div
@@ -3228,7 +3395,7 @@
       class:views-content-below-tb={!toolbarSheetHidden}
       on:pointerdown|capture={onViewsSurfacePointerDownCapture}
     >
-      <div class="view" class:active={$activeView === 'tree'} id="V-TREE">
+      <div class="view" class:active={$activeView === 'tree'} id="V-TREE" class:search-active={searchQuery.trim().length > 0}>
         <div id="CW">
           <div id="CV">
             <svg id="EG"></svg>
@@ -3796,7 +3963,9 @@
                   <tr class="snap-hist-row">
                     <td class="col-time">{formatHistoryTimestamp(row.at)}</td>
                     <td class="col-author">{row.author ?? '-'}</td>
-                    <td class="col-name">{row.nodeName}</td>
+                    <td class="col-name">
+                      {row.nodeName}{#if row.detail}<span class="chg-detail"> · {row.detail}</span>{/if}
+                    </td>
                     <td class="col-result chg-action chg-{row.action}">{formatChangeLogActionLabel(row.action)}</td>
                   </tr>
                 {:else}
@@ -4332,6 +4501,15 @@
     flex-direction: column;
     position: relative;
     overflow: hidden;
+    /* 접힌 GNB: 좌 닫기(36) · 우 메뉴(48) 사이 검색 pill 정렬 */
+    --cw-gnb-edge: 14px;
+    --cw-gnb-gap: 10px;
+    --cw-gnb-close-size: 36px;
+    --cw-gnb-menu-size: 48px;
+    --cw-gnb-search-height: 36px;
+    /* 36px 닫기·검색과 48px 메뉴 hit-area 세로 중심 일치 (10+24 = 16+18) */
+    --cw-gnb-search-top: calc(16px + env(safe-area-inset-top, 0px));
+    --cw-gnb-menu-top: calc(10px + env(safe-area-inset-top, 0px));
   }
 
   #TB {
@@ -4389,9 +4567,9 @@
   .tb-menu-reveal {
     position: fixed;
     z-index: 55;
-    top: calc(10px + env(safe-area-inset-top, 0px));
+    top: var(--cw-gnb-menu-top);
     left: auto;
-    right: calc(14px + env(safe-area-inset-right, 0px));
+    right: calc(var(--cw-gnb-edge) + env(safe-area-inset-right, 0px));
     box-sizing: border-box;
     display: flex;
     align-items: center;
@@ -4427,14 +4605,14 @@
   .cw-close-project-btn {
     position: fixed;
     z-index: 55;
-    top: calc(16px + env(safe-area-inset-top, 0px));
-    left: calc(14px + env(safe-area-inset-left, 0px));
+    top: var(--cw-gnb-search-top);
+    left: calc(var(--cw-gnb-edge) + env(safe-area-inset-left, 0px));
     box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: var(--cw-gnb-close-size);
+    height: var(--cw-gnb-close-size);
     padding: 0;
     margin: 0;
     border: none;
@@ -4457,6 +4635,128 @@
     display: block;
     width: 36px;
     height: 36px;
+  }
+
+  /* GNB 중앙 검색 pill — 좌·우 GNB 버튼 사이 수평·수직 중앙 (Figma #AAA4FF) */
+  .cw-search-bar {
+    position: fixed;
+    z-index: 55;
+    top: var(--cw-gnb-search-top);
+    left: calc(
+      var(--cw-gnb-edge) + var(--cw-gnb-close-size) + var(--cw-gnb-gap) +
+        env(safe-area-inset-left, 0px)
+    );
+    right: calc(
+      var(--cw-gnb-edge) + var(--cw-gnb-menu-size) + var(--cw-gnb-gap) +
+        env(safe-area-inset-right, 0px)
+    );
+    width: min(
+      300px,
+      max(
+        0px,
+        calc(
+          100vw - var(--cw-gnb-edge) - var(--cw-gnb-close-size) - var(--cw-gnb-gap) -
+            var(--cw-gnb-gap) - var(--cw-gnb-edge) - var(--cw-gnb-menu-size) -
+            env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)
+        )
+      )
+    );
+    max-width: 300px;
+    min-width: 0;
+    height: var(--cw-gnb-search-height);
+    margin-left: auto;
+    margin-right: auto;
+    transform: none;
+    background: #aaa4ff;
+    border-radius: 30px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 8px;
+    box-sizing: border-box;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+
+  .cw-search-bar--active {
+    background: #fff;
+    box-shadow: 0 0 0 2px #6b4eff;
+  }
+
+  .cw-search-pill-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: text;
+    padding: 0;
+    text-align: left;
+  }
+
+  .cw-search-icon {
+    flex-shrink: 0;
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .cw-search-icon--active {
+    color: #631eed;
+  }
+
+  .cw-search-placeholder {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .cw-search-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 14px;
+    color: #1a1a2e;
+  }
+
+  .cw-search-input::-webkit-search-cancel-button {
+    display: none;
+  }
+
+  .cw-search-count {
+    font-size: 12px;
+    color: #631eed;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .cw-search-count--none {
+    color: #999;
+    font-weight: 500;
+  }
+
+  .cw-search-clear {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #631eed;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 4px;
+    flex-shrink: 0;
+  }
+
+  .cw-search-clear:focus-visible {
+    outline: 2px solid #631eed;
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 
   .tb-main {
@@ -5670,6 +5970,13 @@
   :global(.nd.sel) {
     outline: 2px solid rgba(99, 30, 237, 0.65);
   }
+  :global(.nd.search-match) {
+    outline: 2px solid #6b4eff;
+    outline-offset: 0;
+  }
+  :global(#V-TREE.search-active .nd:not(.search-match)) {
+    opacity: 0.35;
+  }
   :global(.nd.msel) {
     outline: 2px solid rgba(225, 29, 72, 0.55);
   }
@@ -6312,6 +6619,14 @@
   .chg-edit   { color: #1455a4; }
   .chg-delete { color: #b91c1c; }
   .chg-snapshot { color: #6b7280; opacity: 0.85; }
+  .chg-badge { color: #7c3aed; }
+  .chg-move { color: #b45309; }
+  .chg-prd_draft { color: #0369a1; }
+  .chg-detail {
+    font-size: 11px;
+    font-weight: 400;
+    color: #6b7280;
+  }
   .zb {
     width: 20px;
     height: 20px;
