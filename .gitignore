@@ -18,3 +18,5 @@ dist/
 .cursor/harness/QA_REPORT.md
 # 줌 디버그 trace(로컬 전용, 용량 큼 — GitHub 100MB 제한)
 plannode-zoom-trace*.json
+# PC 이전·클론 실수로 생긴 중첩 사본(저장소 루트와 동일 트리 — Git 추적 금지)
+Documents/
