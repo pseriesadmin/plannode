@@ -13,6 +13,15 @@ const REASON_NODE_OP = 'node_op';
 const FLUSH_DEBOUNCE_MS = 2_000;
 const MAX_BATCH_PER_FLUSH = 50;
 
+const PERSISTED_NODE_OP_ACTIONS: NodeChangeAction[] = [
+  'create',
+  'edit',
+  'delete',
+  'badge',
+  'move',
+  'prd_draft'
+];
+
 let pendingBatch: Array<{ projectId: string; entry: NodeChangeLogEntry }> = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -51,11 +60,12 @@ async function flushToDb(): Promise<void> {
       at: entry.at,
       nodeId: entry.nodeId,
       nodeName: entry.nodeName,
-      action: entry.action
+      action: entry.action,
+      ...(entry.detail != null ? { detail: entry.detail } : {})
     } as Record<string, unknown>
   })).filter((row) => {
-    const action = (row.payload as { action?: string }).action;
-    return action === 'create' || action === 'edit' || action === 'delete';
+    const action = (row.payload as { action?: string }).action as NodeChangeAction | undefined;
+    return action != null && PERSISTED_NODE_OP_ACTIONS.includes(action);
   });
 
   if (!rows.length) {
@@ -117,14 +127,15 @@ export async function fetchNodeChangeLogFromDb(
       const p = row.payload;
       if (!p || typeof p.nodeId !== 'string' || typeof p.action !== 'string') return null;
       const action = p.action as NodeChangeAction;
-      if (action !== 'create' && action !== 'edit' && action !== 'delete') return null;
+      if (!PERSISTED_NODE_OP_ACTIONS.includes(action)) return null;
       return {
         id: `db_${row.id}`,
         at: typeof p.at === 'string' && p.at ? p.at : row.occurred_at,
         author: typeof row.actor_email === 'string' ? row.actor_email : undefined,
         nodeId: p.nodeId,
         nodeName: typeof p.nodeName === 'string' ? p.nodeName : '',
-        action
+        action,
+        detail: typeof p.detail === 'string' ? p.detail : undefined
       };
     })
     .filter((x): x is NodeChangeLogEntry => x !== null);
@@ -149,6 +160,7 @@ function formatPwhSummaryReasonLabel(reason: string | null | undefined): string 
   if (r === 'idle_10min') return '10분 무편집 저장';
   if (r === 'persist') return '캔버스 저장';
   if (r === 'cloud_upload') return '클라우드 업로드';
+  if (r === 'project_create') return '프로젝트 생성';
   if (r === 'manual') return '수동 스냅샷';
   if (r === 'cloud_history') return '클라우드 병합 기록';
   if (r) return r;

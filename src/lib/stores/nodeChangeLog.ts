@@ -4,7 +4,7 @@
  */
 import { writable } from 'svelte/store';
 
-export type NodeChangeAction = 'create' | 'edit' | 'delete' | 'snapshot';
+export type NodeChangeAction = 'create' | 'edit' | 'delete' | 'snapshot' | 'badge' | 'move' | 'prd_draft';
 
 export interface NodeChangeLogEntry {
   id: string;
@@ -13,6 +13,8 @@ export interface NodeChangeLogEntry {
   nodeId: string;
   nodeName: string;
   action: NodeChangeAction;
+  /** 배지 요약·PRD 섹션 미리보기 등 보조 텍스트 */
+  detail?: string;
 }
 
 const KEY_PREFIX = 'plannode_node_change_log_v1_';
@@ -111,9 +113,8 @@ export function recordNodeDiffToChangeLog(
 
 function changeLogDedupeKey(entry: NodeChangeLogEntry): string {
   if (entry.action === 'snapshot') return `snap:${entry.id}`;
-  const t = Date.parse(entry.at);
-  const minute = Number.isFinite(t) ? Math.floor(t / 60_000) : 0;
-  return `op:${entry.nodeId}:${entry.action}:${minute}`;
+  // 분 단위 병합은 연속 편집 이력을 삭제함 — ISO 시각까지 키에 포함(db_/pwh_ 우선순위는 유지)
+  return `op:${entry.nodeId}:${entry.action}:${entry.at}`;
 }
 
 /** db_/pwh_ 행이 chg_ 로컬보다 우선(작성자 email 보존) */
